@@ -59,7 +59,7 @@ jobs:
   phone-preflight:
     name: Registered production phone read-only preflight
     needs: command-gate
-    runs-on: [self-hosted, Linux, X64, android-production]
+    runs-on: [self-hosted, Windows, X64, android-production]
     timeout-minutes: 5
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$RUNNER_TEMP/run_private_phone_preflight.py" \
+          python "$RUNNER_TEMP/run_private_phone_preflight.py" \
             --canonical-sha "$CANONICAL_SHA" \
             --output "$RUNNER_TEMP/phone-preflight.json"
 
@@ -98,7 +98,7 @@ jobs:
           {
             echo '## Production phone read-only preflight'
             echo "- Canonical SHA: ${CANONICAL_SHA}"
-            echo '- Runner labels: self-hosted, Linux, X64, android-production'
+            echo '- Runner labels: self-hosted, Windows, X64, android-production'
             echo "- Preflight outcome: ${{ steps.preflight.outcome }}"
             echo '- Device identifier recorded: false'
             echo '- Phone mutation performed: false'
