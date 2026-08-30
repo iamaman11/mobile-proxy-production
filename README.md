@@ -27,8 +27,8 @@ Only execution-boundary material belongs here:
 
 Phone deployment logic, release contracts, manifests, desired state, documentation and acceptance
 rules remain canonical in `iamaman11/mobile-proxy`. The preferred implementation is for this
-private caller to invoke a reusable workflow from the canonical public repository pinned to an
-immutable ref, or to execute a verified immutable release artifact produced there.
+private caller to invoke canonical public logic pinned to an immutable ref, or to execute a verified
+immutable release artifact produced there.
 
 ## Forbidden
 
@@ -41,5 +41,12 @@ immutable ref, or to execute a verified immutable release artifact produced ther
 
 ## Current state
 
-Bootstrap only. No production deployment workflow is enabled by this README. Production remains
-fail-closed until the canonical repository implements and verifies the split GitOps path.
+A read-only phone preflight caller is available through reserved Issue #1 using
+`/phone-preflight <40-hex-canonical-sha>`. The command gate requires that SHA to equal the current
+canonical public `main` before the private `android-production` runner can start. The runner then
+executes the canonical preflight script fetched by that immutable SHA and may emit only bounded
+non-secret evidence.
+
+The caller requires the private `ANDROID_PRODUCTION_SERIAL` binding and performs no install,
+restart, configuration change, deployment, rollback, or other phone mutation. No production
+mutation workflow is enabled. Vultr credentials and lifecycle remain forbidden in this repository.
