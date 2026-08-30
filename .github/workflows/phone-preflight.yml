@@ -66,21 +66,17 @@ jobs:
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
       - name: Fetch canonical immutable preflight logic
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --location \
-            --output "$RUNNER_TEMP/run_private_phone_preflight.py" \
-            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py"
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/iamaman11/mobile-proxy/$env:CANONICAL_SHA/scripts/run_private_phone_preflight.py" -OutFile "$env:RUNNER_TEMP\run_private_phone_preflight.py"
 
       - name: Run read-only phone preflight
         id: preflight
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          python "$RUNNER_TEMP/run_private_phone_preflight.py" \
-            --canonical-sha "$CANONICAL_SHA" \
-            --output "$RUNNER_TEMP/phone-preflight.json"
+          $ErrorActionPreference = 'Stop'
+          python "$env:RUNNER_TEMP\run_private_phone_preflight.py" --canonical-sha "$env:CANONICAL_SHA" --output "$env:RUNNER_TEMP\phone-preflight.json"
 
       - name: Upload bounded private evidence
         if: success()
@@ -93,14 +89,14 @@ jobs:
 
       - name: Record safe result
         if: always()
-        shell: bash
+        shell: pwsh
         run: |
-          {
-            echo '## Production phone read-only preflight'
-            echo "- Canonical SHA: ${CANONICAL_SHA}"
-            echo '- Runner labels: self-hosted, Windows, X64, android-production'
-            echo "- Preflight outcome: ${{ steps.preflight.outcome }}"
-            echo '- Device identifier recorded: false'
-            echo '- Phone mutation performed: false'
-            echo '- Vultr credentials requested: false'
-          } >> "$GITHUB_STEP_SUMMARY"
+          @(
+            '## Production phone read-only preflight'
+            "- Canonical SHA: $env:CANONICAL_SHA"
+            '- Runner labels: self-hosted, Windows, X64, android-production'
+            '- Preflight outcome: ${{ steps.preflight.outcome }}'
+            '- Device identifier recorded: false'
+            '- Phone mutation performed: false'
+            '- Vultr credentials requested: false'
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
