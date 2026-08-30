@@ -1,0 +1,106 @@
+name: Production phone read-only preflight
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-read-only-preflight
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate canonical preflight command
+    if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-preflight ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-preflight ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid phone preflight command")
+          requested_sha = match.group(1)
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "mobile-proxy-production-preflight",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              canonical_main = json.load(response)["sha"]
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+          PY
+
+  phone-preflight:
+    name: Registered production phone read-only preflight
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch canonical immutable preflight logic
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/run_private_phone_preflight.py" \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py"
+
+      - name: Run read-only phone preflight
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/run_private_phone_preflight.py" \
+            --canonical-sha "$CANONICAL_SHA" \
+            --output "$RUNNER_TEMP/phone-preflight.json"
+
+      - name: Upload bounded private evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-read-only-preflight-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-preflight.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Production phone read-only preflight'
+            echo "- Canonical SHA: ${CANONICAL_SHA}"
+            echo '- Runner labels: self-hosted, Linux, X64, android-production'
+            echo "- Preflight outcome: ${{ steps.preflight.outcome }}"
+            echo '- Device identifier recorded: false'
+            echo '- Phone mutation performed: false'
+            echo '- Vultr credentials requested: false'
+          } >> "$GITHUB_STEP_SUMMARY"
