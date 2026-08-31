@@ -1,0 +1,113 @@
+name: Production Android release signing offline proof
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-android-release-signing-offline-proof
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate pinned canonical offline-signing-proof command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/android-signing-proof ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PINNED_CANONICAL_SHA: 79fa8bc2c4977ab8ac029b11a92c7ef768c61311
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact owner command and pinned canonical SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/android-signing-proof ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid Android signing proof command")
+
+          requested_sha = match.group(1)
+          pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
+          if requested_sha != pinned_sha:
+              raise SystemExit("requested SHA is not the pinned canonical offline signing proof")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={pinned_sha}\n")
+          PY
+
+  offline-signing-proof:
+    name: Private Android release signing identity offline proof
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+    steps:
+      - name: Fetch exact canonical offline verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/verify_android_release_keystore.py" \
+            --output "${RUNNER_TEMP}/verify_android_release_keystore.py"
+
+      - name: Verify private release signing identity offline
+        id: signing
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python3 "${RUNNER_TEMP}/verify_android_release_keystore.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output "${RUNNER_TEMP}/android-signing-proof.json"
+
+      - name: Upload bounded private evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-signing-proof-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/android-signing-proof.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Production Android release signing offline proof
+          - Canonical verifier SHA: ${{ env.CANONICAL_SHA }}
+          - Runner labels: self-hosted, Linux, X64, android-production
+          - Verification outcome: ${{ steps.signing.outcome }}
+          - Phone access performed: false
+          - Phone mutation performed: false
+          - Production APK signed: false
+          - Signing key generated: false
+          - Signing material recorded: false
+          - Secret-derived value recorded: false
+          - Device identifier recorded: false
+          - Signer fingerprint recorded: false
+          - Provider credentials requested: false
+          EOF
