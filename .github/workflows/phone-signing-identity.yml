@@ -69,6 +69,69 @@ jobs:
             "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/verify_android_installed_signer.py" \
             --output "${RUNNER_TEMP}/verify_android_installed_signer.py"
 
+      - name: Resolve existing apksigner tooling read-only
+        id: tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if command -v apksigner >/dev/null 2>&1; then
+            echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          sdk_roots=()
+          if [[ -n "${ANDROID_SDK_ROOT:-}" ]]; then
+            sdk_roots+=("${ANDROID_SDK_ROOT}")
+          fi
+          if [[ -n "${ANDROID_HOME:-}" ]]; then
+            sdk_roots+=("${ANDROID_HOME}")
+          fi
+          sdk_roots+=("/opt/android-sdk" "/usr/local/lib/android/sdk")
+
+          adb_path="$(command -v adb || true)"
+          if [[ -n "${adb_path}" ]]; then
+            adb_dir="$(dirname "$(readlink -f "${adb_path}")")"
+            if [[ "$(basename "${adb_dir}")" == "platform-tools" ]]; then
+              sdk_roots+=("$(dirname "${adb_dir}")")
+            fi
+          fi
+
+          resolved=""
+          for root in "${sdk_roots[@]}"; do
+            [[ -d "${root}/build-tools" ]] || continue
+            resolved="$(find "${root}/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
+            [[ -n "${resolved}" ]] && break
+          done
+
+          if [[ -n "${resolved}" ]]; then
+            echo "$(dirname "${resolved}")" >> "$GITHUB_PATH"
+            echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          resolved_jar=""
+          for root in "${sdk_roots[@]}"; do
+            [[ -d "${root}/build-tools" ]] || continue
+            resolved_jar="$(find "${root}/build-tools" -mindepth 3 -maxdepth 3 -type f -path '*/lib/apksigner.jar' 2>/dev/null | sort -V | tail -n 1)"
+            [[ -n "${resolved_jar}" ]] && break
+          done
+
+          if [[ -z "${resolved_jar}" ]]; then
+            echo "apksigner is unavailable in PATH and registered Android SDK roots" >&2
+            exit 1
+          fi
+
+          cat > "${RUNNER_TEMP}/apksigner" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec java -jar "${APKSIGNER_JAR}" "$@"
+          SH
+          chmod 700 "${RUNNER_TEMP}/apksigner"
+          echo "APKSIGNER_JAR=${resolved_jar}" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+          echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Verify installed signer against recovered keystore certificate
         id: signer
         shell: bash
@@ -100,6 +163,7 @@ jobs:
           ## Production Android signing identity read-only verification
           - Canonical verifier SHA: ${{ env.CANONICAL_SHA }}
           - Runner labels: self-hosted, Linux, X64, android-production
+          - Tooling resolution outcome: ${{ steps.tooling.outcome }}
           - Verification outcome: ${{ steps.signer.outcome }}
           - Registered-device proof required: true
           - Device identifier recorded: false
