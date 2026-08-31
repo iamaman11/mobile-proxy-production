@@ -1,0 +1,111 @@
+name: Production Android signing identity read-only verification
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-read-only-signing-identity
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate pinned canonical signing-verifier command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-signing-identity ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PINNED_CANONICAL_SHA: 8fe7cd70e01260d9eb1946595805d713135b7ae7
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact owner command and pinned canonical SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-signing-identity ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid phone signing identity command")
+
+          requested_sha = match.group(1)
+          pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
+          if requested_sha != pinned_sha:
+              raise SystemExit("requested SHA is not the pinned canonical signing verifier")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={pinned_sha}\n")
+          PY
+
+  phone-signing-identity:
+    name: Registered production phone signing identity read-only verification
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+    steps:
+      - name: Fetch exact canonical read-only verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/verify_android_installed_signer.py" \
+            --output "${RUNNER_TEMP}/verify_android_installed_signer.py"
+
+      - name: Verify installed signer against recovered keystore certificate
+        id: signer
+        shell: bash
+        env:
+          ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          python3 "${RUNNER_TEMP}/verify_android_installed_signer.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output "${RUNNER_TEMP}/phone-signing-identity.json"
+
+      - name: Upload bounded private evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-signing-identity-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-signing-identity.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Production Android signing identity read-only verification
+          - Canonical verifier SHA: ${{ env.CANONICAL_SHA }}
+          - Runner labels: self-hosted, Linux, X64, android-production
+          - Verification outcome: ${{ steps.signer.outcome }}
+          - Registered-device proof required: true
+          - Device identifier recorded: false
+          - Signer fingerprint recorded: false
+          - Signing material recorded: false
+          - Signing operation performed: false
+          - Phone mutation performed: false
+          - Vultr credentials requested: false
+          EOF
