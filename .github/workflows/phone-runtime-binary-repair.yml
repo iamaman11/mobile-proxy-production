@@ -557,16 +557,19 @@ jobs:
                       pids.append(int(value))
               return sorted(set(pids))
 
-          before = matching_pids()
-          for pid in before:
-              script = f'''proc=/proc/{pid}
-              [ -r "$proc/cmdline" ] || exit 0
-              cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
-              case "$cmd" in
-                "{supervisor} --runtime-root {runtime_root} "*) kill -TERM {pid} ;;
-                *) exit 22 ;;
-              esac'''
+          def terminate_matching():
+              script = f'''for proc in /proc/[0-9]*; do
+                [ -r "$proc/cmdline" ] || continue
+                cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                case "$cmd" in
+                  "{supervisor} --runtime-root {runtime_root} "*) kill -TERM "${{proc#/proc/}}" 2>/dev/null || true ;;
+                esac
+              done'''
               root(script, timeout=20)
+
+          before = matching_pids()
+          if before:
+              terminate_matching()
 
           retire_deadline = time.monotonic() + 30
           remaining = set(before)
@@ -826,6 +829,16 @@ jobs:
                       pids.append(int(value))
               return sorted(set(pids))
 
+          def terminate_matching():
+              script = f'''for proc in /proc/[0-9]*; do
+                [ -r "$proc/cmdline" ] || continue
+                cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                case "$cmd" in
+                  "{supervisor} --runtime-root {runtime_root} "*) kill -TERM "${{proc#/proc/}}" 2>/dev/null || true ;;
+                esac
+              done'''
+              root(script, timeout=20)
+
           try:
               if not transaction_entered:
                   for key in stages:
@@ -943,15 +956,8 @@ jobs:
                               def bootstrap_restored():
                                   state['service_bootstrap_attempted'] = True
                                   active_before = matching_pids()
-                                  for pid in active_before:
-                                      script = f'''proc=/proc/{pid}
-                                      [ -r "$proc/cmdline" ] || exit 0
-                                      cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
-                                      case "$cmd" in
-                                        "{supervisor} --runtime-root {runtime_root} "*) kill -TERM {pid} ;;
-                                        *) exit 22 ;;
-                                      esac'''
-                                      root(script, timeout=20)
+                                  if active_before:
+                                      terminate_matching()
 
                                   retire_deadline = time.monotonic() + 30
                                   remaining = set(active_before)
