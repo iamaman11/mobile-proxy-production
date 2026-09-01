@@ -155,6 +155,122 @@ jobs:
             --canonical-sha "${CANONICAL_SHA}" \
             --output "${RUNNER_TEMP}/phone-preflight.json"
 
+      - name: Record bounded installed app and local health
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          package = "com.example.mobileproxy"
+          service = "com.example.mobileproxy/.CellularEgressService"
+          supervisor = "/data/adb/mobile-proxy-node/current/bin/runtime-supervisor"
+          runtime_root = "/data/adb/mobile-proxy-node/current"
+
+          def adb(*args, timeout=30):
+              try:
+                  return subprocess.run(
+                      ["adb", "-s", serial, *args],
+                      check=False,
+                      capture_output=True,
+                      text=True,
+                      timeout=timeout,
+                  )
+              except (OSError, subprocess.TimeoutExpired):
+                  return None
+
+          def root_ok(shell):
+              result = adb("shell", "su", "0", "sh", "-c", shell, timeout=20)
+              return result is not None and result.returncode == 0
+
+          pm = adb("shell", "pm", "path", package)
+          package_present = bool(
+              pm is not None
+              and pm.returncode == 0
+              and any(line.startswith("package:/") for line in pm.stdout.splitlines())
+          )
+
+          version_name = "unavailable"
+          version_code = "unavailable"
+          if package_present:
+              dump = adb("shell", "dumpsys", "package", package, timeout=60)
+              if dump is not None and dump.returncode == 0:
+                  codes = re.findall(r"^\s*versionCode=([0-9]+)\b", dump.stdout, re.MULTILINE)
+                  names = re.findall(r"^\s*versionName=([^\s]+)\s*$", dump.stdout, re.MULTILINE)
+                  if len(codes) == 1:
+                      version_code = codes[0]
+                  if len(names) == 1:
+                      version_name = names[0]
+
+          supervisor_running = root_ok(f'''for proc in /proc/[0-9]*; do
+            [ -r "$proc/cmdline" ] || continue
+            cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+            case "$cmd" in
+              "{supervisor} --runtime-root {runtime_root} "*) exit 0 ;;
+            esac
+          done
+          exit 1
+          ''')
+
+          services = adb("shell", "dumpsys", "activity", "services", package)
+          egress_service_running = bool(
+              services is not None and services.returncode == 0 and service in services.stdout
+          )
+
+          local_proxy_ports_ready = root_ok('''BB=""
+          for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do
+            [ -x "$candidate" ] && BB="$candidate" && break
+          done
+          [ -n "$BB" ] || exit 1
+          "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1
+          "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1
+          ''')
+          local_healthy = supervisor_running and egress_service_running and local_proxy_ports_ready
+
+          state = {
+              "installed_package_present": package_present,
+              "installed_version_name": version_name,
+              "installed_version_code": version_code,
+              "runtime_supervisor_running": supervisor_running,
+              "cellular_egress_service_running": egress_service_running,
+              "local_proxy_ports_ready": local_proxy_ports_ready,
+              "local_healthy": local_healthy,
+          }
+
+          evidence_path = Path(os.environ["RUNNER_TEMP"]) / "phone-preflight.json"
+          evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+          evidence["installed_app_state"] = state
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+          print(
+              "bounded app state: "
+              f"package_present={str(package_present).lower()} "
+              f"version_name={version_name} version_code={version_code} "
+              f"supervisor_running={str(supervisor_running).lower()} "
+              f"egress_service_running={str(egress_service_running).lower()} "
+              f"local_proxy_ports_ready={str(local_proxy_ports_ready).lower()} "
+              f"local_healthy={str(local_healthy).lower()} "
+              "raw_device_identifiers_recorded=false phone_mutation_performed=false"
+          )
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("## Bounded installed app state\n")
+              handle.write(f"- Package present: {str(package_present).lower()}\n")
+              handle.write(f"- Version: {version_name} / {version_code}\n")
+              handle.write(f"- Runtime supervisor running: {str(supervisor_running).lower()}\n")
+              handle.write(f"- Cellular egress service running: {str(egress_service_running).lower()}\n")
+              handle.write(f"- Local proxy ports ready: {str(local_proxy_ports_ready).lower()}\n")
+              handle.write(f"- Local healthy: {str(local_healthy).lower()}\n")
+              handle.write("- Raw device identifiers recorded: false\n")
+              handle.write("- Phone mutation performed: false\n")
+          PY
+
       - name: Upload bounded private evidence
         if: success()
         uses: actions/upload-artifact@v4
