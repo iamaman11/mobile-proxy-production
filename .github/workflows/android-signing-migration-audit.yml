@@ -20,22 +20,58 @@ jobs:
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
-      CANONICAL_SHA: 20702dda4df3b539cac4402503f7a107a20ef38b
       SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
       SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
       SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
     steps:
+      - name: Check out exact source migration private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_RUN_SHA }}
+          path: private-execution
+
+      - name: Load source-run Android migration execution binding
+        id: binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          path = Path('private-execution/.github/production/android-v0.1.4-migration-binding.json')
+          binding = json.loads(path.read_text(encoding='utf-8'))
+          if binding.get('format_version') != 1:
+              raise SystemExit('unsupported Android migration binding format')
+          if binding.get('binding_role') != 'private_execution_only':
+              raise SystemExit('Android migration audit binding role differs')
+          if binding.get('canonical_repository') != 'iamaman11/mobile-proxy':
+              raise SystemExit('Android migration audit canonical repository differs')
+          if binding.get('migration_tracker_issue') != 162 or binding.get('hardening_tracker_issue') != 179:
+              raise SystemExit('Android migration audit tracker binding differs')
+          if binding.get('final_release_authority') is not False:
+              raise SystemExit('private execution binding cannot grant final release authority')
+          canonical_sha = binding.get('canonical_sha')
+          if not isinstance(canonical_sha, str) or re.fullmatch(r'[0-9a-f]{40}', canonical_sha) is None:
+              raise SystemExit('Android migration audit binding canonical_sha is malformed')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={canonical_sha}\n')
+          PY
+
       - name: Post safe private execution checkpoint
         shell: bash
+        env:
+          CANONICAL_SHA: ${{ steps.binding.outputs.canonical_sha }}
         run: |
           set -euo pipefail
           gh issue comment 1 --repo "${GITHUB_REPOSITORY}" --body "ANDROID 0.1.4 SIGNING-GENERATION MIGRATION CHECKPOINT — run \`${SOURCE_RUN_ID}\`
 
           - private execution SHA: \`${SOURCE_RUN_SHA}\`
           - canonical public SHA: \`${CANONICAL_SHA}\`
+          - canonical SHA source: exact source-run private execution binding
           - migration workflow conclusion: \`${SOURCE_CONCLUSION}\`
           - command source: owner-only private Issue #1 gate
-          - migration authority: exact protected SHA + retained signed candidate
+          - migration authority: exact current protected SHA + retained signed candidate + same private execution revision
           - final public v0.1.4 tag required: false
           - signing secrets exposed to phone job: false
           - device identifier recorded: false
