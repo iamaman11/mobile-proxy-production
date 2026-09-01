@@ -1,0 +1,153 @@
+name: Production phone runtime failure diagnostic
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-runtime-failure-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner runtime failure diagnostic command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-runtime-failure-diagnostic ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-failure-diagnostic ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid phone runtime failure diagnostic command")
+          requested = match.group(1)
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={"Accept":"application/vnd.github+json","User-Agent":"mobile-proxy-production-runtime-failure-diagnostic"},
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              current = json.load(response)["sha"]
+          if requested != current:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested}\n")
+          PY
+
+  diagnostic:
+    name: Inspect bounded runtime failure state read-only
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Record bounded watchdog and supervisor failure state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, os, re, subprocess
+          from pathlib import Path
+
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          spec = importlib.util.spec_from_file_location("preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py")
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+          preflight.require_canonical_sha(os.environ["CANONICAL_SHA"])
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          def root_capture(shell):
+              result = subprocess.run(
+                  ["adb","-s",serial,"shell","su","0","sh","-c",shell],
+                  check=False, capture_output=True, text=True, timeout=20,
+              )
+              return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+          def root_ok(shell):
+              return root_capture(shell)[0] == 0
+
+          watchdog_script = "/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh"
+          watchdog_pid = "/data/adb/mobile-proxy-node/logs/runtime-watchdog.pid"
+          supervisor_log = "/data/adb/mobile-proxy-node/logs/runtime-supervisor.log"
+          boot_log = "/data/adb/mobile-proxy-node/logs/runtime-boot.log"
+
+          watchdog_running = root_ok(f'''test -f "{watchdog_pid}" || exit 1
+          pid="$(cat "{watchdog_pid}" 2>/dev/null || true)"
+          test -n "$pid" || exit 1
+          test -r "/proc/$pid/cmdline" || exit 1
+          tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "{watchdog_script}"
+          ''')
+
+          _, exit_lines, _ = root_capture(
+              f'tail -n 200 "{supervisor_log}" 2>/dev/null | grep "runtime_supervisor_exited code=" | tail -n 20 || true'
+          )
+          exit_codes = re.findall(r"runtime_supervisor_exited code=([0-9]+)", exit_lines)
+
+          # Only classify known-safe diagnostics; do not emit arbitrary runtime log content.
+          _, recent_log, _ = root_capture(f'tail -n 120 "{supervisor_log}" 2>/dev/null || true')
+          classifications = {
+              "config_error": bool(re.search(r"(config|configuration).*(error|invalid|failed)|failed to (read|load|parse).*config", recent_log, re.I)),
+              "permission_error": bool(re.search(r"permission denied|operation not permitted", recent_log, re.I)),
+              "missing_file_error": bool(re.search(r"no such file|not found", recent_log, re.I)),
+              "android_egress_deferred": "Android cellular egress provisioning deferred" in recent_log,
+              "ui_control_deferred": "local UI control provisioning deferred" in recent_log,
+              "panic_detected": bool(re.search(r"panicked at|thread .* panicked", recent_log, re.I)),
+          }
+
+          _, boot_recent, _ = root_capture(f'tail -n 40 "{boot_log}" 2>/dev/null || true')
+          boot_spawned = "runtime_watchdog_spawned" in boot_recent
+          boot_already_running = "runtime_watchdog_already_running" in boot_recent
+
+          state = {
+              "watchdog_pid_file_present": root_ok(f'test -f "{watchdog_pid}"'),
+              "watchdog_script_present": root_ok(f'test -f "{watchdog_script}"'),
+              "watchdog_running": watchdog_running,
+              "recent_supervisor_exit_count": len(exit_codes),
+              "recent_supervisor_last_exit_code": int(exit_codes[-1]) if exit_codes else None,
+              "boot_log_reports_watchdog_spawned": boot_spawned,
+              "boot_log_reports_watchdog_already_running": boot_already_running,
+              **classifications,
+              "raw_runtime_log_recorded": False,
+              "raw_device_identifier_recorded": False,
+              "phone_mutation_performed": False,
+          }
+          Path(os.environ["RUNNER_TEMP"], "phone-runtime-failure-diagnostic.json").write_text(
+              json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print("bounded runtime failure state: " + " ".join(f"{k}={v}" for k,v in state.items()))
+          PY
+
+      - name: Upload bounded diagnostic evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-runtime-failure-diagnostic-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-runtime-failure-diagnostic.json
+          if-no-files-found: error
+          retention-days: 30
