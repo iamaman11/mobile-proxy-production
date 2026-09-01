@@ -86,7 +86,6 @@ jobs:
           import os
           import re
           import subprocess
-          import sys
           import time
           from pathlib import Path
 
@@ -160,9 +159,12 @@ jobs:
           if len(codes) != 1 or len(names) != 1 or (codes[0], names[0]) != ("2", "1.1.0"):
               raise RuntimeError("installed Android baseline differs from approved recovery state")
 
-          if not root_ok(
-              f'test -f "{service_entrypoint}" && test -x "{supervisor}" && test -f "{config}"'
-          ):
+          bootstrap_ready = (
+              root_ok(f'test -f "{service_entrypoint}"')
+              and root_ok(f'test -x "{supervisor}"')
+              and root_ok(f'test -f "{config}"')
+          )
+          if not bootstrap_ready:
               raise RuntimeError("installed runtime bootstrap contract is unavailable")
 
           # Exact registered-device proof immediately before the one bounded mutation.
