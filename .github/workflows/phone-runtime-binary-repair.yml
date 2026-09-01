@@ -419,7 +419,8 @@ jobs:
           print('committed runtime binaries match exact build bundle')
           PY
 
-      - name: Bootstrap exact repaired runtime
+      - name: Bootstrap and prove exact repaired runtime process
+        id: activation
         shell: bash
         run: |
           set -euo pipefail
@@ -433,14 +434,100 @@ jobs:
           ], check=True, timeout=90)
           PY
           python3 - <<'PY'
-          import os, subprocess
-          subprocess.run([
-              'adb','-s',os.environ['ANDROID_PRODUCTION_SERIAL'],'shell','su','0','sh','-c',
-              'set -eu; sh /data/adb/mobile-proxy-node/current/service.sh'
-          ], check=True, timeout=60)
+          import json, os, subprocess, time
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          supervisor = '/data/adb/mobile-proxy-node/current/bin/runtime-supervisor'
+          runtime_root = '/data/adb/mobile-proxy-node/current'
+          service = '/data/adb/mobile-proxy-node/current/service.sh'
+          evidence_path = Path(os.environ['RUNNER_TEMP'], 'runtime-binary-activation-evidence.json')
+          build = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle' / 'build-evidence.json').read_text(encoding='utf-8')
+          )
+          expected_digest = build['files']['runtime-supervisor']['sha256']
+
+          def root(shell, *, timeout=30, check=True):
+              result = subprocess.run(
+                  ['adb','-s',serial,'shell','su','0','sh','-c',shell],
+                  check=False, capture_output=True, text=True, timeout=timeout,
+              )
+              if check and result.returncode != 0:
+                  raise RuntimeError('root_command_failed')
+              return result
+
+          def matching_pids():
+              script = f'''for proc in /proc/[0-9]*; do
+                [ -r "$proc/cmdline" ] || continue
+                cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                case "$cmd" in
+                  "{supervisor} --runtime-root {runtime_root} "*) printf '%s\\n' "${{proc#/proc/}}" ;;
+                esac
+              done'''
+              result = root(script, timeout=20)
+              pids = []
+              for line in result.stdout.splitlines():
+                  value = line.strip()
+                  if value.isdigit():
+                      pids.append(int(value))
+              return sorted(set(pids))
+
+          before = matching_pids()
+          for pid in before:
+              script = f'''proc=/proc/{pid}
+              [ -r "$proc/cmdline" ] || exit 0
+              cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+              case "$cmd" in
+                "{supervisor} --runtime-root {runtime_root} "*) kill -TERM {pid} ;;
+                *) exit 22 ;;
+              esac'''
+              root(script, timeout=20)
+
+          retire_deadline = time.monotonic() + 30
+          remaining = set(before)
+          while remaining and time.monotonic() < retire_deadline:
+              time.sleep(1)
+              remaining = set(before).intersection(matching_pids())
+          if remaining:
+              raise SystemExit('pre-repair runtime-supervisor process did not retire')
+
+          root(f'set -eu; sh "{service}"', timeout=60)
+
+          start_deadline = time.monotonic() + 30
+          after = matching_pids()
+          while len(after) != 1 and time.monotonic() < start_deadline:
+              time.sleep(1)
+              after = matching_pids()
+          if len(after) != 1:
+              raise SystemExit('exactly one repaired runtime-supervisor process was not established')
+          if set(before).intersection(after):
+              raise SystemExit('pre-repair runtime-supervisor process survived activation')
+
+          active_digest = root(
+              f'sha256sum "/proc/{after[0]}/exe"', timeout=20
+          ).stdout.split()
+          if not active_digest or active_digest[0] != expected_digest:
+              raise SystemExit('active runtime-supervisor executable digest differs from exact committed build')
+
+          evidence = {
+              'format_version': 2,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'prior_supervisor_count': len(before),
+              'prior_supervisor_retired': True,
+              'active_supervisor_count': len(after),
+              'active_supervisor_exact_executable': True,
+              'post_replacement_activation_proven': True,
+              'raw_process_identifiers_recorded': False,
+              'apk_mutation_performed': False,
+              'config_mutation_performed': False,
+              'phone_reboot_performed': False,
+          }
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('exact repaired runtime process activation proven')
           PY
 
-      - name: Verify full local health, exact binaries, and unchanged APK
+      - name: Verify full local health, exact active process, exact binaries, and unchanged APK
         id: health
         shell: bash
         run: |
@@ -456,6 +543,10 @@ jobs:
           egress_service = 'com.example.mobileproxy/.CellularEgressService'
           watchdog_script = '/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh'
           watchdog_pid = '/data/adb/mobile-proxy-node/logs/runtime-watchdog.pid'
+          build_evidence = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle' / 'build-evidence.json').read_text(encoding='utf-8')
+          )
+          expected_supervisor_digest = build_evidence['files']['runtime-supervisor']['sha256']
 
           def adb(*args, timeout=30):
               return subprocess.run(
@@ -467,13 +558,15 @@ jobs:
               except (OSError, subprocess.TimeoutExpired):
                   return False
           def state():
-              supervisor_running = root_ok(f'''for proc in /proc/[0-9]*; do [ -r "$proc/cmdline" ] || continue; cmd="$(tr '\\000' ' ' < "$proc/cmdline")"; case "$cmd" in "{supervisor} --runtime-root {runtime_root} "*) exit 0 ;; esac; done; exit 1''')
+              supervisor_running = root_ok(f'''count=0; for proc in /proc/[0-9]*; do [ -r "$proc/cmdline" ] || continue; cmd="$(tr '\\000' ' ' < "$proc/cmdline")"; case "$cmd" in "{supervisor} --runtime-root {runtime_root} "*) count=$((count+1)) ;; esac; done; [ "$count" -eq 1 ]''')
+              supervisor_exact = root_ok(f'''count=0; for proc in /proc/[0-9]*; do [ -r "$proc/cmdline" ] || continue; cmd="$(tr '\\000' ' ' < "$proc/cmdline")"; case "$cmd" in "{supervisor} --runtime-root {runtime_root} "*) count=$((count+1)); digest="$(sha256sum "$proc/exe" 2>/dev/null)" || exit 1; set -- $digest; [ "$1" = "{expected_supervisor_digest}" ] || exit 1 ;; esac; done; [ "$count" -eq 1 ]''')
               egress = adb('shell','dumpsys','activity','services',package)
               egress_running = egress.returncode == 0 and egress_service in egress.stdout
               ports = root_ok('''BB=""; for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do [ -x "$candidate" ] && BB="$candidate" && break; done; [ -n "$BB" ] || exit 1; "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1; "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1''')
               watchdog = root_ok(f'''test -f "{watchdog_pid}" || exit 1; pid="$(cat "{watchdog_pid}" 2>/dev/null || true)"; test -n "$pid" || exit 1; test -r "/proc/$pid/cmdline" || exit 1; tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "{watchdog_script}"''')
               return {
                   'runtime_supervisor_running': supervisor_running,
+                  'runtime_supervisor_exact_executable': supervisor_exact,
                   'cellular_egress_service_running': egress_running,
                   'local_proxy_ports_ready': ports,
                   'runtime_watchdog_running': watchdog,
@@ -490,9 +583,6 @@ jobs:
           names = re.findall(r'^\s*versionName=([^\s]+)\s*$', package_result.stdout, re.MULTILINE)
           apk_unchanged = package_result.returncode == 0 and codes == ['2'] and names == ['1.1.0']
 
-          build_evidence = json.loads(
-              (Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle' / 'build-evidence.json').read_text(encoding='utf-8')
-          )
           installed_digests = json.loads(
               Path(os.environ['RUNNER_TEMP'],'committed-runtime-digests.json').read_text(encoding='utf-8')
           )
@@ -500,8 +590,18 @@ jobs:
               installed_digests.get(name) == build_evidence['files'][name]['sha256']
               for name in ('runtime-supervisor','host-daemon','sing-box')
           )
+          activation_path = Path(os.environ['RUNNER_TEMP'], 'runtime-binary-activation-evidence.json')
+          activation = json.loads(activation_path.read_text(encoding='utf-8')) if activation_path.is_file() else {}
+          activation_proven = bool(
+              activation.get('canonical_sha') == os.environ['CANONICAL_SHA']
+              and activation.get('private_execution_sha') == os.environ['GITHUB_SHA']
+              and activation.get('prior_supervisor_retired') is True
+              and activation.get('active_supervisor_count') == 1
+              and activation.get('active_supervisor_exact_executable') is True
+              and activation.get('post_replacement_activation_proven') is True
+          )
 
-          accepted = all(current.values()) and apk_unchanged and digests_match
+          accepted = all(current.values()) and apk_unchanged and digests_match and activation_proven
           current.update({
               'format_version': 2,
               'canonical_sha': os.environ['CANONICAL_SHA'],
@@ -512,6 +612,7 @@ jobs:
               'installed_apk_unchanged': apk_unchanged,
               'runtime_binaries_replaced': True,
               'installed_runtime_binary_digests_match_build': digests_match,
+              'post_replacement_activation_proven': activation_proven,
               'phone_mutation_performed': True,
               'apk_mutation_performed': False,
               'config_mutation_performed': False,
@@ -745,6 +846,7 @@ jobs:
         with:
           name: runtime-binary-repair-evidence-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/runtime-binary-activation-evidence.json
             ${{ runner.temp }}/runtime-binary-repair-evidence.json
             ${{ runner.temp }}/runtime-binary-repair-rollback-evidence.json
             ${{ runner.temp }}/committed-runtime-digests.json
@@ -785,6 +887,8 @@ jobs:
               '- installed APK baseline required: `1.1.0/2`',
               '- runtime binaries targeted: `runtime-supervisor`, `host-daemon`, `sing-box`',
               f"- committed exact runtime binary digests verified: `{repair.get('installed_runtime_binary_digests_match_build')}`",
+              f"- post-replacement process activation proven: `{repair.get('post_replacement_activation_proven')}`",
+              f"- active runtime supervisor exact executable: `{repair.get('runtime_supervisor_exact_executable')}`",
               f"- runtime supervisor running: `{repair.get('runtime_supervisor_running')}`",
               f"- cellular egress service running: `{repair.get('cellular_egress_service_running')}`",
               f"- local proxy ports ready: `{repair.get('local_proxy_ports_ready')}`",
