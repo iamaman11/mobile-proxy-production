@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      PINNED_CANONICAL_SHA: fcec49634b86be8c34f387e4166eb3d0cb371af6
+      PINNED_CANONICAL_SHA: 20702dda4df3b539cac4402503f7a107a20ef38b
       MIGRATION_VERSION: 0.1.4
       COMMAND: ${{ github.event.comment.body }}
       GH_TOKEN: ${{ github.token }}
