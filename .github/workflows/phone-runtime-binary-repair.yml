@@ -215,11 +215,87 @@ jobs:
           print('runtime repair budget initialized: replacement must begin within 15 minutes; >=30 minutes remain for post-replace verification/rollback')
           PY
 
-      - name: Download exact runtime bundle from this run
+      - name: Download exact runtime bundle from this run attempt 1
+        id: bundle-download-1
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: exact-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/runtime-bundle
+
+      - name: Reset runtime bundle before bounded retry 2
+        if: steps.bundle-download-1.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/runtime-bundle"
+          sleep 1
+
+      - name: Download exact runtime bundle from this run attempt 2
+        id: bundle-download-2
+        if: steps.bundle-download-1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: exact-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/runtime-bundle
+
+      - name: Reset runtime bundle before bounded retry 3
+        if: steps.bundle-download-1.outcome == 'failure' && steps.bundle-download-2.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/runtime-bundle"
+          sleep 2
+
+      - name: Download exact runtime bundle from this run attempt 3
+        id: bundle-download-3
+        if: steps.bundle-download-1.outcome == 'failure' && steps.bundle-download-2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: exact-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/runtime-bundle
+
+      - name: Require exact same-run runtime bundle before phone access
+        id: pre-phone-artifact
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle'
+          required = (
+              root / 'build-evidence.json',
+              root / 'bin' / 'runtime-supervisor',
+              root / 'bin' / 'host-daemon',
+              root / 'bin' / 'sing-box',
+          )
+          accepted = all(path.is_file() and path.stat().st_size > 0 for path in required)
+          state = {
+              'format_version': 1,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'same_run_id': int(os.environ['GITHUB_RUN_ID']),
+              'artifact_download_accepted': accepted,
+              'phone_access_started': False,
+              'pre_phone_failure_proven': not accepted,
+              'apk_mutation_performed': False,
+              'config_mutation_performed': False,
+              'phone_reboot_performed': False,
+              'provider_credentials_requested': False,
+              'raw_device_identifier_recorded': False,
+          }
+          Path(os.environ['RUNNER_TEMP'], 'runtime-binary-pre-phone-evidence.json').write_text(
+              json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          if not accepted:
+              raise SystemExit('exact same-run runtime artifact unavailable after bounded download attempts')
+          print('exact same-run runtime artifact present before phone access')
+          PY
 
       - name: Fetch exact canonical registered-device preflight
         shell: bash
@@ -229,6 +305,23 @@ jobs:
             --connect-timeout 10 --max-time 60 \
             "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
             --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Mark conservative phone-access boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP'], 'runtime-binary-pre-phone-evidence.json')
+          state = json.loads(path.read_text(encoding='utf-8'))
+          if state.get('artifact_download_accepted') is not True:
+              raise SystemExit('phone access boundary refused without exact same-run artifact')
+          state['phone_access_started'] = True
+          state['pre_phone_failure_proven'] = False
+          path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('phone access boundary marked; subsequent steps may perform registered-device reads/staging')
+          PY
 
       - name: Verify exact bundle and old installed APK baseline read-only
         shell: bash
@@ -1081,6 +1174,7 @@ jobs:
         with:
           name: runtime-binary-repair-evidence-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/runtime-binary-pre-phone-evidence.json
             ${{ runner.temp }}/runtime-binary-activation-evidence.json
             ${{ runner.temp }}/runtime-binary-repair-evidence.json
             ${{ runner.temp }}/runtime-binary-repair-rollback-evidence.json
@@ -1108,10 +1202,23 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ['RUNNER_TEMP'])
+          pre_phone_path = root / 'runtime-binary-pre-phone-evidence.json'
           repair_path = root / 'runtime-binary-repair-evidence.json'
           rollback_path = root / 'runtime-binary-repair-rollback-evidence.json'
+          pre_phone = json.loads(pre_phone_path.read_text(encoding='utf-8')) if pre_phone_path.is_file() else {}
           repair = json.loads(repair_path.read_text(encoding='utf-8')) if repair_path.is_file() else {}
           rollback = json.loads(rollback_path.read_text(encoding='utf-8')) if rollback_path.is_file() else {}
+
+          replacement_transaction_entered = rollback.get('replacement_transaction_entered')
+          mutation_boundary_crossed = rollback.get('mutation_boundary_crossed')
+          pre_mutation_failure_proven = rollback.get('pre_mutation_failure_proven')
+          rollback_required = rollback.get('rollback_required', False)
+          if not rollback and not repair and pre_phone.get('phone_access_started') is False:
+              replacement_transaction_entered = False
+              mutation_boundary_crossed = False
+              pre_mutation_failure_proven = True
+              rollback_required = False
+
           body = '\n'.join([
               f"EXACT RUNTIME BINARY REPAIR — run `{os.environ['RUN_ID']}`",
               '',
@@ -1122,6 +1229,7 @@ jobs:
               f"- rollback step outcome: `{os.environ.get('ROLLBACK_OUTCOME','')}`",
               '- installed APK baseline required: `1.1.0/2`',
               '- runtime binaries targeted: `runtime-supervisor`, `host-daemon`, `sing-box`',
+              f"- pre-phone same-run artifact accepted: `{pre_phone.get('artifact_download_accepted')}`",
               f"- committed exact runtime binary digests verified: `{repair.get('installed_runtime_binary_digests_match_build')}`",
               f"- post-replacement process activation proven: `{repair.get('post_replacement_activation_proven')}`",
               f"- active runtime supervisor exact executable: `{repair.get('runtime_supervisor_exact_executable')}`",
@@ -1130,10 +1238,10 @@ jobs:
               f"- local proxy ports ready: `{repair.get('local_proxy_ports_ready')}`",
               f"- runtime watchdog running: `{repair.get('runtime_watchdog_running')}`",
               f"- repaired baseline accepted: `{repair.get('accepted')}`",
-              f"- replacement transaction entered: `{rollback.get('replacement_transaction_entered')}`",
-              f"- replacement mutation boundary crossed: `{rollback.get('mutation_boundary_crossed')}`",
-              f"- pre-mutation failure proven: `{rollback.get('pre_mutation_failure_proven')}`",
-              f"- rollback required: `{rollback.get('rollback_required', False)}`",
+              f"- replacement transaction entered: `{replacement_transaction_entered}`",
+              f"- replacement mutation boundary crossed: `{mutation_boundary_crossed}`",
+              f"- pre-mutation failure proven: `{pre_mutation_failure_proven}`",
+              f"- rollback required: `{rollback_required}`",
               f"- rollback restored active supervisor exact executable: `{rollback.get('restored_supervisor_exact_executable')}`",
               f"- rollback exact bytes accepted: `{rollback.get('rollback_accepted')}`",
               '- APK mutation performed: `False`',
