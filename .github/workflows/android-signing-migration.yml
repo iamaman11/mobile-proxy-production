@@ -8,10 +8,6 @@ permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: production-phone-global-mutation
-  cancel-in-progress: false
-
 jobs:
   command-gate:
     name: Bind migration to execution binding and proved retained build
@@ -260,6 +256,10 @@ jobs:
     needs:
       - command-gate
       - prepare-tools
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 20
     env:

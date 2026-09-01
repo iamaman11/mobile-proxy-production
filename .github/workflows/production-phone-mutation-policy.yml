@@ -29,11 +29,12 @@ jobs:
           workflows = Path('.github/workflows')
           required_group = 'production-phone-global-mutation'
 
-          mutators = {
-              'android-signing-migration.yml',
-              'phone-runtime-recovery.yml',
-              'phone-runtime-binary-repair.yml',
+          mutation_jobs = {
+              'android-signing-migration.yml': 'migrate-phone',
+              'phone-runtime-recovery.yml': 'recover-runtime',
+              'phone-runtime-binary-repair.yml': 'repair',
           }
+          mutators = set(mutation_jobs)
           read_only_phone = {
               'phone-preflight.yml',
               'phone-post-migration-diagnostic.yml',
@@ -66,12 +67,38 @@ jobs:
                   + ', '.join(unknown)
               )
 
-          for name in sorted(mutators):
+          expected_lock = (
+              '    concurrency:\n'
+              f'      group: {required_group}\n'
+              '      cancel-in-progress: false\n'
+              '      queue: max\n'
+          )
+
+          for name, job_id in sorted(mutation_jobs.items()):
               text = contents[name]
-              if f'group: {required_group}' not in text:
-                  raise SystemExit(f'{name}: production phone mutator does not use {required_group}')
-              if 'cancel-in-progress: false' not in text:
-                  raise SystemExit(f'{name}: production phone mutator must use cancel-in-progress: false')
+              pre_jobs = text.split('\njobs:\n', 1)[0]
+              if required_group in pre_jobs:
+                  raise SystemExit(
+                      f'{name}: shared production mutation lock must not be workflow-level; '
+                      'issue_comment fan-out can cancel a legitimate pending workflow before command qualification'
+                  )
+              if text.count(f'group: {required_group}') != 1:
+                  raise SystemExit(f'{name}: global mutation group must appear exactly once on the exact mutation job')
+
+              job = re.search(
+                  rf'(?ms)^  {re.escape(job_id)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)',
+                  text,
+              )
+              if job is None:
+                  raise SystemExit(f'{name}: classified mutation job {job_id} is missing')
+              body = job.group('body')
+              if expected_lock not in body:
+                  raise SystemExit(
+                      f'{name}: mutation job {job_id} must use {required_group}, '
+                      'cancel-in-progress: false, and queue: max at job level'
+                  )
+              if 'runs-on: [self-hosted, Linux, X64, android-production]' not in body:
+                  raise SystemExit(f'{name}: classified mutation job {job_id} is not the exact production-phone job')
 
           # Read-only phone workflows intentionally do not contend for the mutation lock.
           # Reject common write primitives so a future behavioral change cannot silently
@@ -100,4 +127,6 @@ jobs:
           print('mutators=' + ','.join(sorted(mutators)))
           print('read_only_phone=' + ','.join(sorted(read_only_phone)))
           print('global_mutation_group=' + required_group)
+          print('global_mutation_lock_scope=exact-self-hosted-mutation-jobs')
+          print('global_mutation_pending_queue=max')
           PY

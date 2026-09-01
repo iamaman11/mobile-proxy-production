@@ -8,10 +8,6 @@ permissions:
   contents: read
   issues: write
 
-concurrency:
-  group: production-phone-global-mutation
-  cancel-in-progress: false
-
 jobs:
   command-gate:
     name: Validate exact owner runtime binary repair authority
@@ -194,6 +190,10 @@ jobs:
   repair:
     name: Replace only source-bound runtime binaries and prove local health
     needs: [command-gate, build]
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 45
     env:

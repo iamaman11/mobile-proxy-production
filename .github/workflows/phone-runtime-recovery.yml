@@ -7,10 +7,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: production-phone-global-mutation
-  cancel-in-progress: false
-
 jobs:
   command-gate:
     name: Validate exact owner runtime recovery command
@@ -61,6 +57,10 @@ jobs:
   recover-runtime:
     name: Recover existing production runtime without APK mutation
     needs: command-gate
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 5
     env:
