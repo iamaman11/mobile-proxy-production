@@ -1,0 +1,146 @@
+name: Runtime reconstruction readiness
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pending-enrollment-gate:
+    name: Validate reconstruction authority and refuse pending enrollment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+
+      - name: Validate exact authority and fail closed before enrollment inputs
+        shell: bash
+        env:
+          PRIVATE_REPOSITORY: ${{ github.repository }}
+          PRIVATE_SHA: ${{ github.sha }}
+          PRIVATE_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          private_repository = os.environ["PRIVATE_REPOSITORY"]
+          private_sha = os.environ["PRIVATE_SHA"]
+          private_token = os.environ["PRIVATE_TOKEN"]
+          binding_path = Path(
+              "private-execution/.github/production/runtime-reconstruction-binding.json"
+          )
+          binding = json.loads(binding_path.read_text(encoding="utf-8"))
+
+          expected = {
+              "format_version": 1,
+              "binding_role": "private_execution_only",
+              "mode": "config_reconstruction_reauthorization",
+              "enrollment_status": "pending",
+              "canonical_repository": "iamaman11/mobile-proxy",
+              "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
+              "quality_required": True,
+              "hardening_tracker_issue": 179,
+              "migration_tracker_issue": 162,
+              "application_id": "com.example.mobileproxy",
+              "required_installed_version_name": "1.1.0",
+              "required_installed_version_code": 2,
+              "final_release_authority": False,
+              "phone_execution_authority": False,
+              "provider_credentials_allowed": False,
+              "tunnel_owner": "first_party_reverse_tunnel",
+              "manifest_authority": "new_reauthorized_baseline",
+              "raw_device_identifier_in_binding": False,
+          }
+          for key, value in expected.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f"runtime reconstruction pending binding mismatch: {key}")
+
+          fingerprint = binding.get("manifest_fingerprint")
+          if fingerprint != {
+              "algorithm": "sha256",
+              "normalized_json_profile": "strict-sorted-compact-utf8-v1",
+              "sha256": None,
+          }:
+              raise SystemExit("pending runtime reconstruction fingerprint state is invalid")
+
+          source = binding.get("manifest_source")
+          if source != {
+              "kind": "github_actions_secret",
+              "secret_name": "ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON",
+          }:
+              raise SystemExit("runtime reconstruction manifest source contract mismatch")
+
+          public_headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "mobile-proxy-production-runtime-reconstruction-readiness",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          private_headers = dict(public_headers)
+          private_headers["Authorization"] = f"Bearer {private_token}"
+
+          def get_json(url, headers, label):
+              last = None
+              for attempt, delay in enumerate((0, 1, 2), start=1):
+                  if delay:
+                      time.sleep(delay)
+                  request = urllib.request.Request(url, headers=headers)
+                  try:
+                      with urllib.request.urlopen(request, timeout=15) as response:
+                          return json.load(response)
+                  except (urllib.error.URLError, TimeoutError) as error:
+                      last = error
+                      if attempt == 3:
+                          break
+              raise SystemExit(f"{label} unavailable after bounded retries") from last
+
+          current_private = get_json(
+              f"https://api.github.com/repos/{private_repository}/commits/main",
+              private_headers,
+              "private main authority",
+          ).get("sha")
+          if current_private != private_sha:
+              raise SystemExit("readiness must execute from exact current private main")
+
+          canonical_sha = binding["canonical_sha"]
+          current_public = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              public_headers,
+              "public main authority",
+          ).get("sha")
+          if current_public != canonical_sha:
+              raise SystemExit("reconstruction binding canonical SHA is not current public main")
+
+          runs = get_json(
+              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={canonical_sha}&event=push&per_page=100",
+              public_headers,
+              "public Quality authority",
+          ).get("workflow_runs", [])
+          accepted_quality = any(
+              run.get("name") == "Quality"
+              and run.get("head_branch") == "main"
+              and run.get("head_sha") == canonical_sha
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+              for run in runs
+          )
+          if not accepted_quality:
+              raise SystemExit("exact current canonical SHA has no successful main Quality run")
+
+          if binding.get("enrollment_status") != "pending":
+              raise SystemExit("pending readiness skeleton refuses non-pending enrollment state")
+
+          raise SystemExit(
+              "runtime reconstruction readiness is fail-closed: production manifest enrollment is pending; no manifest/runtime secret access or config rendering is authorized"
+          )
+          PY
