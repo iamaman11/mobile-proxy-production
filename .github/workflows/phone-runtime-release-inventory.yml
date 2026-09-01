@@ -1,0 +1,157 @@
+name: Production phone runtime release inventory
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  command-gate:
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-runtime-release-inventory ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          match = re.fullmatch(r"/phone-runtime-release-inventory ([0-9a-f]{40})", os.environ.get("COMMAND", "").strip())
+          if match is None:
+              raise SystemExit("invalid command")
+          requested = match.group(1)
+          req = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={"Accept":"application/vnd.github+json","User-Agent":"mobile-proxy-production-runtime-release-inventory"},
+          )
+          with urllib.request.urlopen(req, timeout=10) as response:
+              current = json.load(response)["sha"]
+          if requested != current:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested}\n")
+          PY
+
+  inventory:
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-all-errors --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Record bounded immutable release inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, os, re, subprocess
+          from pathlib import Path
+
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          canonical_sha = os.environ["CANONICAL_SHA"]
+          spec = importlib.util.spec_from_file_location("preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py")
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+          preflight.require_canonical_sha(canonical_sha)
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          def root_capture(shell):
+              result = subprocess.run(
+                  ["adb","-s",serial,"shell","su","0","sh","-c",shell],
+                  check=False, capture_output=True, text=True, timeout=30,
+              )
+              if result.returncode != 0:
+                  raise RuntimeError("read-only runtime release inventory probe failed")
+              return result.stdout.strip()
+
+          # Only release IDs and public Git SHAs are emitted. No config contents are read.
+          raw = root_capture(r'''
+          ROOT=/data/adb/mobile-proxy-node
+          current="$(readlink "$ROOT/current" 2>/dev/null || true)"
+          printf 'CURRENT|%s\n' "${current##*/}"
+          count=0
+          for dir in "$ROOT"/releases/*; do
+            [ -d "$dir" ] || continue
+            [ "$count" -lt 20 ] || break
+            rid="${dir##*/}"
+            sha=''
+            if [ -f "$dir/release-metadata.json" ]; then
+              sha="$(sed -n 's/.*"git_sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]*\)".*/\1/p' "$dir/release-metadata.json" | head -n1)"
+            fi
+            support=false
+            grep -a -F -q 'first_party_android_egress' "$dir/bin/runtime-supervisor" 2>/dev/null && support=true
+            service_x=false; [ -x "$dir/service.sh" ] && service_x=true
+            supervisor_x=false; [ -x "$dir/bin/runtime-supervisor" ] && supervisor_x=true
+            host_x=false; [ -x "$dir/bin/host-daemon" ] && host_x=true
+            sing_x=false; [ -x "$dir/bin/sing-box" ] && sing_x=true
+            integrity=false; [ -f "$dir/integrity.json" ] && integrity=true
+            printf 'REL|%s|%s|%s|%s|%s|%s|%s|%s\n' "$rid" "$sha" "$support" "$service_x" "$supervisor_x" "$host_x" "$sing_x" "$integrity"
+            count=$((count + 1))
+          done
+          ''')
+
+          current_id = None
+          releases = []
+          id_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+          sha_re = re.compile(r"^[0-9a-f]{40}$")
+          for line in raw.splitlines():
+              parts = line.split("|")
+              if parts[0] == "CURRENT" and len(parts) == 2:
+                  current_id = parts[1] if id_re.fullmatch(parts[1]) else None
+              elif parts[0] == "REL" and len(parts) == 9 and id_re.fullmatch(parts[1]):
+                  sha = parts[2].lower()
+                  releases.append({
+                      "release_id": parts[1],
+                      "git_sha": sha if sha_re.fullmatch(sha) else None,
+                      "supports_first_party_android_egress": parts[3] == "true",
+                      "service_executable": parts[4] == "true",
+                      "runtime_supervisor_executable": parts[5] == "true",
+                      "host_daemon_executable": parts[6] == "true",
+                      "sing_box_executable": parts[7] == "true",
+                      "integrity_manifest_present": parts[8] == "true",
+                  })
+
+          report = {
+              "format_version": 1,
+              "canonical_sha": canonical_sha,
+              "current_release_id": current_id,
+              "release_count": len(releases),
+              "releases": releases,
+              "raw_config_recorded": False,
+              "raw_device_identifier_recorded": False,
+              "phone_mutation_performed": False,
+          }
+          Path(os.environ["RUNNER_TEMP"], "phone-runtime-release-inventory.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print("bounded runtime release inventory: " + json.dumps(report, sort_keys=True))
+          PY
+
+      - name: Upload bounded inventory evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-runtime-release-inventory-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-runtime-release-inventory.json
+          if-no-files-found: error
+          retention-days: 30
