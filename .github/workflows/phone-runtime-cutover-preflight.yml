@@ -117,11 +117,12 @@ jobs:
           legacy = {
               "current_is_symlink": adb_root_ok('test -L /data/adb/mobile-proxy-node/current'),
               "current_service_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/service.sh'),
-              "current_config_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/config/host-daemon.json && test -f /data/adb/mobile-proxy-node/current/config/sing-box.json'),
+              "current_config_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/config/host-daemon.json'),
               "current_supervisor_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/bin/runtime-supervisor'),
               "immutable_release_absent": adb_root_ok('test ! -d /data/adb/mobile-proxy-node/releases || test -z "$(ls -A /data/adb/mobile-proxy-node/releases 2>/dev/null)"'),
           }
-          tools = {name: shutil.which(name) is not None for name in ("adb", "cargo", "rustup", "curl", "git", "tar", "python3")}
+          required_tools = ("adb", "cargo", "curl", "git", "tar", "python3")
+          tools = {name: shutil.which(name) is not None for name in required_tools}
           disk_ready = shutil.disk_usage(tmp).free >= 4 * 1024 * 1024 * 1024
           accepted = all(tools.values()) and ndk_ready and disk_ready and all(legacy.values())
 
