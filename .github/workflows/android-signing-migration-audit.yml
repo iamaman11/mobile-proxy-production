@@ -1,0 +1,41 @@
+name: Production Android signing migration audit checkpoint
+
+on:
+  workflow_run:
+    workflows:
+      - Production Android v0.1.4 signing-lineage migration
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    name: Record bounded migration run checkpoint
+    if: >-
+      github.event.workflow_run.event == 'issue_comment' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANONICAL_SHA: a6735b3b64958699b50acc619e770d80f4bdfbc1
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    steps:
+      - name: Post safe private execution checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh issue comment 1 --repo "${GITHUB_REPOSITORY}" --body "ANDROID V0.1.4 SIGNING-MIGRATION CHECKPOINT — run \`${SOURCE_RUN_ID}\`
+
+          - private execution SHA: \`${SOURCE_RUN_SHA}\`
+          - canonical public SHA: \`${CANONICAL_SHA}\`
+          - migration workflow conclusion: \`${SOURCE_CONCLUSION}\`
+          - command source: owner-only private Issue #1 gate
+          - signing secrets exposed to phone job: false
+          - device identifier recorded: false
+          - signer fingerprint recorded: false
+          - provider credentials requested: false"

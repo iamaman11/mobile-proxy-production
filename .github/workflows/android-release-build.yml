@@ -187,3 +187,35 @@ jobs:
           - Device identifier recorded: false
           - Provider credentials requested: false
           EOF
+
+  report:
+    name: Record bounded signed-candidate run checkpoint
+    needs:
+      - command-gate
+      - build-sign
+    if: always() && needs.command-gate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      BUILD_RESULT: ${{ needs.build-sign.result }}
+    steps:
+      - name: Post safe private execution checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh issue comment 1 --repo "${GITHUB_REPOSITORY}" --body "ANDROID V0.1.4 SIGNED-CANDIDATE CHECKPOINT — run \`${GITHUB_RUN_ID}\`
+
+          - private execution SHA: \`${GITHUB_SHA}\`
+          - canonical public SHA: \`${CANONICAL_SHA}\`
+          - signed-candidate build result: \`${BUILD_RESULT}\`
+          - expected package/version: \`com.example.mobileproxy\` / \`0.1.4\` / \`1004\`
+          - phone runner used: false
+          - phone mutation performed: false
+          - signing material recorded: false
+          - signer fingerprint recorded: false
+          - device identifier recorded: false"
