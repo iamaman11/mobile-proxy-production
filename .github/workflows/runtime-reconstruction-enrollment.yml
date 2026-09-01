@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   enroll-manifest:
@@ -182,6 +183,7 @@ jobs:
           import hashlib
           import json
           import os
+          import urllib.error
           import urllib.request
           from pathlib import Path
 
@@ -223,6 +225,7 @@ jobs:
           headers = {
               "Accept": "application/vnd.github+json",
               "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
               "User-Agent": "mobile-proxy-production-runtime-reconstruction-enrollment",
               "X-GitHub-Api-Version": "2022-11-28",
           }
@@ -233,7 +236,10 @@ jobs:
               with urllib.request.urlopen(request, timeout=20) as response:
                   return json.load(response)
 
-          if api_json(f"https://api.github.com/repos/{repository}/commits/main").get("sha") != expected_private_sha:
+          def current_private_main():
+              return api_json(f"https://api.github.com/repos/{repository}/commits/main").get("sha")
+
+          if current_private_main() != expected_private_sha:
               raise SystemExit("private main drifted after enrollment authority validation")
 
           public_headers = dict(headers)
@@ -258,7 +264,7 @@ jobs:
           binding["phone_execution_authority"] = False
           binding["full_serving_authority"] = False
           updated_bytes = (json.dumps(binding, indent=2, sort_keys=True) + "\n").encode("utf-8")
-          api_json(
+          enrollment_result = api_json(
               f"https://api.github.com/repos/{repository}/contents/.github/production/runtime-reconstruction-binding.json",
               method="PUT",
               payload={
@@ -268,6 +274,38 @@ jobs:
                   "branch": "main",
               },
           )
+          enrolled_sha = enrollment_result.get("commit", {}).get("sha")
+          if not (
+              isinstance(enrolled_sha, str)
+              and len(enrolled_sha) == 40
+              and all(character in "0123456789abcdef" for character in enrolled_sha)
+          ):
+              raise SystemExit("enrollment commit identity is unavailable or malformed")
+          if current_private_main() != enrolled_sha:
+              raise SystemExit("private main drifted immediately after enrollment commit")
+
+          guard_workflows = (
+              "runtime-reconstruction-policy.yml",
+              "production-phone-mutation-policy.yml",
+              "android-migration-binding-policy.yml",
+          )
+          for workflow_id in guard_workflows:
+              if current_private_main() != enrolled_sha:
+                  raise SystemExit("private main drifted before post-enrollment guard dispatch")
+              dispatch_request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/actions/workflows/{workflow_id}/dispatches",
+                  data=json.dumps({"ref": "main"}).encode("utf-8"),
+                  method="POST",
+                  headers=headers,
+              )
+              try:
+                  with urllib.request.urlopen(dispatch_request, timeout=20) as response:
+                      if response.status != 204:
+                          raise SystemExit(f"post-enrollment guard dispatch returned unexpected status: {workflow_id}")
+              except (urllib.error.URLError, TimeoutError) as error:
+                  raise SystemExit(f"post-enrollment guard dispatch failed: {workflow_id}") from error
+          if current_private_main() != enrolled_sha:
+              raise SystemExit("private main drifted after post-enrollment guard dispatch")
 
           print("runtime reconstruction synthetic manifest enrollment: accepted")
           print("enrollment_status=enrolled")
@@ -275,6 +313,7 @@ jobs:
           print("full_serving_authority=false")
           print("item20_transport_authority=deferred_to_sealed_handoff")
           print("phone_execution_authority=false")
+          print("post_enrollment_guard_dispatch_requested=true")
           print("secret_values_read=false")
           print("provider_endpoint_used=false")
           print("physical_device_identifier_used=false")
