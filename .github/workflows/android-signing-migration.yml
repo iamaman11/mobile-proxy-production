@@ -1,4 +1,4 @@
-name: Production Android v0.1.4 signing-lineage migration
+name: Production Android 0.1.4 signing-generation migration
 
 on:
   issue_comment:
@@ -9,12 +9,12 @@ permissions:
   actions: read
 
 concurrency:
-  group: production-phone-android-signing-lineage-migration
+  group: production-phone-android-signing-generation-migration
   cancel-in-progress: false
 
 jobs:
   command-gate:
-    name: Bind migration to pinned canonical and proved build run
+    name: Bind migration to pinned canonical SHA and proved build run
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
@@ -22,15 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      PINNED_CANONICAL_SHA: a6735b3b64958699b50acc619e770d80f4bdfbc1
-      CANONICAL_TAG: v0.1.4
+      PINNED_CANONICAL_SHA: b73eea81e03813be14ba0ead56ab58bc973feec8
+      MIGRATION_VERSION: 0.1.4
       COMMAND: ${{ github.event.comment.body }}
       GH_TOKEN: ${{ github.token }}
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
       build_run_id: ${{ steps.command.outputs.build_run_id }}
     steps:
-      - name: Validate exact owner command, public release tag, and signed-candidate run
+      - name: Validate exact owner command, canonical main Quality, release order, and signed-candidate run
         id: command
         shell: bash
         run: |
@@ -39,6 +39,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.error
           import urllib.request
 
           command = os.environ.get("COMMAND", "").strip()
@@ -48,7 +49,7 @@ jobs:
           requested_sha, build_run_id = match.groups()
           pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
           if requested_sha != pinned_sha:
-              raise SystemExit("requested SHA is not the pinned v0.1.4 canonical baseline")
+              raise SystemExit("requested SHA is not the pinned Android 0.1.4 migration baseline")
 
           def get_json(url: str, token: str | None = None):
               headers = {
@@ -62,25 +63,35 @@ jobs:
               with urllib.request.urlopen(request, timeout=15) as response:
                   return json.load(response)
 
-          public_commit = get_json(
-              f"https://api.github.com/repos/iamaman11/mobile-proxy/commits/{os.environ['CANONICAL_TAG']}"
-          )
-          if public_commit.get("sha") != pinned_sha:
-              raise SystemExit("public v0.1.4 tag does not resolve to the pinned canonical SHA")
-
           public_runs = get_json(
               f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={pinned_sha}&event=push&per_page=100"
           ).get("workflow_runs", [])
-          tag_quality = [
+          main_quality = [
               run for run in public_runs
               if run.get("name") == "Quality"
-              and run.get("head_branch") == os.environ["CANONICAL_TAG"]
+              and run.get("head_branch") == "main"
               and run.get("head_sha") == pinned_sha
               and run.get("status") == "completed"
               and run.get("conclusion") == "success"
           ]
-          if not tag_quality:
-              raise SystemExit("exact v0.1.4 tag Quality success is absent")
+          if not main_quality:
+              raise SystemExit("exact pinned canonical main Quality success is absent")
+
+          migration_issue = get_json("https://api.github.com/repos/iamaman11/mobile-proxy/issues/162")
+          if migration_issue.get("state") != "open":
+              raise SystemExit("canonical signing-generation migration tracker #162 is not open")
+          signing_gate = get_json("https://api.github.com/repos/iamaman11/mobile-proxy/issues/115")
+          if signing_gate.get("state") != "open":
+              raise SystemExit("canonical signing gate #115 must remain open while #162 migration is being satisfied")
+
+          tag_url = "https://api.github.com/repos/iamaman11/mobile-proxy/git/ref/tags/v0.1.4"
+          try:
+              get_json(tag_url)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+          else:
+              raise SystemExit("final public v0.1.4 tag exists before pre-Item20 migration; release ordering violated")
 
           token = os.environ["GH_TOKEN"]
           repository = os.environ["GITHUB_REPOSITORY"]
@@ -165,7 +176,7 @@ jobs:
           retention-days: 1
 
   migrate-phone:
-    name: Execute authorized destructive signing-lineage reset
+    name: Execute authorized destructive signing-generation reset
     needs:
       - command-gate
       - prepare-tools
@@ -229,9 +240,13 @@ jobs:
         shell: bash
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          ## Production Android v0.1.4 signing-lineage migration
+          ## Production Android 0.1.4 signing-generation migration
           - Canonical source SHA: ${{ env.CANONICAL_SHA }}
           - Signed-candidate build run: ${{ env.BUILD_RUN_ID }}
+          - Migration authority: exact protected SHA + retained signed candidate
+          - Exact canonical main Quality required: true
+          - Final public v0.1.4 tag required: false
+          - Final public v0.1.4 tag present before migration: false
           - Expected package: com.example.mobileproxy
           - Old expected version: 1.1.0 / 2
           - New expected version: 0.1.4 / 1004
@@ -253,7 +268,7 @@ jobs:
         run: exit 1
 
   retain-accepted:
-    name: Retain accepted Android generation as private execution release evidence
+    name: Retain accepted Android generation as private execution evidence
     needs:
       - command-gate
       - migrate-phone
@@ -283,7 +298,7 @@ jobs:
           name: android-signing-migration-evidence-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/migration
 
-      - name: Publish immutable private retention release
+      - name: Publish immutable private accepted-generation retention
         shell: bash
         run: |
           set -euo pipefail
@@ -295,15 +310,18 @@ jobs:
           cat > "${RUNNER_TEMP}/retention-notes.md" <<EOF
           Private execution retention for the accepted Android signing generation.
 
-          Canonical public release identity: v0.1.4
+          Canonical public version metadata: 0.1.4
           Canonical public source SHA: ${CANONICAL_SHA}
+          Final public release authority: not created by this private retention
           Signed-candidate private build run: ${BUILD_RUN_ID}
           Accepted private migration run: ${GITHUB_RUN_ID}
 
-          This private release is bounded execution evidence only. It is not canonical source, architecture, or release policy.
+          The new-generation signed APK is the future routine rollback/update artifact. The retained old-generation APK is emergency destructive-migration rollback evidence only and is not update-compatible with the accepted new signing generation.
+
+          This private release is bounded execution evidence only. It is not canonical source, architecture, release policy, or final semantic release authority.
           EOF
           gh release create "${tag}" \
-            --title "Private execution retention — Android v0.1.4" \
+            --title "Private execution retention — Android 0.1.4 accepted signing generation" \
             --notes-file "${RUNNER_TEMP}/retention-notes.md" \
             "${RUNNER_TEMP}/accepted/mobile-proxy-android-v0.1.4.apk" \
             "${RUNNER_TEMP}/accepted/android-release-evidence.json" \

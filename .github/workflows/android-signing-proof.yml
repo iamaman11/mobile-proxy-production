@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      PINNED_CANONICAL_SHA: a6735b3b64958699b50acc619e770d80f4bdfbc1
+      PINNED_CANONICAL_SHA: b73eea81e03813be14ba0ead56ab58bc973feec8
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
     steps:
@@ -53,7 +53,7 @@ jobs:
   offline-signing-proof:
     name: Private Android release signing identity offline proof
     needs: command-gate
-    runs-on: [self-hosted, Linux, X64, android-production]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
@@ -62,9 +62,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --silent --show-error \
-            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
-            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
           curl --fail --location --silent --show-error \
             "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/verify_android_release_keystore.py" \
             --output "${RUNNER_TEMP}/verify_android_release_keystore.py"
@@ -99,8 +96,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Production Android release signing offline proof
           - Canonical verifier SHA: ${{ env.CANONICAL_SHA }}
-          - Runner labels: self-hosted, Linux, X64, android-production
+          - Execution boundary: GitHub-hosted off-phone
           - Verification outcome: ${{ steps.signing.outcome }}
+          - Phone runner used: false
           - Phone access performed: false
           - Phone mutation performed: false
           - Production APK signed: false
