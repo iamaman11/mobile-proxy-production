@@ -140,9 +140,9 @@ jobs:
         run: |
           set -euo pipefail
           root="${{ steps.source.outputs.root }}"
+          cd "${root}"
           rustup show active-toolchain
           cargo build \
-            --manifest-path "${root}/Cargo.toml" \
             --locked \
             --release \
             -p operator-cli \
