@@ -340,6 +340,7 @@ jobs:
           if int(time.time()) > deadline:
               raise SystemExit('runtime replacement refused after preflight: reserved rollback budget would be violated')
           PY
+          printf 'transaction_entered=true\n' >> "${GITHUB_OUTPUT}"
           python3 - <<'PY'
           import os, subprocess
 
@@ -347,6 +348,7 @@ jobs:
           run_id = os.environ['GITHUB_RUN_ID']
           stage = f'/data/local/tmp/mobile-proxy-runtime-repair-{run_id}'
           backup = f'/data/local/tmp/mobile-proxy-runtime-backup-{run_id}'
+          marker = f'{backup}/replacement-mutation-started'
           script = f'''set -eu
           current=/data/adb/mobile-proxy-node/current
           test -L "$current"
@@ -371,6 +373,9 @@ jobs:
             cp -p "$target/bin/$name" "{backup}/$name"
             test -s "{backup}/$name"
           done
+          printf '%s\n' runtime-binary-replacement-started > "{marker}"
+          chmod 0600 "{marker}"
+          test -s "{marker}"
           for name in runtime-supervisor host-daemon sing-box; do
             install -m 0755 "{stage}/$name" "$target/bin/.$name.repair-{run_id}"
             mv -f "$target/bin/.$name.repair-{run_id}" "$target/bin/$name"
@@ -386,6 +391,7 @@ jobs:
           )
           with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as handle:
               handle.write(f'backup={backup}\n')
+              handle.write('mutation_boundary_crossed=true\n')
           print('runtime binary replacement transaction committed')
           PY
 
@@ -635,6 +641,8 @@ jobs:
         id: rollback
         if: failure() && steps.replace.outcome != 'skipped'
         shell: bash
+        env:
+          REPLACE_TRANSACTION_ENTERED: ${{ steps.replace.outputs.transaction_entered }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -644,14 +652,17 @@ jobs:
           serial = os.environ['ANDROID_PRODUCTION_SERIAL']
           run_id = os.environ['GITHUB_RUN_ID']
           backup = f'/data/local/tmp/mobile-proxy-runtime-backup-{run_id}'
+          mutation_marker = f'{backup}/replacement-mutation-started'
           target = '/data/adb/mobile-proxy-node/current/bin'
           supervisor = f'{target}/runtime-supervisor'
           runtime_root = '/data/adb/mobile-proxy-node/current'
           service = '/data/adb/mobile-proxy-node/current/service.sh'
           names = ('runtime-supervisor','host-daemon','sing-box')
+          transaction_entered = os.environ.get('REPLACE_TRANSACTION_ENTERED') == 'true'
           evidence_path = Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-rollback-evidence.json')
           stages = {
               'registered_device_preflight': 'pending',
+              'mutation_boundary_inspection': 'pending',
               'backup_inspection': 'pending',
               'restore_copy': 'pending',
               'restore_digest_verification': 'pending',
@@ -662,7 +673,11 @@ jobs:
               'format_version': 2,
               'canonical_sha': os.environ['CANONICAL_SHA'],
               'private_execution_sha': os.environ['GITHUB_SHA'],
-              'rollback_required': True,
+              'replacement_transaction_entered': transaction_entered,
+              'mutation_boundary_crossed': False,
+              'pre_mutation_failure_proven': False,
+              'rollback_required': transaction_entered,
+              'rollback_not_required': not transaction_entered,
               'stages': stages,
               'backup_complete': False,
               'rollback_invoked': False,
@@ -733,147 +748,184 @@ jobs:
               return sorted(set(pids))
 
           try:
-              preflight_script = str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py')
-              preflight_ok, _ = run_stage(
-                  'registered_device_preflight',
-                  lambda: subprocess.run(
-                      [
-                          'python3', preflight_script,
-                          '--canonical-sha', os.environ['CANONICAL_SHA'],
-                          '--output', str(Path(os.environ['RUNNER_TEMP']) / 'pre-rollback-proof.json'),
-                      ],
-                      check=True, timeout=90,
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                  ),
-              )
-
-              def inspect_backup():
-                  captured = {}
-                  for name in names:
-                      result = subprocess.run(
-                          ['adb','-s',serial,'shell','su','0','sh','-c',f'test -s "{backup}/{name}" && sha256sum "{backup}/{name}"'],
-                          check=False, capture_output=True, text=True, timeout=30,
-                      )
-                      parts = result.stdout.split()
-                      if result.returncode != 0 or not parts:
-                          raise RuntimeError('backup_not_complete')
-                      captured[name] = parts[0]
-                  return captured
-
-              backup_ok, captured = run_stage('backup_inspection', inspect_backup)
-              if backup_ok:
-                  before.update(captured)
-                  state['backup_complete'] = True
-
-              if not preflight_ok or not backup_ok:
-                  stages['restore_copy'] = 'skipped'
-                  stages['restore_digest_verification'] = 'skipped'
-                  stages['service_bootstrap'] = 'skipped'
+              if not transaction_entered:
+                  for key in stages:
+                      stages[key] = 'skipped'
+                  state['pre_mutation_failure_proven'] = True
               else:
-                  def restore_copy():
-                      state['rollback_invoked'] = True
-                      script = f'''set -eu
-                      current=/data/adb/mobile-proxy-node/current
-                      test -L "$current"
-                      resolved="$(readlink -f "$current")"
-                      case "$resolved" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
-                      for name in runtime-supervisor host-daemon sing-box; do
-                        test -s "{backup}/$name"
-                        cp -p "{backup}/$name" "$resolved/bin/$name"
-                      done
-                      '''
-                      subprocess.run(
-                          ['adb','-s',serial,'shell','su','0','sh','-c',script],
-                          check=True, timeout=120,
+                  preflight_script = str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py')
+                  preflight_ok, _ = run_stage(
+                      'registered_device_preflight',
+                      lambda: subprocess.run(
+                          [
+                              'python3', preflight_script,
+                              '--canonical-sha', os.environ['CANONICAL_SHA'],
+                              '--output', str(Path(os.environ['RUNNER_TEMP']) / 'pre-rollback-proof.json'),
+                          ],
+                          check=True, timeout=90,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      ),
+                  )
+
+                  def inspect_mutation_boundary():
+                      result = root(
+                          f'if [ -s "{mutation_marker}" ]; then printf crossed; else printf not-crossed; fi',
+                          timeout=20,
                       )
+                      value = result.stdout.strip()
+                      if value not in ('crossed', 'not-crossed'):
+                          raise RuntimeError('mutation_boundary_state_invalid')
+                      return value == 'crossed'
 
-                  restore_ok, _ = run_stage('restore_copy', restore_copy)
-                  state['restore_copy_succeeded'] = restore_ok
+                  boundary_ok = False
+                  boundary_crossed = True
+                  if preflight_ok:
+                      boundary_ok, boundary_value = run_stage('mutation_boundary_inspection', inspect_mutation_boundary)
+                      if boundary_ok:
+                          boundary_crossed = bool(boundary_value)
+                          state['mutation_boundary_crossed'] = boundary_crossed
+                          state['rollback_required'] = boundary_crossed
+                          state['rollback_not_required'] = not boundary_crossed
+                          state['pre_mutation_failure_proven'] = not boundary_crossed
+                  else:
+                      stages['mutation_boundary_inspection'] = 'skipped'
 
-                  if state['rollback_invoked']:
-                      def verify_restored():
-                          restored = {}
+                  if preflight_ok and boundary_ok and not boundary_crossed:
+                      stages['backup_inspection'] = 'skipped'
+                      stages['restore_copy'] = 'skipped'
+                      stages['restore_digest_verification'] = 'skipped'
+                      stages['service_bootstrap'] = 'skipped'
+                  else:
+                      def inspect_backup():
+                          captured = {}
                           for name in names:
                               result = subprocess.run(
-                                  ['adb','-s',serial,'shell','su','0','sh','-c',f'sha256sum "{target}/{name}"'],
-                                  check=True, capture_output=True, text=True, timeout=30,
+                                  ['adb','-s',serial,'shell','su','0','sh','-c',f'test -s "{backup}/{name}" && sha256sum "{backup}/{name}"'],
+                                  check=False, capture_output=True, text=True, timeout=30,
                               )
                               parts = result.stdout.split()
-                              if not parts:
-                                  raise RuntimeError('restored_digest_missing')
-                              restored[name] = parts[0]
-                          if not all(restored.get(name) == before.get(name) for name in names):
-                              raise RuntimeError('restored_digest_mismatch')
-                          return True
+                              if result.returncode != 0 or not parts:
+                                  raise RuntimeError('backup_not_complete')
+                              captured[name] = parts[0]
+                          return captured
 
-                      digest_ok, _ = run_stage('restore_digest_verification', verify_restored)
-                      state['restored_runtime_binary_digests_match_backup'] = digest_ok
+                      backup_ok, captured = run_stage('backup_inspection', inspect_backup)
+                      if backup_ok:
+                          before.update(captured)
+                          state['backup_complete'] = True
+
+                      if not preflight_ok or not boundary_ok or not backup_ok:
+                          stages['restore_copy'] = 'skipped'
+                          stages['restore_digest_verification'] = 'skipped'
+                          stages['service_bootstrap'] = 'skipped'
+                      else:
+                          def restore_copy():
+                              state['rollback_invoked'] = True
+                              script = f'''set -eu
+                              current=/data/adb/mobile-proxy-node/current
+                              test -L "$current"
+                              resolved="$(readlink -f "$current")"
+                              case "$resolved" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
+                              for name in runtime-supervisor host-daemon sing-box; do
+                                test -s "{backup}/$name"
+                                cp -p "{backup}/$name" "$resolved/bin/$name"
+                              done
+                              '''
+                              subprocess.run(
+                                  ['adb','-s',serial,'shell','su','0','sh','-c',script],
+                                  check=True, timeout=120,
+                              )
+
+                          restore_ok, _ = run_stage('restore_copy', restore_copy)
+                          state['restore_copy_succeeded'] = restore_ok
+
+                          if state['rollback_invoked']:
+                              def verify_restored():
+                                  restored = {}
+                                  for name in names:
+                                      result = subprocess.run(
+                                          ['adb','-s',serial,'shell','su','0','sh','-c',f'sha256sum "{target}/{name}"'],
+                                          check=True, capture_output=True, text=True, timeout=30,
+                                      )
+                                      parts = result.stdout.split()
+                                      if not parts:
+                                          raise RuntimeError('restored_digest_missing')
+                                      restored[name] = parts[0]
+                                  if not all(restored.get(name) == before.get(name) for name in names):
+                                      raise RuntimeError('restored_digest_mismatch')
+                                  return True
+
+                              digest_ok, _ = run_stage('restore_digest_verification', verify_restored)
+                              state['restored_runtime_binary_digests_match_backup'] = digest_ok
+                          else:
+                              stages['restore_digest_verification'] = 'skipped'
+
+                          if state['restored_runtime_binary_digests_match_backup']:
+                              def bootstrap_restored():
+                                  state['service_bootstrap_attempted'] = True
+                                  active_before = matching_pids()
+                                  for pid in active_before:
+                                      script = f'''proc=/proc/{pid}
+                                      [ -r "$proc/cmdline" ] || exit 0
+                                      cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                                      case "$cmd" in
+                                        "{supervisor} --runtime-root {runtime_root} "*) kill -TERM {pid} ;;
+                                        *) exit 22 ;;
+                                      esac'''
+                                      root(script, timeout=20)
+
+                                  retire_deadline = time.monotonic() + 30
+                                  remaining = set(active_before)
+                                  while remaining and time.monotonic() < retire_deadline:
+                                      time.sleep(1)
+                                      remaining = set(active_before).intersection(matching_pids())
+                                  if remaining:
+                                      raise RuntimeError('repaired_supervisor_did_not_retire')
+                                  state['prior_repaired_supervisor_retired'] = True
+
+                                  root(f'set -eu; sh "{service}"', timeout=60)
+                                  start_deadline = time.monotonic() + 30
+                                  restored = matching_pids()
+                                  while len(restored) != 1 and time.monotonic() < start_deadline:
+                                      time.sleep(1)
+                                      restored = matching_pids()
+                                  if len(restored) != 1:
+                                      raise RuntimeError('restored_supervisor_count_differs')
+                                  if set(active_before).intersection(restored):
+                                      raise RuntimeError('repaired_supervisor_survived_rollback_activation')
+
+                                  active_digest = root(
+                                      f'sha256sum "/proc/{restored[0]}/exe"', timeout=20
+                                  ).stdout.split()
+                                  if not active_digest or active_digest[0] != before['runtime-supervisor']:
+                                      raise RuntimeError('restored_supervisor_executable_digest_differs')
+                                  state['restored_supervisor_count'] = len(restored)
+                                  state['restored_supervisor_exact_executable'] = True
+                                  return True
+
+                              bootstrap_ok, _ = run_stage('service_bootstrap', bootstrap_restored)
+                              state['service_bootstrap_succeeded'] = bootstrap_ok
+                          else:
+                              stages['service_bootstrap'] = 'skipped'
+
+                  if preflight_ok:
+                      def verify_apk():
+                          package = subprocess.run(
+                              ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
+                              check=False, capture_output=True, text=True, timeout=60,
+                          )
+                          codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
+                          versions = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
+                          if package.returncode != 0 or codes != ['2'] or versions != ['1.1.0']:
+                              raise RuntimeError('installed_apk_identity_differs')
+                          return versions[0], int(codes[0])
+
+                      apk_ok, apk_identity = run_stage('apk_identity_verification', verify_apk)
+                      if apk_ok:
+                          state['installed_apk_unchanged'] = True
+                          state['installed_version_name'], state['installed_version_code'] = apk_identity
                   else:
-                      stages['restore_digest_verification'] = 'skipped'
-
-                  if state['restored_runtime_binary_digests_match_backup']:
-                      def bootstrap_restored():
-                          state['service_bootstrap_attempted'] = True
-                          active_before = matching_pids()
-                          for pid in active_before:
-                              script = f'''proc=/proc/{pid}
-                              [ -r "$proc/cmdline" ] || exit 0
-                              cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
-                              case "$cmd" in
-                                "{supervisor} --runtime-root {runtime_root} "*) kill -TERM {pid} ;;
-                                *) exit 22 ;;
-                              esac'''
-                              root(script, timeout=20)
-
-                          retire_deadline = time.monotonic() + 30
-                          remaining = set(active_before)
-                          while remaining and time.monotonic() < retire_deadline:
-                              time.sleep(1)
-                              remaining = set(active_before).intersection(matching_pids())
-                          if remaining:
-                              raise RuntimeError('repaired_supervisor_did_not_retire')
-                          state['prior_repaired_supervisor_retired'] = True
-
-                          root(f'set -eu; sh "{service}"', timeout=60)
-                          start_deadline = time.monotonic() + 30
-                          restored = matching_pids()
-                          while len(restored) != 1 and time.monotonic() < start_deadline:
-                              time.sleep(1)
-                              restored = matching_pids()
-                          if len(restored) != 1:
-                              raise RuntimeError('restored_supervisor_count_differs')
-                          if set(active_before).intersection(restored):
-                              raise RuntimeError('repaired_supervisor_survived_rollback_activation')
-
-                          active_digest = root(
-                              f'sha256sum "/proc/{restored[0]}/exe"', timeout=20
-                          ).stdout.split()
-                          if not active_digest or active_digest[0] != before['runtime-supervisor']:
-                              raise RuntimeError('restored_supervisor_executable_digest_differs')
-                          state['restored_supervisor_count'] = len(restored)
-                          state['restored_supervisor_exact_executable'] = True
-                          return True
-
-                      bootstrap_ok, _ = run_stage('service_bootstrap', bootstrap_restored)
-                      state['service_bootstrap_succeeded'] = bootstrap_ok
-                  else:
-                      stages['service_bootstrap'] = 'skipped'
-
-              def verify_apk():
-                  package = subprocess.run(
-                      ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
-                      check=False, capture_output=True, text=True, timeout=60,
-                  )
-                  codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
-                  versions = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
-                  if package.returncode != 0 or codes != ['2'] or versions != ['1.1.0']:
-                      raise RuntimeError('installed_apk_identity_differs')
-                  return versions[0], int(codes[0])
-
-              apk_ok, apk_identity = run_stage('apk_identity_verification', verify_apk)
-              if apk_ok:
-                  state['installed_apk_unchanged'] = True
-                  state['installed_version_name'], state['installed_version_code'] = apk_identity
+                      stages['apk_identity_verification'] = 'skipped'
           except Exception as exc:
               kind = type(exc).__name__
               failures.append({'stage': 'internal_guard', 'kind': kind})
@@ -881,24 +933,31 @@ jobs:
                   state['failure_stage'] = 'internal_guard'
                   state['failure_kind'] = kind
           finally:
-              state['rollback_accepted'] = bool(
-                  stages['registered_device_preflight'] == 'success'
-                  and state['backup_complete']
-                  and state['rollback_invoked']
-                  and state['restore_copy_succeeded']
-                  and state['restored_runtime_binary_digests_match_backup']
-                  and state['service_bootstrap_succeeded']
-                  and state['prior_repaired_supervisor_retired']
-                  and state['restored_supervisor_count'] == 1
-                  and state['restored_supervisor_exact_executable']
-                  and state['installed_apk_unchanged']
-              )
+              if state['rollback_required']:
+                  state['rollback_accepted'] = bool(
+                      stages['registered_device_preflight'] == 'success'
+                      and stages['mutation_boundary_inspection'] == 'success'
+                      and state['mutation_boundary_crossed']
+                      and state['backup_complete']
+                      and state['rollback_invoked']
+                      and state['restore_copy_succeeded']
+                      and state['restored_runtime_binary_digests_match_backup']
+                      and state['service_bootstrap_succeeded']
+                      and state['prior_repaired_supervisor_retired']
+                      and state['restored_supervisor_count'] == 1
+                      and state['restored_supervisor_exact_executable']
+                      and state['installed_apk_unchanged']
+                  )
               state['bounded_failures'] = failures[:8]
               evidence_path.write_text(
                   json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8'
               )
               print('runtime binary rollback verification: ' + ' '.join([
+                  f"transaction_entered={state['replacement_transaction_entered']}",
+                  f"mutation_boundary_crossed={state['mutation_boundary_crossed']}",
+                  f"rollback_required={state['rollback_required']}",
                   f"preflight={stages['registered_device_preflight']}",
+                  f"boundary={stages['mutation_boundary_inspection']}",
                   f"backup={stages['backup_inspection']}",
                   f"restore={stages['restore_copy']}",
                   f"digest_verify={stages['restore_digest_verification']}",
@@ -908,7 +967,7 @@ jobs:
                   f"rollback_accepted={state['rollback_accepted']}",
               ]))
 
-          if not state['rollback_accepted']:
+          if state['rollback_required'] and not state['rollback_accepted']:
               raise SystemExit('runtime binary rollback could not prove exact pre-repair restoration')
           PY
 
@@ -966,6 +1025,9 @@ jobs:
               f"- local proxy ports ready: `{repair.get('local_proxy_ports_ready')}`",
               f"- runtime watchdog running: `{repair.get('runtime_watchdog_running')}`",
               f"- repaired baseline accepted: `{repair.get('accepted')}`",
+              f"- replacement transaction entered: `{rollback.get('replacement_transaction_entered')}`",
+              f"- replacement mutation boundary crossed: `{rollback.get('mutation_boundary_crossed')}`",
+              f"- pre-mutation failure proven: `{rollback.get('pre_mutation_failure_proven')}`",
               f"- rollback required: `{rollback.get('rollback_required', False)}`",
               f"- rollback restored active supervisor exact executable: `{rollback.get('restored_supervisor_exact_executable')}`",
               f"- rollback exact bytes accepted: `{rollback.get('rollback_accepted')}`",
