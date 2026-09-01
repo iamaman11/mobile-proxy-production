@@ -120,13 +120,26 @@ jobs:
           except (OSError, subprocess.TimeoutExpired):
               pass
 
+          bounded_count = str(device_count) if inventory_valid else "unavailable"
+          bounded_online = str(online_count) if inventory_valid else "unavailable"
+          print(
+              "bounded adb diagnostic: "
+              f"probe_ok={str(probe_ok).lower()} "
+              f"inventory_valid={str(inventory_valid).lower()} "
+              f"device_count={bounded_count} "
+              f"online_count={bounded_online} "
+              f"registered_present={str(registered_present).lower()} "
+              f"registered_online={str(registered_online).lower()} "
+              "raw_device_identifiers_recorded=false phone_mutation_performed=false"
+          )
+
           summary = os.environ["GITHUB_STEP_SUMMARY"]
           with open(summary, "a", encoding="utf-8") as handle:
               handle.write("## Bounded ADB inventory diagnostic\n")
               handle.write(f"- ADB probe completed: {str(probe_ok).lower()}\n")
               handle.write(f"- Inventory shape valid: {str(inventory_valid).lower()}\n")
-              handle.write(f"- Device row count: {device_count if inventory_valid else 'unavailable'}\n")
-              handle.write(f"- Online device count: {online_count if inventory_valid else 'unavailable'}\n")
+              handle.write(f"- Device row count: {bounded_count}\n")
+              handle.write(f"- Online device count: {bounded_online}\n")
               handle.write(f"- Registered device present: {str(registered_present).lower()}\n")
               handle.write(f"- Registered device online: {str(registered_online).lower()}\n")
               handle.write("- Raw device identifiers recorded: false\n")
