@@ -1,0 +1,73 @@
+{
+  "format_version": 1,
+  "binding_role": "private_execution_only",
+  "mode": "config_reconstruction_reauthorization",
+  "enrollment_status": "pending",
+  "canonical_repository": "iamaman11/mobile-proxy",
+  "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
+  "quality_required": true,
+  "hardening_tracker_issue": 179,
+  "migration_tracker_issue": 162,
+  "application_id": "com.example.mobileproxy",
+  "required_installed_version_name": "1.1.0",
+  "required_installed_version_code": 2,
+  "final_release_authority": false,
+  "phone_execution_authority": false,
+  "provider_credentials_allowed": false,
+  "tunnel_owner": "first_party_reverse_tunnel",
+  "tunnel_owner_evidence": {
+    "evidence_type": "canonical_live_verify",
+    "canonical_commit": "ad9bc7c88fcd0abd7bf422f12b852c24f6dc16ea",
+    "historical_owner_evidence_only": true
+  },
+  "manifest_authority": "new_reauthorized_baseline",
+  "manifest_source": {
+    "kind": "github_actions_secret",
+    "secret_name": "ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON"
+  },
+  "manifest_fingerprint": {
+    "algorithm": "sha256",
+    "normalized_json_profile": "strict-sorted-compact-utf8-v1",
+    "sha256": null
+  },
+  "raw_device_identifier_in_binding": false,
+  "required_manifest_fields": [
+    "deviceId",
+    "nodeName",
+    "operatorProfile",
+    "controlPlaneUrl",
+    "tokens.adminTokenEnv",
+    "tokens.deviceTokenEnv",
+    "tokens.uiTokenEnv",
+    "tokens.reverseTunnelCertDerB64Env",
+    "tokens.relayUserEnv",
+    "tokens.relayPasswordEnv",
+    "relay.host",
+    "relay.httpPort"
+  ],
+  "expected_token_env_names": {
+    "adminTokenEnv": "MOBILE_PROXY_ADMIN_TOKEN",
+    "deviceTokenEnv": "MOBILE_PROXY_DEVICE_TOKEN",
+    "uiTokenEnv": "MOBILE_PROXY_UI_TOKEN",
+    "reverseTunnelCertDerB64Env": "MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64",
+    "relayUserEnv": "MOBILE_PROXY_RELAY_USER",
+    "relayPasswordEnv": "MOBILE_PROXY_RELAY_PASSWORD"
+  },
+  "required_runtime_secret_names": [
+    "MOBILE_PROXY_ADMIN_TOKEN",
+    "MOBILE_PROXY_DEVICE_TOKEN",
+    "MOBILE_PROXY_UI_TOKEN",
+    "MOBILE_PROXY_RELAY_USER",
+    "MOBILE_PROXY_RELAY_PASSWORD",
+    "MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64"
+  ],
+  "evidence_policy": {
+    "raw_manifest_recorded": false,
+    "raw_device_identifier_recorded": false,
+    "secret_values_recorded": false,
+    "rendered_config_recorded": false,
+    "config_digest_recorded": false,
+    "manifest_fingerprint_publication_allowed": false,
+    "credential_derived_identifiers_recorded": false
+  }
+}
