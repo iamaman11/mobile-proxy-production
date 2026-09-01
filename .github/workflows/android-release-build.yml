@@ -1,0 +1,189 @@
+name: Production Android v0.1.4 signed candidate
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-android-v014-signed-candidate
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate pinned signed-candidate command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/android-release-build ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PINNED_CANONICAL_SHA: a6735b3b64958699b50acc619e770d80f4bdfbc1
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact owner command and pinned canonical SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/android-release-build ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid Android release build command")
+          requested_sha = match.group(1)
+          pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
+          if requested_sha != pinned_sha:
+              raise SystemExit("requested SHA is not the pinned v0.1.4 canonical baseline")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={pinned_sha}\n")
+          PY
+
+  build-sign:
+    name: Build and prove exact signed Android candidate off-phone
+    needs: command-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_BASELINE_REF: v0.1.3
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch exact canonical source and migration baseline
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/canonical"
+          rm -rf "${root}"
+          git init "${root}"
+          git -C "${root}" remote add origin https://github.com/iamaman11/mobile-proxy.git
+          git -C "${root}" fetch --no-tags --depth=1 origin "${CANONICAL_SHA}"
+          git -C "${root}" fetch --depth=1 origin "refs/tags/${ANDROID_BASELINE_REF}:refs/tags/${ANDROID_BASELINE_REF}"
+          git -C "${root}" checkout --detach "${CANONICAL_SHA}"
+          test "$(git -C "${root}" rev-parse HEAD)" = "${CANONICAL_SHA}"
+          test "$(git -C "${root}" cat-file -t "refs/tags/${ANDROID_BASELINE_REF}")" = tag
+          test -z "$(git -C "${root}" status --porcelain --untracked-files=no)"
+          echo "root=${root}" >> "$GITHUB_OUTPUT"
+
+      - name: Re-prove private signing identity without phone access
+        id: signing
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          proof="${RUNNER_TEMP}/android-signing-proof.json"
+          python3 "${{ steps.source.outputs.root }}/scripts/verify_android_release_keystore.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output "${proof}"
+
+      - name: Build and verify exact signed v0.1.4 APK
+        id: build
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/android-release-output"
+          rm -rf "${output}"
+          mkdir -p "${output}"
+          python3 "${{ steps.source.outputs.root }}/scripts/build_signed_android_release.py" \
+            --repository-root "${{ steps.source.outputs.root }}" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output-dir "${output}" \
+            --android-baseline-ref "${ANDROID_BASELINE_REF}"
+          python3 - "${output}/android-release-evidence.json" <<'PY'
+          import json
+          import sys
+
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as handle:
+              evidence = json.load(handle)
+          expected = {
+              "canonical_sha": "a6735b3b64958699b50acc619e770d80f4bdfbc1",
+              "android_baseline_ref": "v0.1.3",
+              "android_functional_source_preserved": True,
+              "application_id": "com.example.mobileproxy",
+              "version_name": "0.1.4",
+              "version_code": 1004,
+              "release_contract_verified": True,
+              "keystore_verified": True,
+              "apk_signature_verified": True,
+              "apk_signer_matches_private_key": True,
+              "production_apk_signed": True,
+              "phone_access_performed": False,
+              "phone_mutation_performed": False,
+              "accepted": True,
+          }
+          for key, value in expected.items():
+              if evidence.get(key) != value:
+                  raise SystemExit(f"bounded release evidence mismatch: {key}")
+          if evidence.get("artifact_name") != "mobile-proxy-android-v0.1.4.apk":
+              raise SystemExit("unexpected signed APK artifact name")
+          PY
+          test -s "${output}/mobile-proxy-android-v0.1.4.apk"
+          echo "output=${output}" >> "$GITHUB_OUTPUT"
+
+      - name: Retain bounded signing proof
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-release-signing-proof-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/android-signing-proof.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain exact signed candidate and canonical evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-release-candidate-v0.1.4-${{ env.CANONICAL_SHA }}
+          path: |
+            ${{ steps.build.outputs.output }}/mobile-proxy-android-v0.1.4.apk
+            ${{ steps.build.outputs.output }}/android-release-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Production Android v0.1.4 signed candidate
+          - Canonical source SHA: ${{ env.CANONICAL_SHA }}
+          - Android functional baseline: v0.1.3
+          - Signing identity proof outcome: ${{ steps.signing.outcome }}
+          - Exact signed build outcome: ${{ steps.build.outcome }}
+          - Expected package: com.example.mobileproxy
+          - Expected versionName: 0.1.4
+          - Expected versionCode: 1004
+          - Phone runner used: false
+          - Phone access performed: false
+          - Phone mutation performed: false
+          - Signing key generated: false
+          - Signing material recorded: false
+          - Signer fingerprint recorded: false
+          - Device identifier recorded: false
+          - Provider credentials requested: false
+          EOF
