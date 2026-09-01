@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   command-gate:
-    name: Validate exact owner runtime binary repair command
+    name: Validate exact owner runtime binary repair authority
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
@@ -23,8 +23,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
     steps:
-      - name: Validate exact command and current canonical main SHA
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+
+      - name: Validate exact command, private binding, current canonical main, and Quality
         id: command
         shell: bash
         env:
@@ -32,22 +39,62 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, re, urllib.request
-          command = os.environ.get("COMMAND", "").strip()
-          match = re.fullmatch(r"/phone-runtime-repair-binaries ([0-9a-f]{40})", command)
+          import json
+          import os
+          import re
+          import urllib.request
+          from pathlib import Path
+
+          command = os.environ.get('COMMAND', '').strip()
+          match = re.fullmatch(r'/phone-runtime-repair-binaries ([0-9a-f]{40})', command)
           if match is None:
-              raise SystemExit("invalid runtime binary repair command")
+              raise SystemExit('invalid runtime binary repair command')
           requested = match.group(1)
-          req = urllib.request.Request(
-              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
-              headers={"Accept":"application/vnd.github+json","User-Agent":"mobile-proxy-production-runtime-binary-repair"},
+
+          binding = json.loads(
+              Path('private-execution/.github/production/android-v0.1.4-migration-binding.json').read_text(encoding='utf-8')
           )
-          with urllib.request.urlopen(req, timeout=10) as response:
-              current = json.load(response)["sha"]
+          if binding.get('binding_role') != 'private_execution_only':
+              raise SystemExit('runtime repair private execution binding role differs')
+          if binding.get('canonical_repository') != 'iamaman11/mobile-proxy':
+              raise SystemExit('runtime repair canonical repository binding differs')
+          if binding.get('canonical_sha') != requested:
+              raise SystemExit('runtime repair requested SHA differs from current private Android execution binding')
+          if binding.get('final_release_authority') is not False:
+              raise SystemExit('private runtime repair binding cannot grant final release authority')
+
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'mobile-proxy-production-runtime-binary-repair',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+          def get_json(url):
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          current = get_json('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main').get('sha')
           if requested != current:
-              raise SystemExit("requested SHA is not current canonical main")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"canonical_sha={requested}\n")
+              raise SystemExit('requested SHA is not current canonical main')
+
+          runs = get_json(
+              f'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={requested}&event=push&per_page=100'
+          ).get('workflow_runs', [])
+          quality = [
+              run for run in runs
+              if run.get('name') == 'Quality'
+              and run.get('head_branch') == 'main'
+              and run.get('head_sha') == requested
+              and run.get('status') == 'completed'
+              and run.get('conclusion') == 'success'
+          ]
+          if len(quality) < 1:
+              raise SystemExit('exact current canonical SHA has no successful main Quality run')
+          accepted = max(quality, key=lambda run: int(run.get('id', 0)))
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={requested}\n')
+              handle.write(f"quality_run_id={accepted['id']}\n")
           PY
 
   build:
@@ -57,6 +104,7 @@ jobs:
     timeout-minutes: 75
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
     steps:
       - name: Check out exact canonical public source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -74,23 +122,23 @@ jobs:
           import os
           from pathlib import Path
           candidates = []
-          for key in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"):
+          for key in ('ANDROID_NDK_HOME', 'ANDROID_NDK_ROOT'):
               value = os.environ.get(key)
               if value:
                   candidates.append(Path(value))
-          sdk = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME")
+          sdk = os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
           if sdk:
-              root = Path(sdk) / "ndk"
+              root = Path(sdk) / 'ndk'
               if root.is_dir():
                   candidates.extend(sorted((p for p in root.iterdir() if p.is_dir()), reverse=True))
           for candidate in candidates:
-              clang = candidate / "toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang"
-              ar = candidate / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+              clang = candidate / 'toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang'
+              ar = candidate / 'toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
               if clang.is_file() and ar.is_file():
-                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-                      handle.write(f"path={candidate}\n")
+                  with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+                      handle.write(f'path={candidate}\n')
                   raise SystemExit(0)
-          raise SystemExit("no compatible Android NDK found on hosted runner")
+          raise SystemExit('no compatible Android NDK found on hosted runner')
           PY
 
       - name: Build exact canonical runtime binaries
@@ -98,7 +146,7 @@ jobs:
         working-directory: canonical
         run: |
           set -euo pipefail
-          cargo run -p operator-cli -- prepare-runtime-binaries --android-ndk '${{ steps.ndk.outputs.path }}'
+          cargo run --locked -p operator-cli --bin operator-cli -- prepare-runtime-binaries --android-ndk '${{ steps.ndk.outputs.path }}'
           file deploy/device-runtime/bin/runtime-supervisor deploy/device-runtime/bin/host-daemon deploy/device-runtime/bin/sing-box
 
       - name: Stage bounded non-secret bundle
@@ -117,10 +165,17 @@ jobs:
           root = Path('../runtime-bundle')
           files = {}
           for path in sorted((root / 'bin').iterdir()):
-              files[path.name] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size': path.stat().st_size}
+              files[path.name] = {
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'size': path.stat().st_size,
+              }
           (root / 'build-evidence.json').write_text(json.dumps({
-              'format_version': 1,
+              'format_version': 2,
               'canonical_sha': os.environ['CANONICAL_SHA'],
+              'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'dependency_lock_enforced': True,
+              'operator_cli_binary_selected_explicitly': True,
               'contains_production_secrets': False,
               'phone_mutation_performed': False,
               'apk_mutation_performed': False,
@@ -137,12 +192,13 @@ jobs:
           retention-days: 30
 
   repair:
-    name: Replace only stale runtime binaries and prove local health
+    name: Replace only source-bound runtime binaries and prove local health
     needs: [command-gate, build]
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 12
+    timeout-minutes: 15
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
       - name: Download exact runtime bundle from this run
@@ -166,10 +222,19 @@ jobs:
           python3 - <<'PY'
           import hashlib, importlib.util, json, os, re, subprocess
           from pathlib import Path
+
           root = Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle'
           evidence = json.loads((root / 'build-evidence.json').read_text(encoding='utf-8'))
-          if evidence.get('canonical_sha') != os.environ['CANONICAL_SHA'] or evidence.get('contains_production_secrets') is not False:
-              raise SystemExit('runtime bundle authority differs')
+          if evidence.get('format_version') != 2:
+              raise SystemExit('unexpected runtime bundle evidence format')
+          if evidence.get('canonical_sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('runtime bundle canonical authority differs')
+          if evidence.get('quality_run_id') != int(os.environ['QUALITY_RUN_ID']):
+              raise SystemExit('runtime bundle Quality authority differs')
+          if evidence.get('private_execution_sha') != os.environ['GITHUB_SHA']:
+              raise SystemExit('runtime bundle private execution revision differs')
+          if evidence.get('contains_production_secrets') is not False:
+              raise SystemExit('runtime bundle secret boundary differs')
           expected = {'runtime-supervisor', 'host-daemon', 'sing-box'}
           if set(evidence.get('files', {})) != expected:
               raise SystemExit('runtime bundle file set differs')
@@ -182,14 +247,20 @@ jobs:
                   raise SystemExit('runtime bundle digest differs')
 
           serial = os.environ['ANDROID_PRODUCTION_SERIAL']
-          spec = importlib.util.spec_from_file_location('preflight', Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py')
+          spec = importlib.util.spec_from_file_location(
+              'preflight', Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py'
+          )
           preflight = importlib.util.module_from_spec(spec)
           assert spec.loader is not None
           spec.loader.exec_module(preflight)
           preflight.require_canonical_sha(os.environ['CANONICAL_SHA'])
           preflight.require_expected_serial()
           preflight.prove_registered_device(serial)
-          package = subprocess.run(['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'], check=False, capture_output=True, text=True, timeout=60)
+
+          package = subprocess.run(
+              ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
+              check=False, capture_output=True, text=True, timeout=60,
+          )
           codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
           names = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
           if package.returncode != 0 or codes != ['2'] or names != ['1.1.0']:
@@ -205,6 +276,7 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
+
           serial = os.environ['ANDROID_PRODUCTION_SERIAL']
           run_id = os.environ['GITHUB_RUN_ID']
           local_root = Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle'
@@ -213,14 +285,20 @@ jobs:
           subprocess.run(['adb','-s',serial,'shell','rm','-rf',stage], check=True, timeout=30)
           subprocess.run(['adb','-s',serial,'shell','mkdir','-p',stage], check=True, timeout=30)
           for name in ('runtime-supervisor','host-daemon','sing-box'):
-              subprocess.run(['adb','-s',serial,'push',str(local_root/'bin'/name),f'{stage}/{name}'], check=True, stdout=subprocess.DEVNULL, timeout=180)
-              remote = subprocess.run(['adb','-s',serial,'shell','sha256sum',f'{stage}/{name}'], check=True, capture_output=True, text=True, timeout=30).stdout.split()[0]
+              subprocess.run(
+                  ['adb','-s',serial,'push',str(local_root/'bin'/name),f'{stage}/{name}'],
+                  check=True, stdout=subprocess.DEVNULL, timeout=180,
+              )
+              remote = subprocess.run(
+                  ['adb','-s',serial,'shell','sha256sum',f'{stage}/{name}'],
+                  check=True, capture_output=True, text=True, timeout=30,
+              ).stdout.split()[0]
               if remote != evidence['files'][name]['sha256']:
                   raise SystemExit('staged runtime binary digest differs')
           print('exact runtime binaries staged and digest-verified')
           PY
 
-      - name: Atomically replace only runtime binaries with bounded backup
+      - name: Atomically replace only runtime binaries with complete bounded backup
         id: replace
         shell: bash
         run: |
@@ -228,6 +306,7 @@ jobs:
           python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-replace-proof.json"
           python3 - <<'PY'
           import os, subprocess
+
           serial = os.environ['ANDROID_PRODUCTION_SERIAL']
           run_id = os.environ['GITHUB_RUN_ID']
           stage = f'/data/local/tmp/mobile-proxy-runtime-repair-{run_id}'
@@ -254,6 +333,7 @@ jobs:
             test -f "$target/bin/$name"
             test ! -L "$target/bin/$name"
             cp -p "$target/bin/$name" "{backup}/$name"
+            test -s "{backup}/$name"
           done
           for name in runtime-supervisor host-daemon sing-box; do
             install -m 0755 "{stage}/$name" "$target/bin/.$name.repair-{run_id}"
@@ -264,10 +344,43 @@ jobs:
           trap - EXIT INT TERM
           rm -rf "{stage}"
           '''
-          subprocess.run(['adb','-s',serial,'shell','su','0','sh','-c',script], check=True, timeout=120)
+          subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-c',script],
+              check=True, timeout=120,
+          )
           with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as handle:
               handle.write(f'backup={backup}\n')
           print('runtime binary replacement transaction committed')
+          PY
+
+      - name: Verify committed runtime binaries equal exact build bundle
+        id: committed-digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          evidence = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle' / 'build-evidence.json').read_text(encoding='utf-8')
+          )
+          root = '/data/adb/mobile-proxy-node/current/bin'
+          installed = {}
+          for name in ('runtime-supervisor','host-daemon','sing-box'):
+              result = subprocess.run(
+                  ['adb','-s',serial,'shell','su','0','sh','-c',f'sha256sum "{root}/{name}"'],
+                  check=True, capture_output=True, text=True, timeout=30,
+              )
+              digest = result.stdout.split()[0]
+              installed[name] = digest
+              if digest != evidence['files'][name]['sha256']:
+                  raise SystemExit(f'committed runtime binary digest differs: {name}')
+          Path(os.environ['RUNNER_TEMP'],'committed-runtime-digests.json').write_text(
+              json.dumps(installed, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          print('committed runtime binaries match exact build bundle')
           PY
 
       - name: Bootstrap exact repaired runtime
@@ -283,14 +396,15 @@ jobs:
           ], check=True, timeout=60)
           PY
 
-      - name: Verify full local health and record evidence
+      - name: Verify full local health, exact binaries, and unchanged APK
         id: health
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, subprocess, time
+          import json, os, re, subprocess, time
           from pathlib import Path
+
           serial = os.environ['ANDROID_PRODUCTION_SERIAL']
           supervisor = '/data/adb/mobile-proxy-node/current/bin/runtime-supervisor'
           runtime_root = '/data/adb/mobile-proxy-node/current'
@@ -298,8 +412,11 @@ jobs:
           egress_service = 'com.example.mobileproxy/.CellularEgressService'
           watchdog_script = '/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh'
           watchdog_pid = '/data/adb/mobile-proxy-node/logs/runtime-watchdog.pid'
+
           def adb(*args, timeout=30):
-              return subprocess.run(['adb','-s',serial,*args], check=False, capture_output=True, text=True, timeout=timeout)
+              return subprocess.run(
+                  ['adb','-s',serial,*args], check=False, capture_output=True, text=True, timeout=timeout
+              )
           def root_ok(shell):
               try:
                   return adb('shell','su','0','sh','-c',shell,timeout=20).returncode == 0
@@ -311,63 +428,166 @@ jobs:
               egress_running = egress.returncode == 0 and egress_service in egress.stdout
               ports = root_ok('''BB=""; for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do [ -x "$candidate" ] && BB="$candidate" && break; done; [ -n "$BB" ] || exit 1; "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1; "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1''')
               watchdog = root_ok(f'''test -f "{watchdog_pid}" || exit 1; pid="$(cat "{watchdog_pid}" 2>/dev/null || true)"; test -n "$pid" || exit 1; test -r "/proc/$pid/cmdline" || exit 1; tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "{watchdog_script}"''')
-              return {'runtime_supervisor_running':supervisor_running,'cellular_egress_service_running':egress_running,'local_proxy_ports_ready':ports,'runtime_watchdog_running':watchdog}
+              return {
+                  'runtime_supervisor_running': supervisor_running,
+                  'cellular_egress_service_running': egress_running,
+                  'local_proxy_ports_ready': ports,
+                  'runtime_watchdog_running': watchdog,
+              }
+
           deadline = time.monotonic() + 90
           current = state()
           while time.monotonic() < deadline and not all(current.values()):
               time.sleep(2)
               current = state()
+
+          package_result = adb('shell','dumpsys','package',package,timeout=60)
+          codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package_result.stdout, re.MULTILINE)
+          names = re.findall(r'^\s*versionName=([^\s]+)\s*$', package_result.stdout, re.MULTILINE)
+          apk_unchanged = package_result.returncode == 0 and codes == ['2'] and names == ['1.1.0']
+
+          build_evidence = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle' / 'build-evidence.json').read_text(encoding='utf-8')
+          )
+          installed_digests = json.loads(
+              Path(os.environ['RUNNER_TEMP'],'committed-runtime-digests.json').read_text(encoding='utf-8')
+          )
+          digests_match = all(
+              installed_digests.get(name) == build_evidence['files'][name]['sha256']
+              for name in ('runtime-supervisor','host-daemon','sing-box')
+          )
+
+          accepted = all(current.values()) and apk_unchanged and digests_match
           current.update({
-              'format_version':1,
-              'canonical_sha':os.environ['CANONICAL_SHA'],
-              'installed_apk_expected_version':'1.1.0/2',
-              'runtime_binaries_replaced':True,
-              'apk_mutation_performed':False,
-              'config_mutation_performed':False,
-              'phone_reboot_performed':False,
-              'provider_credentials_requested':False,
-              'raw_device_identifier_recorded':False,
-              'accepted':all(current[k] for k in ('runtime_supervisor_running','cellular_egress_service_running','local_proxy_ports_ready','runtime_watchdog_running')),
+              'format_version': 2,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'installed_version_name': names[0] if len(names) == 1 else None,
+              'installed_version_code': int(codes[0]) if len(codes) == 1 else None,
+              'installed_apk_unchanged': apk_unchanged,
+              'runtime_binaries_replaced': True,
+              'installed_runtime_binary_digests_match_build': digests_match,
+              'phone_mutation_performed': True,
+              'apk_mutation_performed': False,
+              'config_mutation_performed': False,
+              'phone_reboot_performed': False,
+              'provider_credentials_requested': False,
+              'raw_device_identifier_recorded': False,
+              'accepted': accepted,
           })
-          Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-evidence.json').write_text(json.dumps(current,indent=2,sort_keys=True)+'\n',encoding='utf-8')
-          print('bounded repaired health: ' + ' '.join(f'{k}={v}' for k,v in current.items() if k != 'canonical_sha'))
-          if not current['accepted']:
-              raise SystemExit('exact runtime binary repair did not restore local health')
+          Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-evidence.json').write_text(
+              json.dumps(current,indent=2,sort_keys=True)+'\n',encoding='utf-8'
+          )
+          print('bounded repaired health: ' + ' '.join(
+              f'{k}={v}' for k,v in current.items() if k not in ('canonical_sha','private_execution_sha')
+          ))
+          if not accepted:
+              raise SystemExit('exact runtime binary repair did not restore accepted local baseline')
           PY
 
-      - name: Roll back runtime binaries if repaired health failed
-        if: failure() && steps.replace.outcome == 'success'
+      - name: Roll back and verify exact pre-repair binaries on any post-replace failure
+        id: rollback
+        if: failure() && steps.replace.outcome != 'skipped'
         shell: bash
         run: |
           set -euo pipefail
           python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-rollback-proof.json"
           python3 - <<'PY'
-          import os, subprocess
-          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
-          backup = os.environ['BACKUP']
-          script = f'''set -eu
-          current=/data/adb/mobile-proxy-node/current
-          test -L "$current"
-          target="$(readlink -f "$current")"
-          case "$target" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
-          for name in runtime-supervisor host-daemon sing-box; do
-            test -f "{backup}/$name"
-            cp -p "{backup}/$name" "$target/bin/$name"
-          done
-          sh "$target/service.sh" || true
-          '''
-          subprocess.run(['adb','-s',serial,'shell','su','0','sh','-c',script], check=True, timeout=120)
-          print('runtime binary rollback invoked')
-          PY
-        env:
-          BACKUP: ${{ steps.replace.outputs.backup }}
+          import json, os, re, subprocess
+          from pathlib import Path
 
-      - name: Upload bounded repair evidence
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          run_id = os.environ['GITHUB_RUN_ID']
+          backup = f'/data/local/tmp/mobile-proxy-runtime-backup-{run_id}'
+          target = '/data/adb/mobile-proxy-node/current/bin'
+          names = ('runtime-supervisor','host-daemon','sing-box')
+
+          before = {}
+          backup_complete = True
+          for name in names:
+              result = subprocess.run(
+                  ['adb','-s',serial,'shell','su','0','sh','-c',f'test -s "{backup}/{name}" && sha256sum "{backup}/{name}"'],
+                  check=False, capture_output=True, text=True, timeout=30,
+              )
+              if result.returncode != 0 or not result.stdout.split():
+                  backup_complete = False
+              else:
+                  before[name] = result.stdout.split()[0]
+
+          rollback_invoked = False
+          restored_match = False
+          if backup_complete:
+              script = f'''set -eu
+              current=/data/adb/mobile-proxy-node/current
+              test -L "$current"
+              resolved="$(readlink -f "$current")"
+              case "$resolved" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
+              for name in runtime-supervisor host-daemon sing-box; do
+                test -s "{backup}/$name"
+                cp -p "{backup}/$name" "$resolved/bin/$name"
+              done
+              sh "$resolved/service.sh" || true
+              '''
+              subprocess.run(
+                  ['adb','-s',serial,'shell','su','0','sh','-c',script],
+                  check=True, timeout=120,
+              )
+              rollback_invoked = True
+              restored = {}
+              for name in names:
+                  result = subprocess.run(
+                      ['adb','-s',serial,'shell','su','0','sh','-c',f'sha256sum "{target}/{name}"'],
+                      check=True, capture_output=True, text=True, timeout=30,
+                  )
+                  restored[name] = result.stdout.split()[0]
+              restored_match = all(restored.get(name) == before.get(name) for name in names)
+
+          package = subprocess.run(
+              ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
+              check=False, capture_output=True, text=True, timeout=60,
+          )
+          codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
+          versions = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
+          apk_unchanged = package.returncode == 0 and codes == ['2'] and versions == ['1.1.0']
+
+          state = {
+              'format_version': 1,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'rollback_required': True,
+              'backup_complete': backup_complete,
+              'rollback_invoked': rollback_invoked,
+              'restored_runtime_binary_digests_match_backup': restored_match,
+              'installed_apk_unchanged': apk_unchanged,
+              'installed_version_name': versions[0] if len(versions) == 1 else None,
+              'installed_version_code': int(codes[0]) if len(codes) == 1 else None,
+              'apk_mutation_performed': False,
+              'config_mutation_performed': False,
+              'phone_reboot_performed': False,
+              'provider_credentials_requested': False,
+              'raw_device_identifier_recorded': False,
+              'rollback_accepted': backup_complete and rollback_invoked and restored_match and apk_unchanged,
+          }
+          Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-rollback-evidence.json').write_text(
+              json.dumps(state,indent=2,sort_keys=True)+'\n',encoding='utf-8'
+          )
+          print('runtime binary rollback verification: ' + ' '.join(
+              f'{k}={v}' for k,v in state.items() if k not in ('canonical_sha','private_execution_sha')
+          ))
+          if not state['rollback_accepted']:
+              raise SystemExit('runtime binary rollback could not prove exact pre-repair restoration')
+          PY
+
+      - name: Upload bounded repair and rollback evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-binary-repair-evidence-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/runtime-binary-repair-evidence.json
+          path: |
+            ${{ runner.temp }}/runtime-binary-repair-evidence.json
+            ${{ runner.temp }}/runtime-binary-repair-rollback-evidence.json
+            ${{ runner.temp }}/committed-runtime-digests.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -380,24 +600,38 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
+          QUALITY_RUN_ID_SAFE: ${{ env.QUALITY_RUN_ID }}
           HEALTH_OUTCOME: ${{ steps.health.outcome }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, os, urllib.request
           from pathlib import Path
-          path = Path(os.environ['RUNNER_TEMP']) / 'runtime-binary-repair-evidence.json'
-          state = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
-          keys = ['runtime_supervisor_running','cellular_egress_service_running','local_proxy_ports_ready','runtime_watchdog_running','accepted']
-          lines = [f"- {key}: `{state.get(key)}`" for key in keys]
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          repair_path = root / 'runtime-binary-repair-evidence.json'
+          rollback_path = root / 'runtime-binary-repair-rollback-evidence.json'
+          repair = json.loads(repair_path.read_text(encoding='utf-8')) if repair_path.is_file() else {}
+          rollback = json.loads(rollback_path.read_text(encoding='utf-8')) if rollback_path.is_file() else {}
           body = '\n'.join([
               f"EXACT RUNTIME BINARY REPAIR — run `{os.environ['RUN_ID']}`",
               '',
               f"- canonical SHA: `{os.environ['CANONICAL_SHA_SAFE']}`",
+              f"- exact public Quality run: `{os.environ['QUALITY_RUN_ID_SAFE']}`",
+              f"- private execution SHA: `{os.environ['GITHUB_SHA']}`",
               f"- health step outcome: `{os.environ.get('HEALTH_OUTCOME','')}`",
+              f"- rollback step outcome: `{os.environ.get('ROLLBACK_OUTCOME','')}`",
               '- installed APK baseline required: `1.1.0/2`',
               '- runtime binaries targeted: `runtime-supervisor`, `host-daemon`, `sing-box`',
-              *lines,
+              f"- committed exact runtime binary digests verified: `{repair.get('installed_runtime_binary_digests_match_build')}`",
+              f"- runtime supervisor running: `{repair.get('runtime_supervisor_running')}`",
+              f"- cellular egress service running: `{repair.get('cellular_egress_service_running')}`",
+              f"- local proxy ports ready: `{repair.get('local_proxy_ports_ready')}`",
+              f"- runtime watchdog running: `{repair.get('runtime_watchdog_running')}`",
+              f"- repaired baseline accepted: `{repair.get('accepted')}`",
+              f"- rollback required: `{rollback.get('rollback_required', False)}`",
+              f"- rollback exact bytes accepted: `{rollback.get('rollback_accepted')}`",
               '- APK mutation performed: `False`',
               '- config mutation performed: `False`',
               '- phone reboot performed: `False`',
@@ -407,7 +641,12 @@ jobs:
           req = urllib.request.Request(
               f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments",
               data=json.dumps({'body':body}).encode('utf-8'),
-              headers={'Accept':'application/vnd.github+json','Authorization':f"Bearer {os.environ['GH_TOKEN']}",'Content-Type':'application/json','User-Agent':'mobile-proxy-production-runtime-binary-repair'},
+              headers={
+                  'Accept':'application/vnd.github+json',
+                  'Authorization':f"Bearer {os.environ['GH_TOKEN']}",
+                  'Content-Type':'application/json',
+                  'User-Agent':'mobile-proxy-production-runtime-binary-repair',
+              },
               method='POST',
           )
           with urllib.request.urlopen(req, timeout=20) as response:
