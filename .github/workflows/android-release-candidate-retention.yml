@@ -1,0 +1,126 @@
+name: Production Android signed candidate retention
+
+on:
+  workflow_run:
+    workflows:
+      - Production Android v0.1.4 signed candidate
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+
+concurrency:
+  group: production-android-v014-candidate-retention
+  cancel-in-progress: false
+
+jobs:
+  retain:
+    name: Retain exact signed candidate as bounded private release
+    if: >-
+      github.event.workflow_run.event == 'issue_comment' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANONICAL_SHA: a6735b3b64958699b50acc619e770d80f4bdfbc1
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Download exact signed-candidate artifact from source run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-release-candidate-v0.1.4-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Revalidate bounded canonical evidence before retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/candidate"
+          test -s "${candidate}/mobile-proxy-android-v0.1.4.apk"
+          test -s "${candidate}/android-release-evidence.json"
+          python3 - "${candidate}/android-release-evidence.json" <<'PY'
+          import json
+          import re
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as handle:
+              evidence = json.load(handle)
+          expected = {
+              "canonical_sha": "a6735b3b64958699b50acc619e770d80f4bdfbc1",
+              "android_baseline_ref": "v0.1.3",
+              "android_functional_source_preserved": True,
+              "application_id": "com.example.mobileproxy",
+              "version_name": "0.1.4",
+              "version_code": 1004,
+              "release_contract_verified": True,
+              "keystore_verified": True,
+              "apk_signature_verified": True,
+              "apk_signer_matches_private_key": True,
+              "production_apk_signed": True,
+              "phone_access_performed": False,
+              "phone_mutation_performed": False,
+              "accepted": True,
+          }
+          for key, value in expected.items():
+              if evidence.get(key) != value:
+                  raise SystemExit(f"candidate retention evidence mismatch: {key}")
+          digest = evidence.get("artifact_digest")
+          if not isinstance(digest, str) or re.fullmatch(r"b3:[0-9a-f]{64}", digest) is None:
+              raise SystemExit("typed APK digest is absent or malformed")
+          if evidence.get("artifact_digest_algorithm") != "blake3-256":
+              raise SystemExit("unexpected APK digest algorithm")
+          if evidence.get("artifact_name") != "mobile-proxy-android-v0.1.4.apk":
+              raise SystemExit("unexpected APK artifact name")
+          PY
+
+      - name: Publish immutable-by-contract private execution candidate release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="execution-candidate-android-v0.1.4-${CANONICAL_SHA:0:12}-run-${SOURCE_RUN_ID}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "candidate retention release already exists" >&2
+            exit 1
+          fi
+          cat > "${RUNNER_TEMP}/candidate-notes.md" <<EOF
+          Private execution retention for the exact signed Android v0.1.4 candidate.
+
+          Canonical public release identity: v0.1.4
+          Canonical public source SHA: ${CANONICAL_SHA}
+          Private signed-candidate run: ${SOURCE_RUN_ID}
+          Private execution SHA: ${SOURCE_RUN_SHA}
+
+          Assets are the signed APK and its canonical typed-digest/provenance evidence. This release is execution evidence only; public iamaman11/mobile-proxy remains the sole authority for source, architecture, policy and release identity.
+          EOF
+          gh release create "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${SOURCE_RUN_SHA}" \
+            --title "Private execution candidate — Android v0.1.4 — run ${SOURCE_RUN_ID}" \
+            --notes-file "${RUNNER_TEMP}/candidate-notes.md" \
+            --prerelease \
+            "${RUNNER_TEMP}/candidate/mobile-proxy-android-v0.1.4.apk" \
+            "${RUNNER_TEMP}/candidate/android-release-evidence.json"
+
+      - name: Record safe retention checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh issue comment 1 --repo "${GITHUB_REPOSITORY}" --body "ANDROID V0.1.4 CANDIDATE RETENTION CHECKPOINT — source run \`${SOURCE_RUN_ID}\`
+
+          - private execution SHA: \`${SOURCE_RUN_SHA}\`
+          - canonical public SHA: \`${CANONICAL_SHA}\`
+          - exact signed APK retained as private execution prerelease: true
+          - canonical typed digest/provenance evidence retained: true
+          - phone access performed: false
+          - phone mutation performed: false
+          - signing material recorded: false
+          - signer fingerprint recorded: false
+          - device identifier recorded: false"
