@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "binding_role": "private_execution_only",
+  "canonical_repository": "iamaman11/mobile-proxy",
+  "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
+  "quality_required": true,
+  "migration_tracker_issue": 162,
+  "hardening_tracker_issue": 179,
+  "application_id": "com.example.mobileproxy",
+  "version_name": "0.1.4",
+  "version_code": 1004,
+  "old_version_name": "1.1.0",
+  "old_version_code": 2,
+  "candidate_retention_days_minimum": 30,
+  "final_release_authority": false
+}
