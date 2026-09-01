@@ -9,7 +9,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: production-phone-exact-runtime-binary-repair
+  group: production-phone-global-mutation
   cancel-in-progress: false
 
 jobs:
