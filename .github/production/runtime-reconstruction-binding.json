@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "binding_role": "private_execution_only",
   "mode": "config_reconstruction_reauthorization",
   "enrollment_status": "pending",
@@ -14,16 +14,23 @@
   "final_release_authority": false,
   "phone_execution_authority": false,
   "provider_credentials_allowed": false,
+  "recovery_health_scope": "local_runtime_only",
+  "full_serving_authority": false,
+  "item20_transport_authority": "deferred_to_sealed_handoff",
+  "network_target_class": "loopback_recovery_sentinel",
   "tunnel_owner": "first_party_reverse_tunnel",
   "tunnel_owner_evidence": {
     "evidence_type": "canonical_live_verify",
     "canonical_commit": "ad9bc7c88fcd0abd7bf422f12b852c24f6dc16ea",
     "historical_owner_evidence_only": true
   },
-  "manifest_authority": "new_reauthorized_baseline",
+  "manifest_authority": "new_synthetic_local_recovery_baseline",
   "manifest_source": {
-    "kind": "github_actions_secret",
-    "secret_name": "ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON"
+    "kind": "private_execution_file",
+    "path": ".github/production/runtime-reconstruction-manifest.json",
+    "contains_secret_values": false,
+    "contains_physical_device_identifier": false,
+    "contains_provider_endpoint": false
   },
   "manifest_fingerprint": {
     "algorithm": "sha256",
@@ -62,8 +69,10 @@
     "MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64"
   ],
   "evidence_policy": {
-    "raw_manifest_recorded": false,
-    "raw_device_identifier_recorded": false,
+    "synthetic_local_recovery_manifest_private_git_recorded": true,
+    "historical_or_live_production_manifest_recorded": false,
+    "physical_device_identifier_recorded": false,
+    "provider_endpoint_recorded": false,
     "secret_values_recorded": false,
     "rendered_config_recorded": false,
     "config_digest_recorded": false,

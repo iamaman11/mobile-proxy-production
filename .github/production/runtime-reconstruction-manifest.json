@@ -1,0 +1,18 @@
+{
+  "deviceId": "runtime-recovery-primary",
+  "nodeName": "production-phone-local-recovery",
+  "operatorProfile": "default",
+  "controlPlaneUrl": "https://mobile-proxy-relay:8443",
+  "tokens": {
+    "adminTokenEnv": "MOBILE_PROXY_ADMIN_TOKEN",
+    "deviceTokenEnv": "MOBILE_PROXY_DEVICE_TOKEN",
+    "uiTokenEnv": "MOBILE_PROXY_UI_TOKEN",
+    "reverseTunnelCertDerB64Env": "MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64",
+    "relayUserEnv": "MOBILE_PROXY_RELAY_USER",
+    "relayPasswordEnv": "MOBILE_PROXY_RELAY_PASSWORD"
+  },
+  "relay": {
+    "host": "127.0.0.1",
+    "httpPort": 3128
+  }
+}

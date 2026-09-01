@@ -7,8 +7,8 @@ permissions:
   contents: read
 
 jobs:
-  pending-enrollment-gate:
-    name: Validate reconstruction authority and refuse pending enrollment
+  source-identity-gate:
+    name: Validate reconstruction authority and synthetic manifest identity only
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -18,7 +18,7 @@ jobs:
           ref: ${{ github.sha }}
           path: private-execution
 
-      - name: Validate exact authority and fail closed before enrollment inputs
+      - name: Validate exact authority and private synthetic manifest fingerprint
         shell: bash
         env:
           PRIVATE_REPOSITORY: ${{ github.repository }}
@@ -27,26 +27,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import hashlib
           import json
           import os
+          import re
           import time
           import urllib.error
           import urllib.request
           from pathlib import Path
 
-          private_repository = os.environ["PRIVATE_REPOSITORY"]
-          private_sha = os.environ["PRIVATE_SHA"]
-          private_token = os.environ["PRIVATE_TOKEN"]
-          binding_path = Path(
-              "private-execution/.github/production/runtime-reconstruction-binding.json"
-          )
-          binding = json.loads(binding_path.read_text(encoding="utf-8"))
-
+          root = Path("private-execution")
+          binding = json.loads((root / ".github/production/runtime-reconstruction-binding.json").read_text(encoding="utf-8"))
           expected = {
-              "format_version": 1,
+              "format_version": 2,
               "binding_role": "private_execution_only",
               "mode": "config_reconstruction_reauthorization",
-              "enrollment_status": "pending",
               "canonical_repository": "iamaman11/mobile-proxy",
               "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
               "quality_required": True,
@@ -58,44 +53,77 @@ jobs:
               "final_release_authority": False,
               "phone_execution_authority": False,
               "provider_credentials_allowed": False,
+              "recovery_health_scope": "local_runtime_only",
+              "full_serving_authority": False,
+              "item20_transport_authority": "deferred_to_sealed_handoff",
+              "network_target_class": "loopback_recovery_sentinel",
               "tunnel_owner": "first_party_reverse_tunnel",
-              "manifest_authority": "new_reauthorized_baseline",
+              "manifest_authority": "new_synthetic_local_recovery_baseline",
               "raw_device_identifier_in_binding": False,
           }
           for key, value in expected.items():
               if binding.get(key) != value:
-                  raise SystemExit(f"runtime reconstruction pending binding mismatch: {key}")
-
-          fingerprint = binding.get("manifest_fingerprint")
-          if fingerprint != {
-              "algorithm": "sha256",
-              "normalized_json_profile": "strict-sorted-compact-utf8-v1",
-              "sha256": None,
+                  raise SystemExit(f"runtime reconstruction binding mismatch: {key}")
+          status = binding.get("enrollment_status")
+          if status not in {"pending", "enrolled"}:
+              raise SystemExit("runtime reconstruction enrollment status is invalid")
+          if binding.get("manifest_source") != {
+              "kind": "private_execution_file",
+              "path": ".github/production/runtime-reconstruction-manifest.json",
+              "contains_secret_values": False,
+              "contains_physical_device_identifier": False,
+              "contains_provider_endpoint": False,
           }:
-              raise SystemExit("pending runtime reconstruction fingerprint state is invalid")
+              raise SystemExit("synthetic local-recovery manifest source contract mismatch")
 
-          source = binding.get("manifest_source")
-          if source != {
-              "kind": "github_actions_secret",
-              "secret_name": "ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON",
-          }:
-              raise SystemExit("runtime reconstruction manifest source contract mismatch")
+          manifest = json.loads((root / binding["manifest_source"]["path"]).read_text(encoding="utf-8"))
+          expected_manifest = {
+              "deviceId": "runtime-recovery-primary",
+              "nodeName": "production-phone-local-recovery",
+              "operatorProfile": "default",
+              "controlPlaneUrl": "https://mobile-proxy-relay:8443",
+              "tokens": {
+                  "adminTokenEnv": "MOBILE_PROXY_ADMIN_TOKEN",
+                  "deviceTokenEnv": "MOBILE_PROXY_DEVICE_TOKEN",
+                  "uiTokenEnv": "MOBILE_PROXY_UI_TOKEN",
+                  "reverseTunnelCertDerB64Env": "MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64",
+                  "relayUserEnv": "MOBILE_PROXY_RELAY_USER",
+                  "relayPasswordEnv": "MOBILE_PROXY_RELAY_PASSWORD",
+              },
+              "relay": {"host": "127.0.0.1", "httpPort": 3128},
+          }
+          if manifest != expected_manifest:
+              raise SystemExit("synthetic local-recovery manifest differs from exact approved contract")
+          normalized = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+          observed_fingerprint = hashlib.sha256(normalized).hexdigest()
+          fingerprint = binding.get("manifest_fingerprint", {})
+          if fingerprint.get("algorithm") != "sha256" or fingerprint.get("normalized_json_profile") != "strict-sorted-compact-utf8-v1":
+              raise SystemExit("manifest fingerprint contract mismatch")
+          if status == "pending":
+              if fingerprint.get("sha256") is not None:
+                  raise SystemExit("pending manifest fingerprint must remain unset")
+          else:
+              expected_fingerprint = fingerprint.get("sha256")
+              if not isinstance(expected_fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint) is None:
+                  raise SystemExit("enrolled manifest fingerprint is invalid")
+              if observed_fingerprint != expected_fingerprint:
+                  raise SystemExit("private synthetic manifest fingerprint differs from enrolled identity")
 
-          public_headers = {
+          headers = {
               "Accept": "application/vnd.github+json",
               "User-Agent": "mobile-proxy-production-runtime-reconstruction-readiness",
               "X-GitHub-Api-Version": "2022-11-28",
           }
-          private_headers = dict(public_headers)
-          private_headers["Authorization"] = f"Bearer {private_token}"
+          private_headers = dict(headers)
+          private_headers["Authorization"] = f"Bearer {os.environ['PRIVATE_TOKEN']}"
 
-          def get_json(url, headers, label):
+          def get_json(url, request_headers, label):
               last = None
               for attempt, delay in enumerate((0, 1, 2), start=1):
                   if delay:
                       time.sleep(delay)
-                  request = urllib.request.Request(url, headers=headers)
                   try:
+                      request = urllib.request.Request(url, headers=request_headers)
                       with urllib.request.urlopen(request, timeout=15) as response:
                           return json.load(response)
                   except (urllib.error.URLError, TimeoutError) as error:
@@ -104,43 +132,46 @@ jobs:
                           break
               raise SystemExit(f"{label} unavailable after bounded retries") from last
 
-          current_private = get_json(
+          private_repository = os.environ["PRIVATE_REPOSITORY"]
+          private_sha = os.environ["PRIVATE_SHA"]
+          if get_json(
               f"https://api.github.com/repos/{private_repository}/commits/main",
               private_headers,
               "private main authority",
-          ).get("sha")
-          if current_private != private_sha:
+          ).get("sha") != private_sha:
               raise SystemExit("readiness must execute from exact current private main")
-
           canonical_sha = binding["canonical_sha"]
-          current_public = get_json(
+          if get_json(
               "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
-              public_headers,
+              headers,
               "public main authority",
-          ).get("sha")
-          if current_public != canonical_sha:
+          ).get("sha") != canonical_sha:
               raise SystemExit("reconstruction binding canonical SHA is not current public main")
-
           runs = get_json(
               f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={canonical_sha}&event=push&per_page=100",
-              public_headers,
+              headers,
               "public Quality authority",
           ).get("workflow_runs", [])
-          accepted_quality = any(
+          if not any(
               run.get("name") == "Quality"
               and run.get("head_branch") == "main"
               and run.get("head_sha") == canonical_sha
               and run.get("status") == "completed"
               and run.get("conclusion") == "success"
               for run in runs
-          )
-          if not accepted_quality:
+          ):
               raise SystemExit("exact current canonical SHA has no successful main Quality run")
 
-          if binding.get("enrollment_status") != "pending":
-              raise SystemExit("pending readiness skeleton refuses non-pending enrollment state")
-
-          raise SystemExit(
-              "runtime reconstruction readiness is fail-closed: production manifest enrollment is pending; no manifest/runtime secret access or config rendering is authorized"
-          )
+          print("runtime reconstruction source identity readiness: accepted")
+          print("manifest_source_identity_valid=true")
+          print("manifest_enrollment_status=" + status)
+          print("recovery_health_scope=local_runtime_only")
+          print("full_serving_authority=false")
+          print("item20_transport_authority=deferred_to_sealed_handoff")
+          print("runtime_secret_values_read=false")
+          print("config_rendered=false")
+          print("provider_access=false")
+          print("phone_access=false")
+          if status != "enrolled":
+              raise SystemExit("runtime reconstruction source identity is valid but enrollment is still pending")
           PY
