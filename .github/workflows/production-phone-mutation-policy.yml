@@ -55,9 +55,12 @@ jobs:
               path.name: path.read_text(encoding='utf-8')
               for path in workflows.glob('*.yml')
           }
+          phone_runner_line = re.compile(
+              r'(?m)^    runs-on:\s*\[\s*self-hosted\s*,\s*Linux\s*,\s*X64\s*,\s*android-production\s*\]\s*$'
+          )
           phone_facing = {
               name for name, text in contents.items()
-              if 'android-production' in text
+              if phone_runner_line.search(text)
           }
           classified = mutators | read_only_phone
           unknown = sorted(phone_facing - classified)

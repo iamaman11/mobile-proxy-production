@@ -74,27 +74,34 @@ jobs:
                   if re.search(pattern, text):
                       raise SystemExit(f'{name}: copied canonical SHA assignment detected')
 
+          def actions_expr(expression):
+              return '$' + '{{ ' + expression + ' }}'
+
+          github_sha_ref = 'ref: ' + actions_expr('github.sha')
+          workflow_run_sha = actions_expr('github.event.workflow_run.head_sha')
+          source_run_sha_ref = 'ref: ' + actions_expr('env.SOURCE_RUN_SHA')
+
           required_fragments = {
               'build': [
-                  'ref: ${{ github.sha }}',
+                  github_sha_ref,
                   "current_main != bound_sha",
                   "requested_sha != bound_sha",
               ],
               'retention': [
-                  'SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}',
-                  'ref: ${{ env.SOURCE_RUN_SHA }}',
+                  'SOURCE_RUN_SHA: ' + workflow_run_sha,
+                  source_run_sha_ref,
                   "current_main != canonical_sha",
               ],
               'migration': [
-                  'ref: ${{ github.sha }}',
+                  github_sha_ref,
                   "run.get('head_sha') != os.environ['GITHUB_SHA']",
                   "current_main != bound_sha",
                   'releases/tags/',
                   "retention.get('target_commitish') != os.environ['GITHUB_SHA']",
               ],
               'audit': [
-                  'SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}',
-                  'ref: ${{ env.SOURCE_RUN_SHA }}',
+                  'SOURCE_RUN_SHA: ' + workflow_run_sha,
+                  source_run_sha_ref,
               ],
           }
           for name, fragments in required_fragments.items():
