@@ -73,6 +73,66 @@ jobs:
             "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
             --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
 
+      - name: Record bounded ADB inventory shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          inventory_valid = False
+          device_count = 0
+          online_count = 0
+          registered_present = False
+          registered_online = False
+          probe_ok = False
+
+          try:
+              probe = subprocess.run(
+                  ["adb", "devices"],
+                  check=False,
+                  capture_output=True,
+                  text=True,
+                  timeout=10,
+              )
+              probe_ok = probe.returncode == 0
+              if probe_ok:
+                  lines = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
+                  if lines and lines[0] == "List of devices attached":
+                      rows = []
+                      inventory_valid = True
+                      for line in lines[1:]:
+                          parts = line.split()
+                          if len(parts) != 2:
+                              inventory_valid = False
+                              rows = []
+                              break
+                          rows.append((parts[0], parts[1]))
+                      if inventory_valid:
+                          device_count = len(rows)
+                          online_count = sum(state == "device" for _, state in rows)
+                          expected = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
+                          registered_present = any(serial == expected for serial, _ in rows)
+                          registered_online = any(
+                              serial == expected and state == "device" for serial, state in rows
+                          )
+          except (OSError, subprocess.TimeoutExpired):
+              pass
+
+          summary = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary, "a", encoding="utf-8") as handle:
+              handle.write("## Bounded ADB inventory diagnostic\n")
+              handle.write(f"- ADB probe completed: {str(probe_ok).lower()}\n")
+              handle.write(f"- Inventory shape valid: {str(inventory_valid).lower()}\n")
+              handle.write(f"- Device row count: {device_count if inventory_valid else 'unavailable'}\n")
+              handle.write(f"- Online device count: {online_count if inventory_valid else 'unavailable'}\n")
+              handle.write(f"- Registered device present: {str(registered_present).lower()}\n")
+              handle.write(f"- Registered device online: {str(registered_online).lower()}\n")
+              handle.write("- Raw device identifiers recorded: false\n")
+              handle.write("- Phone mutation performed: false\n")
+          PY
+
       - name: Run read-only phone preflight
         id: preflight
         shell: bash
