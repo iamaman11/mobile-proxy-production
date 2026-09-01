@@ -1,0 +1,250 @@
+name: Production phone runtime recovery
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-runtime-recovery
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner runtime recovery command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-runtime-recover ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-recover ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid phone runtime recovery command")
+          requested_sha = match.group(1)
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "mobile-proxy-production-runtime-recovery",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              canonical_main = json.load(response)["sha"]
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+          PY
+
+  recover-runtime:
+    name: Recover existing production runtime without APK mutation
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Recover canonical installed runtime and prove local health
+        id: recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          canonical_sha = os.environ["CANONICAL_SHA"]
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          package = "com.example.mobileproxy"
+          runtime_root = "/data/adb/mobile-proxy-node/current"
+          service_entrypoint = f"{runtime_root}/service.sh"
+          supervisor = f"{runtime_root}/bin/runtime-supervisor"
+          config = f"{runtime_root}/config/host-daemon.json"
+          egress_service = "com.example.mobileproxy/.CellularEgressService"
+
+          spec = importlib.util.spec_from_file_location(
+              "phone_preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py"
+          )
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+
+          def adb(*args, timeout=60, check=True):
+              result = subprocess.run(
+                  ["adb", "-s", serial, *args],
+                  check=False,
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+              )
+              if check and result.returncode != 0:
+                  raise RuntimeError("registered-phone runtime recovery command failed")
+              return result
+
+          def root_ok(shell):
+              try:
+                  return adb("shell", "su", "0", "sh", "-c", shell, timeout=20, check=False).returncode == 0
+              except (OSError, subprocess.TimeoutExpired):
+                  return False
+
+          def supervisor_running():
+              return root_ok(f'''for proc in /proc/[0-9]*; do
+                [ -r "$proc/cmdline" ] || continue
+                cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                case "$cmd" in
+                  "{supervisor} --runtime-root {runtime_root} "*) exit 0 ;;
+                esac
+              done
+              exit 1
+              ''')
+
+          def egress_running():
+              result = adb("shell", "dumpsys", "activity", "services", package, timeout=30, check=False)
+              return result.returncode == 0 and egress_service in result.stdout
+
+          def ports_ready():
+              return root_ok('''BB=""
+              for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do
+                [ -x "$candidate" ] && BB="$candidate" && break
+              done
+              [ -n "$BB" ] || exit 1
+              "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1
+              "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1
+              ''')
+
+          # Read-only target and baseline gate before any recovery mutation.
+          preflight.require_canonical_sha(canonical_sha)
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          package_dump = adb("shell", "dumpsys", "package", package, timeout=60).stdout
+          codes = re.findall(r"^\s*versionCode=([0-9]+)\b", package_dump, re.MULTILINE)
+          names = re.findall(r"^\s*versionName=([^\s]+)\s*$", package_dump, re.MULTILINE)
+          if len(codes) != 1 or len(names) != 1 or (codes[0], names[0]) != ("2", "1.1.0"):
+              raise RuntimeError("installed Android baseline differs from approved recovery state")
+
+          if not root_ok(
+              f'test -f "{service_entrypoint}" && test -x "{supervisor}" && test -f "{config}"'
+          ):
+              raise RuntimeError("installed runtime bootstrap contract is unavailable")
+
+          # Exact registered-device proof immediately before the one bounded mutation.
+          preflight.prove_registered_device(serial)
+          adb(
+              "shell",
+              "su",
+              "0",
+              "sh",
+              "-c",
+              f'sh "{service_entrypoint}"',
+              timeout=60,
+          )
+
+          deadline = time.monotonic() + 90
+          healthy = False
+          state = {}
+          while time.monotonic() < deadline:
+              state = {
+                  "runtime_supervisor_running": supervisor_running(),
+                  "cellular_egress_service_running": egress_running(),
+                  "local_proxy_ports_ready": ports_ready(),
+              }
+              healthy = all(state.values())
+              if healthy:
+                  break
+              time.sleep(2)
+
+          evidence = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": canonical_sha,
+              "mode": "existing_runtime_recovery",
+              "installed_version_name": names[0],
+              "installed_version_code": int(codes[0]),
+              "registered_device_preflight_before_mutation": True,
+              "runtime_bootstrap_invoked": True,
+              **state,
+              "local_healthy": healthy,
+              "apk_install_update_uninstall_performed": False,
+              "phone_reboot_performed": False,
+              "provider_credentials_requested": False,
+              "raw_device_identifier_recorded": False,
+              "accepted": healthy,
+          }
+          Path(os.environ["RUNNER_TEMP"], "phone-runtime-recovery.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+
+          print(
+              "bounded runtime recovery: "
+              f"baseline_version=1.1.0 baseline_code=2 "
+              f"supervisor_running={str(state.get('runtime_supervisor_running', False)).lower()} "
+              f"egress_service_running={str(state.get('cellular_egress_service_running', False)).lower()} "
+              f"local_proxy_ports_ready={str(state.get('local_proxy_ports_ready', False)).lower()} "
+              f"local_healthy={str(healthy).lower()} "
+              "apk_mutation=false phone_reboot=false provider_credentials_requested=false"
+          )
+          if not healthy:
+              raise RuntimeError("existing production runtime did not recover local health")
+          PY
+
+      - name: Upload bounded private recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-runtime-recovery-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-runtime-recovery.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Production phone runtime recovery
+          - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Expected installed baseline: 1.1.0 / 2
+          - Recovery outcome: ${{ steps.recovery.outcome }}
+          - APK install/update/uninstall requested: false
+          - Phone reboot requested: false
+          - Provider credentials requested: false
+          - Raw device identifier recorded: false
+          EOF
