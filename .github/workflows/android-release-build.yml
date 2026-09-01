@@ -13,23 +13,70 @@ concurrency:
 
 jobs:
   command-gate:
-    name: Validate pinned signed-candidate command and canonical Quality
+    name: Validate bound signed-candidate command and canonical Quality
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
       startsWith(github.event.comment.body, '/android-release-build ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    env:
-      PINNED_CANONICAL_SHA: 6d8591b680e4b029cd04c0108b4f8e284bba2477
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      version_name: ${{ steps.binding.outputs.version_name }}
+      version_code: ${{ steps.binding.outputs.version_code }}
+      application_id: ${{ steps.binding.outputs.application_id }}
     steps:
-      - name: Validate exact owner command, pinned SHA, main Quality, and pre-release order
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+
+      - name: Load and validate single Android migration execution binding
+        id: binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          path = Path('private-execution/.github/production/android-v0.1.4-migration-binding.json')
+          binding = json.loads(path.read_text(encoding='utf-8'))
+          expected = {
+              'format_version': 1,
+              'binding_role': 'private_execution_only',
+              'canonical_repository': 'iamaman11/mobile-proxy',
+              'quality_required': True,
+              'migration_tracker_issue': 162,
+              'hardening_tracker_issue': 179,
+              'application_id': 'com.example.mobileproxy',
+              'version_name': '0.1.4',
+              'version_code': 1004,
+              'old_version_name': '1.1.0',
+              'old_version_code': 2,
+              'candidate_retention_days_minimum': 30,
+              'final_release_authority': False,
+          }
+          for key, value in expected.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f'Android migration binding mismatch: {key}')
+          canonical_sha = binding.get('canonical_sha')
+          if not isinstance(canonical_sha, str) or re.fullmatch(r'[0-9a-f]{40}', canonical_sha) is None:
+              raise SystemExit('Android migration binding canonical_sha is malformed')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={canonical_sha}\n')
+              handle.write(f"version_name={binding['version_name']}\n")
+              handle.write(f"version_code={binding['version_code']}\n")
+              handle.write(f"application_id={binding['application_id']}\n")
+          PY
+
+      - name: Validate exact owner command, current canonical main, Quality, and pre-release order
         id: command
         shell: bash
         env:
           COMMAND: ${{ github.event.comment.body }}
+          BOUND_CANONICAL_SHA: ${{ steps.binding.outputs.canonical_sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -39,19 +86,19 @@ jobs:
           import urllib.error
           import urllib.request
 
-          command = os.environ.get("COMMAND", "").strip()
-          match = re.fullmatch(r"/android-release-build ([0-9a-f]{40})", command)
+          command = os.environ.get('COMMAND', '').strip()
+          match = re.fullmatch(r'/android-release-build ([0-9a-f]{40})', command)
           if match is None:
-              raise SystemExit("invalid Android release build command")
+              raise SystemExit('invalid Android release build command')
           requested_sha = match.group(1)
-          pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
-          if requested_sha != pinned_sha:
-              raise SystemExit("requested SHA is not the pinned Android 0.1.4 migration baseline")
+          bound_sha = os.environ['BOUND_CANONICAL_SHA']
+          if requested_sha != bound_sha:
+              raise SystemExit('requested SHA is not the single Android migration execution binding')
 
           headers = {
-              "Accept": "application/vnd.github+json",
-              "User-Agent": "mobile-proxy-production-android-candidate-gate",
-              "X-GitHub-Api-Version": "2022-11-28",
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'mobile-proxy-production-android-candidate-gate',
+              'X-GitHub-Api-Version': '2022-11-28',
           }
 
           def get_json(url: str):
@@ -59,31 +106,35 @@ jobs:
               with urllib.request.urlopen(request, timeout=15) as response:
                   return json.load(response)
 
+          current_main = get_json('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main').get('sha')
+          if current_main != bound_sha:
+              raise SystemExit('private Android migration binding is stale relative to current canonical main')
+
           public_runs = get_json(
-              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={pinned_sha}&event=push&per_page=100"
-          ).get("workflow_runs", [])
+              f'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={bound_sha}&event=push&per_page=100'
+          ).get('workflow_runs', [])
           accepted_quality = [
               run for run in public_runs
-              if run.get("name") == "Quality"
-              and run.get("head_branch") == "main"
-              and run.get("head_sha") == pinned_sha
-              and run.get("status") == "completed"
-              and run.get("conclusion") == "success"
+              if run.get('name') == 'Quality'
+              and run.get('head_branch') == 'main'
+              and run.get('head_sha') == bound_sha
+              and run.get('status') == 'completed'
+              and run.get('conclusion') == 'success'
           ]
           if not accepted_quality:
-              raise SystemExit("pinned canonical SHA has no exact successful main Quality run")
+              raise SystemExit('bound canonical SHA has no exact successful main Quality run')
 
-          tag_url = "https://api.github.com/repos/iamaman11/mobile-proxy/git/ref/tags/v0.1.4"
+          tag_url = 'https://api.github.com/repos/iamaman11/mobile-proxy/git/ref/tags/v0.1.4'
           try:
               get_json(tag_url)
           except urllib.error.HTTPError as error:
               if error.code != 404:
                   raise
           else:
-              raise SystemExit("final v0.1.4 tag exists before pre-Item20 signing-generation migration")
+              raise SystemExit('final v0.1.4 tag exists before pre-Item20 signing-generation migration')
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"canonical_sha={pinned_sha}\n")
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={bound_sha}\n')
           PY
 
   build-sign:
@@ -93,6 +144,9 @@ jobs:
     timeout-minutes: 60
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      APPLICATION_ID: ${{ needs.command-gate.outputs.application_id }}
+      VERSION_NAME: ${{ needs.command-gate.outputs.version_name }}
+      VERSION_CODE: ${{ needs.command-gate.outputs.version_code }}
       ANDROID_BASELINE_REF: v0.1.3
     steps:
       - name: Set up Java 17
@@ -133,7 +187,7 @@ jobs:
             --canonical-sha "${CANONICAL_SHA}" \
             --output "${proof}"
 
-      - name: Build and verify exact signed Android 0.1.4 APK
+      - name: Build and verify exact signed Android candidate
         id: build
         shell: bash
         env:
@@ -153,32 +207,32 @@ jobs:
             --android-baseline-ref "${ANDROID_BASELINE_REF}"
           python3 - "${output}/android-release-evidence.json" <<'PY'
           import json
+          import os
           import sys
 
-          path = sys.argv[1]
-          with open(path, "r", encoding="utf-8") as handle:
+          with open(sys.argv[1], 'r', encoding='utf-8') as handle:
               evidence = json.load(handle)
           expected = {
-              "canonical_sha": "6d8591b680e4b029cd04c0108b4f8e284bba2477",
-              "android_baseline_ref": "v0.1.3",
-              "android_functional_source_preserved": True,
-              "application_id": "com.example.mobileproxy",
-              "version_name": "0.1.4",
-              "version_code": 1004,
-              "release_contract_verified": True,
-              "keystore_verified": True,
-              "apk_signature_verified": True,
-              "apk_signer_matches_private_key": True,
-              "production_apk_signed": True,
-              "phone_access_performed": False,
-              "phone_mutation_performed": False,
-              "accepted": True,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'android_baseline_ref': os.environ['ANDROID_BASELINE_REF'],
+              'android_functional_source_preserved': True,
+              'application_id': os.environ['APPLICATION_ID'],
+              'version_name': os.environ['VERSION_NAME'],
+              'version_code': int(os.environ['VERSION_CODE']),
+              'release_contract_verified': True,
+              'keystore_verified': True,
+              'apk_signature_verified': True,
+              'apk_signer_matches_private_key': True,
+              'production_apk_signed': True,
+              'phone_access_performed': False,
+              'phone_mutation_performed': False,
+              'accepted': True,
           }
           for key, value in expected.items():
               if evidence.get(key) != value:
-                  raise SystemExit(f"bounded release evidence mismatch: {key}")
-          if evidence.get("artifact_name") != "mobile-proxy-android-v0.1.4.apk":
-              raise SystemExit("unexpected signed APK artifact name")
+                  raise SystemExit(f'bounded release evidence mismatch: {key}')
+          if evidence.get('artifact_name') != 'mobile-proxy-android-v0.1.4.apk':
+              raise SystemExit('unexpected signed APK artifact name')
           PY
           test -s "${output}/mobile-proxy-android-v0.1.4.apk"
           echo "output=${output}" >> "$GITHUB_OUTPUT"
@@ -210,15 +264,15 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Production Android 0.1.4 signed migration candidate
           - Canonical source SHA: ${{ env.CANONICAL_SHA }}
+          - Private execution SHA: ${{ github.sha }}
+          - Canonical SHA source: single private execution binding
+          - Exact canonical main equality required: true
           - Exact canonical main Quality required: true
           - Final public v0.1.4 tag required: false
           - Premature final public v0.1.4 tag accepted: false
           - Android functional baseline: v0.1.3
           - Signing identity proof outcome: ${{ steps.signing.outcome }}
           - Exact signed build outcome: ${{ steps.build.outcome }}
-          - Expected package: com.example.mobileproxy
-          - Expected versionName: 0.1.4
-          - Expected versionCode: 1004
           - Phone runner used: false
           - Phone access performed: false
           - Phone mutation performed: false
@@ -253,7 +307,9 @@ jobs:
 
           - private execution SHA: \`${GITHUB_SHA}\`
           - canonical public SHA: \`${CANONICAL_SHA}\`
+          - canonical SHA source: single private execution binding
           - signed-candidate build result: \`${BUILD_RESULT}\`
+          - exact canonical main equality required: true
           - exact canonical main Quality required: true
           - final public v0.1.4 tag required: false
           - expected package/version: \`com.example.mobileproxy\` / \`0.1.4\` / \`1004\`
