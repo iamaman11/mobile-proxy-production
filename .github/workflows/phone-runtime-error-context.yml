@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   command-gate:
@@ -63,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import importlib.util, os, re, subprocess
+          import importlib.util, json, os, re, subprocess
           from pathlib import Path
 
           serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
@@ -92,8 +93,78 @@ jobs:
               line = re.sub(r"(?i)(password|token|secret|authorization|username)([=: ]+)[^ ,;]+", r"\1\2<redacted>", line)
               line = re.sub(r"\b[A-Za-z0-9_\-+/=]{32,}\b", "<redacted-long-value>", line)
               lines.append(line)
+          bounded = lines[-12:]
+          Path(os.environ["RUNNER_TEMP"], "sanitized-runtime-error-context.json").write_text(
+              json.dumps({
+                  "sanitized_runtime_error_line_count": len(lines),
+                  "sanitized_runtime_error_lines": bounded,
+                  "raw_runtime_log_recorded": False,
+                  "raw_device_identifier_recorded": False,
+                  "phone_mutation_performed": False,
+              }, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
           print(f"sanitized_runtime_error_line_count={len(lines)}")
-          for line in lines[-12:]:
+          for line in bounded:
               print("sanitized_runtime_error: " + line)
           print("raw_runtime_log_recorded=false raw_device_identifier_recorded=false phone_mutation_performed=false")
+          PY
+
+      - name: Upload sanitized error evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-runtime-error-context-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/sanitized-runtime-error-context.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Post sanitized audit context
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "sanitized-runtime-error-context.json"
+          body_lines = [
+              f"SANITIZED RUNTIME ERROR CONTEXT — run `{os.environ['RUN_ID']}`",
+              "",
+              f"- canonical SHA: `{os.environ['CANONICAL_SHA_SAFE']}`",
+          ]
+          if path.is_file():
+              state = json.loads(path.read_text(encoding="utf-8"))
+              body_lines.append(f"- sanitized matching line count: `{state['sanitized_runtime_error_line_count']}`")
+              body_lines.append("- sanitized recent matching lines:")
+              for line in state["sanitized_runtime_error_lines"]:
+                  body_lines.append("  - `" + str(line).replace("`", "'") + "`")
+              body_lines.extend([
+                  "- raw runtime log recorded: `False`",
+                  "- raw device identifier recorded: `False`",
+                  "- phone mutation performed: `False`",
+              ])
+          else:
+              body_lines.append("- sanitized snapshot: `unavailable`")
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments",
+              data=json.dumps({"body":"\n".join(body_lines)}).encode("utf-8"),
+              headers={
+                  "Accept":"application/vnd.github+json",
+                  "Authorization":f"Bearer {os.environ['GH_TOKEN']}",
+                  "Content-Type":"application/json",
+                  "User-Agent":"mobile-proxy-production-runtime-error-context",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit("failed to post sanitized runtime error context")
           PY
