@@ -1,0 +1,153 @@
+name: Production phone immutable runtime binary build
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-immutable-runtime-binary-build
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner runtime binary build command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-runtime-build ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-build ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid runtime binary build command")
+          requested = match.group(1)
+          req = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={"Accept":"application/vnd.github+json","User-Agent":"mobile-proxy-production-runtime-build"},
+          )
+          with urllib.request.urlopen(req, timeout=10) as response:
+              current = json.load(response)["sha"]
+          if requested != current:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested}\n")
+          PY
+
+  build:
+    name: Build exact non-secret Android ARM runtime bundle
+    needs: command-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+    steps:
+      - name: Check out exact canonical public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ env.CANONICAL_SHA }}
+          path: canonical
+
+      - name: Resolve installed Android NDK
+        id: ndk
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          candidates = []
+          for key in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"):
+              value = os.environ.get(key)
+              if value:
+                  candidates.append(Path(value))
+          sdk = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME")
+          if sdk:
+              root = Path(sdk) / "ndk"
+              if root.is_dir():
+                  candidates.extend(sorted((p for p in root.iterdir() if p.is_dir()), reverse=True))
+          for candidate in candidates:
+              clang = candidate / "toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang"
+              ar = candidate / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+              if clang.is_file() and ar.is_file():
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                      handle.write(f"path={candidate}\n")
+                  raise SystemExit(0)
+          raise SystemExit("no compatible Android NDK found on hosted runner")
+          PY
+
+      - name: Build and verify exact runtime binaries
+        shell: bash
+        working-directory: canonical
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo run -p operator-cli -- prepare-runtime-binaries --android-ndk '${{ steps.ndk.outputs.path }}'
+          test -x target/debug/operator-cli
+          file deploy/device-runtime/bin/runtime-supervisor deploy/device-runtime/bin/host-daemon deploy/device-runtime/bin/sing-box
+
+      - name: Stage bounded non-secret bundle
+        shell: bash
+        working-directory: canonical
+        run: |
+          set -euo pipefail
+          mkdir -p ../runtime-bundle/bin
+          cp target/debug/operator-cli ../runtime-bundle/bin/operator-cli
+          cp deploy/device-runtime/bin/runtime-supervisor ../runtime-bundle/bin/runtime-supervisor
+          cp deploy/device-runtime/bin/host-daemon ../runtime-bundle/bin/host-daemon
+          cp deploy/device-runtime/bin/sing-box ../runtime-bundle/bin/sing-box
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('../runtime-bundle')
+          files = {}
+          for path in sorted((root / 'bin').iterdir()):
+              files[path.name] = {
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'size': path.stat().st_size,
+              }
+          (root / 'build-evidence.json').write_text(json.dumps({
+              'format_version': 1,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'contains_production_secrets': False,
+              'phone_mutation_performed': False,
+              'apk_mutation_performed': False,
+              'files': files,
+          }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+
+      - name: Upload immutable runtime bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: runtime-bundle
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record safe result
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Immutable runtime binary build
+          - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Build host: GitHub-hosted runner
+          - Production secrets requested: false
+          - Phone mutation performed: false
+          - APK mutation performed: false
+          EOF
