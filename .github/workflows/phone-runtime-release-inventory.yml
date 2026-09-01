@@ -85,11 +85,32 @@ jobs:
                   raise RuntimeError("read-only runtime release inventory probe failed")
               return result.stdout.strip()
 
-          # Only release IDs and public Git SHAs are emitted. No config contents are read.
+          # Only release IDs, public Git SHAs, and categorical layout booleans are emitted.
+          # The resolved current target path is deliberately never printed or persisted.
           raw = root_capture(r'''
           ROOT=/data/adb/mobile-proxy-node
-          current="$(readlink "$ROOT/current" 2>/dev/null || true)"
-          printf 'CURRENT|%s\n' "${current##*/}"
+          current_link="$(readlink "$ROOT/current" 2>/dev/null || true)"
+          current_resolved="$(readlink -f "$ROOT/current" 2>/dev/null || true)"
+          current_id="${current_link##*/}"
+          current_is_symlink=false; [ -L "$ROOT/current" ] && current_is_symlink=true
+          current_target_exists=false; [ -n "$current_resolved" ] && [ -d "$current_resolved" ] && current_target_exists=true
+          current_under_managed_root=false
+          current_under_releases_root=false
+          case "$current_resolved" in "$ROOT"/*) current_under_managed_root=true ;; esac
+          case "$current_resolved" in "$ROOT"/releases/*) current_under_releases_root=true ;; esac
+          canonical_release_entry_matches=false
+          if [ -n "$current_id" ] && [ "$current_resolved" = "$ROOT/releases/$current_id" ] && [ -d "$ROOT/releases/$current_id" ]; then
+            canonical_release_entry_matches=true
+          fi
+          current_service_x=false; [ -x "$ROOT/current/service.sh" ] && current_service_x=true
+          current_supervisor_x=false; [ -x "$ROOT/current/bin/runtime-supervisor" ] && current_supervisor_x=true
+          current_host_x=false; [ -x "$ROOT/current/bin/host-daemon" ] && current_host_x=true
+          current_sing_x=false; [ -x "$ROOT/current/bin/sing-box" ] && current_sing_x=true
+          printf 'CURRENT|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+            "$current_id" "$current_is_symlink" "$current_target_exists" \
+            "$current_under_managed_root" "$current_under_releases_root" \
+            "$canonical_release_entry_matches" "$current_service_x" \
+            "$current_supervisor_x" "$current_host_x" "$current_sing_x"
           count=0
           for dir in "$ROOT"/releases/*; do
             [ -d "$dir" ] || continue
@@ -111,14 +132,36 @@ jobs:
           done
           ''')
 
-          current_id = None
+          current = {
+              "release_id": None,
+              "is_symlink": False,
+              "target_exists": False,
+              "under_managed_root": False,
+              "under_releases_root": False,
+              "canonical_release_entry_matches": False,
+              "service_executable": False,
+              "runtime_supervisor_executable": False,
+              "host_daemon_executable": False,
+              "sing_box_executable": False,
+          }
           releases = []
           id_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
           sha_re = re.compile(r"^[0-9a-f]{40}$")
           for line in raw.splitlines():
               parts = line.split("|")
-              if parts[0] == "CURRENT" and len(parts) == 2:
-                  current_id = parts[1] if id_re.fullmatch(parts[1]) else None
+              if parts[0] == "CURRENT" and len(parts) == 11:
+                  current = {
+                      "release_id": parts[1] if id_re.fullmatch(parts[1]) else None,
+                      "is_symlink": parts[2] == "true",
+                      "target_exists": parts[3] == "true",
+                      "under_managed_root": parts[4] == "true",
+                      "under_releases_root": parts[5] == "true",
+                      "canonical_release_entry_matches": parts[6] == "true",
+                      "service_executable": parts[7] == "true",
+                      "runtime_supervisor_executable": parts[8] == "true",
+                      "host_daemon_executable": parts[9] == "true",
+                      "sing_box_executable": parts[10] == "true",
+                  }
               elif parts[0] == "REL" and len(parts) == 9 and id_re.fullmatch(parts[1]):
                   sha = parts[2].lower()
                   releases.append({
@@ -133,11 +176,12 @@ jobs:
                   })
 
           report = {
-              "format_version": 1,
+              "format_version": 2,
               "canonical_sha": canonical_sha,
-              "current_release_id": current_id,
+              "current": current,
               "release_count": len(releases),
               "releases": releases,
+              "raw_current_target_path_recorded": False,
               "raw_config_recorded": False,
               "raw_device_identifier_recorded": False,
               "phone_mutation_performed": False,
