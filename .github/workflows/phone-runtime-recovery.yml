@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   command-gate:
-    name: Validate exact owner runtime recovery command
+    name: Validate exact owner runtime recovery authority and fail closed
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
@@ -18,8 +18,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
     steps:
-      - name: Validate exact command and current canonical main SHA
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+
+      - name: Validate command, private binding, current canonical main, and Quality
         id: command
         shell: bash
         env:
@@ -30,7 +37,10 @@ jobs:
           import json
           import os
           import re
+          import time
+          import urllib.error
           import urllib.request
+          from pathlib import Path
 
           command = os.environ.get("COMMAND", "").strip()
           match = re.fullmatch(r"/phone-runtime-recover ([0-9a-f]{40})", command)
@@ -38,21 +48,86 @@ jobs:
               raise SystemExit("invalid phone runtime recovery command")
           requested_sha = match.group(1)
 
-          request = urllib.request.Request(
-              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "mobile-proxy-production-runtime-recovery",
-              },
+          binding = json.loads(
+              Path("private-execution/.github/production/android-v0.1.4-migration-binding.json").read_text(
+                  encoding="utf-8"
+              )
           )
-          with urllib.request.urlopen(request, timeout=10) as response:
-              canonical_main = json.load(response)["sha"]
+          expected = {
+              "format_version": 1,
+              "binding_role": "private_execution_only",
+              "canonical_repository": "iamaman11/mobile-proxy",
+              "quality_required": True,
+              "migration_tracker_issue": 162,
+              "hardening_tracker_issue": 179,
+              "application_id": "com.example.mobileproxy",
+              "version_name": "0.1.4",
+              "version_code": 1004,
+              "old_version_name": "1.1.0",
+              "old_version_code": 2,
+              "candidate_retention_days_minimum": 30,
+              "final_release_authority": False,
+          }
+          for key, value in expected.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f"runtime recovery private binding mismatch: {key}")
+          if binding.get("canonical_sha") != requested_sha:
+              raise SystemExit("runtime recovery requested SHA differs from current private execution binding")
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "mobile-proxy-production-runtime-recovery",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def get_json(url):
+              last = None
+              for attempt, delay in enumerate((0, 1, 2), start=1):
+                  if delay:
+                      time.sleep(delay)
+                  request = urllib.request.Request(url, headers=headers)
+                  try:
+                      with urllib.request.urlopen(request, timeout=15) as response:
+                          return json.load(response)
+                  except (urllib.error.URLError, TimeoutError) as error:
+                      last = error
+                      if attempt == 3:
+                          break
+              raise SystemExit("runtime recovery authority lookup unavailable after bounded retries") from last
+
+          canonical_main = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main"
+          ).get("sha")
           if requested_sha != canonical_main:
               raise SystemExit("requested SHA is not current canonical main")
 
+          runs = get_json(
+              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={requested_sha}&event=push&per_page=100"
+          ).get("workflow_runs", [])
+          quality = [
+              run
+              for run in runs
+              if run.get("name") == "Quality"
+              and run.get("head_branch") == "main"
+              and run.get("head_sha") == requested_sha
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+          ]
+          if not quality:
+              raise SystemExit("exact current canonical SHA has no successful main Quality run")
+          accepted = max(quality, key=lambda run: int(run.get("id", 0)))
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"canonical_sha={requested_sha}\n")
+              handle.write(f"quality_run_id={accepted['id']}\n")
           PY
+
+      - name: Refuse legacy-only recovery until empty-layout materialization is proven
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "phone-runtime-recover is hard-blocked: current tracker evidence proves the canonical managed runtime layout is absent, while this legacy workflow requires an already-installed current release and has no source-bound config-preserving materialization contract." >&2
+          exit 1
 
   recover-runtime:
     name: Recover existing production runtime without APK mutation
@@ -65,13 +140,15 @@ jobs:
     timeout-minutes: 5
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
       - name: Fetch exact canonical registered-device preflight
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --silent --show-error \
+          curl --retry 3 --retry-all-errors --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 60 \
             "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
             --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
 
@@ -167,7 +244,9 @@ jobs:
           if not bootstrap_ready:
               raise RuntimeError("installed runtime bootstrap contract is unavailable")
 
-          # Exact registered-device proof immediately before the one bounded mutation.
+          # This mutation body is unreachable while the hosted hard block above is present.
+          # It is retained only as the legacy existing-layout implementation until the
+          # tracker approves a source-bound, config-preserving materialization contract.
           preflight.prove_registered_device(serial)
           adb(
               "shell",
@@ -197,6 +276,7 @@ jobs:
               "format_version": 1,
               "repository": "iamaman11/mobile-proxy",
               "canonical_sha": canonical_sha,
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
               "mode": "existing_runtime_recovery",
               "installed_version_name": names[0],
               "installed_version_code": int(codes[0]),
@@ -205,6 +285,7 @@ jobs:
               **state,
               "local_healthy": healthy,
               "apk_install_update_uninstall_performed": False,
+              "config_mutation_performed": False,
               "phone_reboot_performed": False,
               "provider_credentials_requested": False,
               "raw_device_identifier_recorded": False,
@@ -221,7 +302,7 @@ jobs:
               f"egress_service_running={str(state.get('cellular_egress_service_running', False)).lower()} "
               f"local_proxy_ports_ready={str(state.get('local_proxy_ports_ready', False)).lower()} "
               f"local_healthy={str(healthy).lower()} "
-              "apk_mutation=false phone_reboot=false provider_credentials_requested=false"
+              "apk_mutation=false config_mutation=false phone_reboot=false provider_credentials_requested=false"
           )
           if not healthy:
               raise RuntimeError("existing production runtime did not recover local health")
@@ -229,7 +310,7 @@ jobs:
 
       - name: Upload bounded private recovery evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: phone-runtime-recovery-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phone-runtime-recovery.json
@@ -243,9 +324,11 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Production phone runtime recovery
           - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Exact Quality run: ${{ env.QUALITY_RUN_ID }}
           - Expected installed baseline: 1.1.0 / 2
           - Recovery outcome: ${{ steps.recovery.outcome }}
           - APK install/update/uninstall requested: false
+          - Config mutation requested: false
           - Phone reboot requested: false
           - Provider credentials requested: false
           - Raw device identifier recorded: false
