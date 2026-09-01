@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   validate-runtime-reconstruction-contract:
-    name: Validate pending reconstruction binding and hosted readiness shape
+    name: Validate reconstruction binding, enrollment, and hosted-only recovery authority
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -29,52 +29,36 @@ jobs:
 
           binding_path = Path('.github/production/runtime-reconstruction-binding.json')
           readiness_path = Path('.github/workflows/runtime-reconstruction-readiness.yml')
+          enrollment_path = Path('.github/workflows/runtime-reconstruction-enrollment.yml')
           recovery_path = Path('.github/workflows/phone-runtime-recovery.yml')
-          if not binding_path.is_file():
-              raise SystemExit('runtime reconstruction binding is missing')
-          if not readiness_path.is_file():
-              raise SystemExit('runtime reconstruction readiness workflow is missing')
-          if not recovery_path.is_file():
-              raise SystemExit('legacy runtime recovery workflow is missing')
+          for path, label in (
+              (binding_path, 'runtime reconstruction binding'),
+              (readiness_path, 'runtime reconstruction readiness workflow'),
+              (enrollment_path, 'runtime reconstruction enrollment workflow'),
+              (recovery_path, 'legacy runtime recovery workflow'),
+          ):
+              if not path.is_file():
+                  raise SystemExit(f'{label} is missing')
 
           binding = json.loads(binding_path.read_text(encoding='utf-8'))
           expected_top_level = {
-              'format_version',
-              'binding_role',
-              'mode',
-              'enrollment_status',
-              'canonical_repository',
-              'canonical_sha',
-              'quality_required',
-              'hardening_tracker_issue',
-              'migration_tracker_issue',
-              'application_id',
-              'required_installed_version_name',
-              'required_installed_version_code',
-              'final_release_authority',
-              'phone_execution_authority',
-              'provider_credentials_allowed',
-              'tunnel_owner',
-              'tunnel_owner_evidence',
-              'manifest_authority',
-              'manifest_source',
-              'manifest_fingerprint',
-              'raw_device_identifier_in_binding',
-              'required_manifest_fields',
-              'expected_token_env_names',
-              'required_runtime_secret_names',
-              'evidence_policy',
+              'format_version', 'binding_role', 'mode', 'enrollment_status',
+              'canonical_repository', 'canonical_sha', 'quality_required',
+              'hardening_tracker_issue', 'migration_tracker_issue', 'application_id',
+              'required_installed_version_name', 'required_installed_version_code',
+              'final_release_authority', 'phone_execution_authority',
+              'provider_credentials_allowed', 'tunnel_owner', 'tunnel_owner_evidence',
+              'manifest_authority', 'manifest_source', 'manifest_fingerprint',
+              'raw_device_identifier_in_binding', 'required_manifest_fields',
+              'expected_token_env_names', 'required_runtime_secret_names', 'evidence_policy',
           }
           if set(binding) != expected_top_level:
-              extra = sorted(set(binding) - expected_top_level)
-              missing = sorted(expected_top_level - set(binding))
-              raise SystemExit(f'runtime reconstruction binding key drift: missing={missing} extra={extra}')
+              raise SystemExit('runtime reconstruction binding key drift')
 
           expected_scalars = {
               'format_version': 1,
               'binding_role': 'private_execution_only',
               'mode': 'config_reconstruction_reauthorization',
-              'enrollment_status': 'pending',
               'canonical_repository': 'iamaman11/mobile-proxy',
               'canonical_sha': 'be619ebab9325e712cc6ef662689f78cc7131d5f',
               'quality_required': True,
@@ -94,39 +78,39 @@ jobs:
               if binding.get(key) != value:
                   raise SystemExit(f'runtime reconstruction binding mismatch: {key}')
 
+          status = binding.get('enrollment_status')
+          if status not in {'pending', 'enrolled'}:
+              raise SystemExit('runtime reconstruction enrollment status must be pending or enrolled')
+
           if binding.get('tunnel_owner_evidence') != {
               'evidence_type': 'canonical_live_verify',
               'canonical_commit': 'ad9bc7c88fcd0abd7bf422f12b852c24f6dc16ea',
               'historical_owner_evidence_only': True,
           }:
               raise SystemExit('historical tunnel-owner evidence binding drift')
-
           if binding.get('manifest_source') != {
               'kind': 'github_actions_secret',
               'secret_name': 'ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON',
           }:
               raise SystemExit('runtime reconstruction manifest source drift')
 
-          if binding.get('manifest_fingerprint') != {
-              'algorithm': 'sha256',
-              'normalized_json_profile': 'strict-sorted-compact-utf8-v1',
-              'sha256': None,
-          }:
-              raise SystemExit('pending reconstruction fingerprint must remain unset and typed')
+          fingerprint = binding.get('manifest_fingerprint')
+          if not isinstance(fingerprint, dict) or fingerprint.get('algorithm') != 'sha256' or fingerprint.get('normalized_json_profile') != 'strict-sorted-compact-utf8-v1':
+              raise SystemExit('runtime reconstruction fingerprint type/profile drift')
+          fingerprint_value = fingerprint.get('sha256')
+          if status == 'pending' and fingerprint_value is not None:
+              raise SystemExit('pending reconstruction fingerprint must remain unset')
+          if status == 'enrolled' and not (
+              isinstance(fingerprint_value, str)
+              and re.fullmatch(r'[0-9a-f]{64}', fingerprint_value)
+          ):
+              raise SystemExit('enrolled reconstruction fingerprint must be one private SHA-256 value')
 
           expected_fields = [
-              'deviceId',
-              'nodeName',
-              'operatorProfile',
-              'controlPlaneUrl',
-              'tokens.adminTokenEnv',
-              'tokens.deviceTokenEnv',
-              'tokens.uiTokenEnv',
-              'tokens.reverseTunnelCertDerB64Env',
-              'tokens.relayUserEnv',
-              'tokens.relayPasswordEnv',
-              'relay.host',
-              'relay.httpPort',
+              'deviceId', 'nodeName', 'operatorProfile', 'controlPlaneUrl',
+              'tokens.adminTokenEnv', 'tokens.deviceTokenEnv', 'tokens.uiTokenEnv',
+              'tokens.reverseTunnelCertDerB64Env', 'tokens.relayUserEnv',
+              'tokens.relayPasswordEnv', 'relay.host', 'relay.httpPort',
           ]
           if binding.get('required_manifest_fields') != expected_fields:
               raise SystemExit('strict runtime reconstruction manifest field contract drift')
@@ -141,16 +125,16 @@ jobs:
           }
           if binding.get('expected_token_env_names') != expected_token_names:
               raise SystemExit('runtime reconstruction token environment contract drift')
-
-          expected_runtime_secrets = [
+          expected_runtime_secrets = {
               'MOBILE_PROXY_ADMIN_TOKEN',
               'MOBILE_PROXY_DEVICE_TOKEN',
               'MOBILE_PROXY_UI_TOKEN',
               'MOBILE_PROXY_RELAY_USER',
               'MOBILE_PROXY_RELAY_PASSWORD',
               'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64',
-          ]
-          if binding.get('required_runtime_secret_names') != expected_runtime_secrets:
+          }
+          actual_runtime_secrets = binding.get('required_runtime_secret_names')
+          if not isinstance(actual_runtime_secrets, list) or len(actual_runtime_secrets) != 6 or set(actual_runtime_secrets) != expected_runtime_secrets:
               raise SystemExit('runtime reconstruction required secret-name contract drift')
 
           expected_evidence_policy = {
@@ -166,57 +150,84 @@ jobs:
               raise SystemExit('runtime reconstruction evidence policy drift')
 
           readiness = readiness_path.read_text(encoding='utf-8')
-          required_readiness_fragments = [
+          required_readiness = [
               'name: Runtime reconstruction readiness',
               '  workflow_dispatch:',
               '  contents: read',
               '    runs-on: ubuntu-latest',
               'runtime-reconstruction-binding.json',
-              'readiness must execute from exact current private main',
-              'reconstruction binding canonical SHA is not current public main',
-              'exact current canonical SHA has no successful main Quality run',
               'production manifest enrollment is pending',
               'no manifest/runtime secret access or config rendering is authorized',
           ]
-          for fragment in required_readiness_fragments:
+          for fragment in required_readiness:
               if fragment not in readiness:
-                  raise SystemExit(f'runtime reconstruction readiness missing required fail-closed fragment: {fragment}')
-
-          forbidden_pending_fragments = {
-              'self-hosted runner': 'self-hosted',
-              'production phone label': 'android-production',
-              'GitHub secret expression': 'secrets.',
-              'runtime packaging': 'package-device-release',
-              'ADB command': 'adb ',
-              'ADB executable list': "'adb'",
-              'artifact upload': 'upload-artifact',
-              'host config path': 'host-daemon.json',
-              'sing-box config path': 'sing-box.json',
-              'provider credential': 'VULTR_',
-          }
-          for label, fragment in forbidden_pending_fragments.items():
+                  raise SystemExit(f'runtime reconstruction readiness missing safe fragment: {fragment}')
+          for fragment in (
+              'self-hosted', 'android-production', 'secrets.', 'package-device-release',
+              'upload-artifact', 'host-daemon.json', 'sing-box.json', 'VULTR_',
+          ):
               if fragment in readiness:
-                  raise SystemExit(f'pending reconstruction readiness contains forbidden {label}')
-
-          if readiness.count('runs-on: ubuntu-latest') != 1:
-              raise SystemExit('pending readiness must contain exactly one GitHub-hosted job')
+                  raise SystemExit(f'current readiness skeleton contains forbidden protected behavior: {fragment}')
           if re.search(r'(?m)^\s*issue_comment\s*:', readiness):
-              raise SystemExit('pending readiness must not subscribe to production issue-comment fan-out')
+              raise SystemExit('reconstruction readiness must not subscribe to production issue-comment fan-out')
+
+          enrollment = enrollment_path.read_text(encoding='utf-8')
+          required_enrollment = [
+              'name: Runtime reconstruction manifest enrollment',
+              '  workflow_dispatch:',
+              '      confirm:',
+              'ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE',
+              '  contents: write',
+              '    runs-on: ubuntu-latest',
+              'persist-credentials: false',
+              'manifest enrollment must execute from exact current private main',
+              'runtime reconstruction manifest top-level schema mismatch',
+              'runtime reconstruction manifest token schema mismatch',
+              'runtime reconstruction manifest relay schema mismatch',
+              'sort_keys=True',
+              'separators=(",", ":")',
+              'hashlib.sha256(normalized).hexdigest()',
+              'binding["enrollment_status"] = "enrolled"',
+              'binding["manifest_fingerprint"]["sha256"] = fingerprint',
+              'binding["phone_execution_authority"] = False',
+              'Enroll private runtime reconstruction manifest baseline',
+              'manifest_fingerprint_published=false',
+              'runtime_secret_values_read=false',
+              'phone_access=false',
+          ]
+          for fragment in required_enrollment:
+              if fragment not in enrollment:
+                  raise SystemExit(f'runtime reconstruction enrollment missing required fragment: {fragment}')
+
+          if enrollment.count('secrets.') != 1 or 'secrets.ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON' not in enrollment:
+              raise SystemExit('enrollment may reference exactly one approved manifest secret and no other secret')
+          for fragment in (
+              'self-hosted', 'android-production', 'secrets.MOBILE_PROXY_',
+              'ANDROID_PRODUCTION_SERIAL', 'package-device-release', 'upload-artifact',
+              'host-daemon.json', 'sing-box.json', 'VULTR_', 'adb ', "'adb'",
+              'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY',
+          ):
+              if fragment in enrollment:
+                  raise SystemExit(f'enrollment contains forbidden phone/runtime-secret/render/evidence behavior: {fragment}')
+          if enrollment.count('runs-on: ubuntu-latest') != 1:
+              raise SystemExit('enrollment must contain exactly one GitHub-hosted job')
+          if re.search(r'(?m)^\s*issue_comment\s*:', enrollment):
+              raise SystemExit('manifest enrollment must not subscribe to production issue-comment fan-out')
 
           recovery = recovery_path.read_text(encoding='utf-8')
-          recovery_guards = [
+          for fragment in (
               'Refuse legacy-only recovery until empty-layout materialization is proven',
               'phone-runtime-recover is hard-blocked',
-          ]
-          for fragment in recovery_guards:
+          ):
               if fragment not in recovery:
-                  raise SystemExit('legacy runtime recovery hard block was removed before reconstruction authority exists')
+                  raise SystemExit('legacy runtime recovery hard block was removed before phone reconstruction authority exists')
 
           print('runtime reconstruction policy: accepted')
-          print('enrollment_status=pending')
+          print(f'enrollment_status={status}')
           print('tunnel_owner=first_party_reverse_tunnel')
           print('phone_execution_authority=false')
           print('provider_credentials_allowed=false')
-          print('pending_readiness_secret_access=false')
-          print('pending_readiness_phone_access=false')
+          print('enrollment_manifest_secret_only=true')
+          print('runtime_secret_access=false')
+          print('phone_access=false')
           PY

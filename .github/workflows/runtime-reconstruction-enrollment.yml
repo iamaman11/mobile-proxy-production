@@ -1,0 +1,281 @@
+name: Runtime reconstruction manifest enrollment
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE exactly"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  enroll-manifest:
+    name: Enroll one explicit private reconstruction manifest baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+          persist-credentials: false
+
+      - name: Validate authority and explicit enrollment confirmation before protected input
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          PRIVATE_REPOSITORY: ${{ github.repository }}
+          PRIVATE_SHA: ${{ github.sha }}
+          PRIVATE_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          if os.environ.get("CONFIRM") != "ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE":
+              raise SystemExit("explicit runtime reconstruction baseline enrollment confirmation is required")
+
+          binding = json.loads(
+              Path("private-execution/.github/production/runtime-reconstruction-binding.json").read_text(encoding="utf-8")
+          )
+          required = {
+              "format_version": 1,
+              "binding_role": "private_execution_only",
+              "mode": "config_reconstruction_reauthorization",
+              "enrollment_status": "pending",
+              "canonical_repository": "iamaman11/mobile-proxy",
+              "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
+              "quality_required": True,
+              "hardening_tracker_issue": 179,
+              "migration_tracker_issue": 162,
+              "application_id": "com.example.mobileproxy",
+              "required_installed_version_name": "1.1.0",
+              "required_installed_version_code": 2,
+              "final_release_authority": False,
+              "phone_execution_authority": False,
+              "provider_credentials_allowed": False,
+              "tunnel_owner": "first_party_reverse_tunnel",
+              "manifest_authority": "new_reauthorized_baseline",
+              "raw_device_identifier_in_binding": False,
+          }
+          for key, value in required.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f"pending runtime reconstruction binding mismatch: {key}")
+          if binding.get("manifest_fingerprint") != {
+              "algorithm": "sha256",
+              "normalized_json_profile": "strict-sorted-compact-utf8-v1",
+              "sha256": None,
+          }:
+              raise SystemExit("pending reconstruction fingerprint state is invalid")
+
+          common_headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "mobile-proxy-production-runtime-reconstruction-enrollment",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          private_headers = dict(common_headers)
+          private_headers["Authorization"] = f"Bearer {os.environ['PRIVATE_TOKEN']}"
+
+          def get_json(url, headers, label):
+              last = None
+              for attempt, delay in enumerate((0, 1, 2), start=1):
+                  if delay:
+                      time.sleep(delay)
+                  try:
+                      request = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(request, timeout=15) as response:
+                          return json.load(response)
+                  except (urllib.error.URLError, TimeoutError) as error:
+                      last = error
+                      if attempt == 3:
+                          break
+              raise SystemExit(f"{label} unavailable after bounded retries") from last
+
+          private_sha = os.environ["PRIVATE_SHA"]
+          private_repository = os.environ["PRIVATE_REPOSITORY"]
+          if get_json(
+              f"https://api.github.com/repos/{private_repository}/commits/main",
+              private_headers,
+              "private main authority",
+          ).get("sha") != private_sha:
+              raise SystemExit("manifest enrollment must execute from exact current private main")
+
+          canonical_sha = binding["canonical_sha"]
+          if get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              common_headers,
+              "public main authority",
+          ).get("sha") != canonical_sha:
+              raise SystemExit("reconstruction binding canonical SHA is not current public main")
+
+          runs = get_json(
+              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={canonical_sha}&event=push&per_page=100",
+              common_headers,
+              "public Quality authority",
+          ).get("workflow_runs", [])
+          if not any(
+              run.get("name") == "Quality"
+              and run.get("head_branch") == "main"
+              and run.get("head_sha") == canonical_sha
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+              for run in runs
+          ):
+              raise SystemExit("exact current canonical SHA has no successful main Quality run")
+          PY
+
+      - name: Validate and enroll the one approved private manifest identity
+        shell: bash
+        env:
+          PRIVATE_REPOSITORY: ${{ github.repository }}
+          PRIVATE_SHA: ${{ github.sha }}
+          PRIVATE_TOKEN: ${{ github.token }}
+          MANIFEST_JSON: ${{ secrets.ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          repository = os.environ["PRIVATE_REPOSITORY"]
+          expected_private_sha = os.environ["PRIVATE_SHA"]
+          token = os.environ["PRIVATE_TOKEN"]
+          raw_manifest = os.environ.get("MANIFEST_JSON", "")
+          if not raw_manifest:
+              raise SystemExit("approved private runtime reconstruction manifest is absent")
+
+          try:
+              manifest = json.loads(raw_manifest)
+          except json.JSONDecodeError as error:
+              raise SystemExit("approved private runtime reconstruction manifest is not valid JSON") from error
+          if not isinstance(manifest, dict):
+              raise SystemExit("runtime reconstruction manifest must be a JSON object")
+
+          if set(manifest) != {"deviceId", "nodeName", "operatorProfile", "controlPlaneUrl", "tokens", "relay"}:
+              raise SystemExit("runtime reconstruction manifest top-level schema mismatch")
+          if not isinstance(manifest.get("tokens"), dict) or set(manifest["tokens"]) != {
+              "adminTokenEnv",
+              "deviceTokenEnv",
+              "uiTokenEnv",
+              "reverseTunnelCertDerB64Env",
+              "relayUserEnv",
+              "relayPasswordEnv",
+          }:
+              raise SystemExit("runtime reconstruction manifest token schema mismatch")
+          if not isinstance(manifest.get("relay"), dict) or set(manifest["relay"]) != {"host", "httpPort"}:
+              raise SystemExit("runtime reconstruction manifest relay schema mismatch")
+
+          for field in ("deviceId", "nodeName", "operatorProfile", "controlPlaneUrl"):
+              value = manifest.get(field)
+              if not isinstance(value, str) or not value.strip():
+                  raise SystemExit(f"runtime reconstruction manifest requires a non-empty {field}")
+          if not re.fullmatch(r"https?://[^\s]+", manifest["controlPlaneUrl"]):
+              raise SystemExit("runtime reconstruction controlPlaneUrl must be an explicit http(s) URL")
+          relay_host = manifest["relay"].get("host")
+          relay_port = manifest["relay"].get("httpPort")
+          if not isinstance(relay_host, str) or not relay_host.strip():
+              raise SystemExit("runtime reconstruction relay.host must be non-empty")
+          if isinstance(relay_port, bool) or not isinstance(relay_port, int) or not 1 <= relay_port <= 65535:
+              raise SystemExit("runtime reconstruction relay.httpPort must be an explicit valid port")
+
+          expected_token_env = {
+              "adminTokenEnv": "MOBILE_PROXY_ADMIN_TOKEN",
+              "deviceTokenEnv": "MOBILE_PROXY_DEVICE_TOKEN",
+              "uiTokenEnv": "MOBILE_PROXY_UI_TOKEN",
+              "reverseTunnelCertDerB64Env": "MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64",
+              "relayUserEnv": "MOBILE_PROXY_RELAY_USER",
+              "relayPasswordEnv": "MOBILE_PROXY_RELAY_PASSWORD",
+          }
+          if manifest["tokens"] != expected_token_env:
+              raise SystemExit("runtime reconstruction manifest token environment names differ from enrolled contract")
+
+          normalized = json.dumps(
+              manifest,
+              sort_keys=True,
+              separators=(",", ":"),
+              ensure_ascii=False,
+          ).encode("utf-8")
+          fingerprint = hashlib.sha256(normalized).hexdigest()
+
+          binding_path = Path("private-execution/.github/production/runtime-reconstruction-binding.json")
+          local_binding_bytes = binding_path.read_bytes()
+          binding = json.loads(local_binding_bytes.decode("utf-8"))
+          if binding.get("enrollment_status") != "pending" or binding.get("manifest_fingerprint", {}).get("sha256") is not None:
+              raise SystemExit("runtime reconstruction binding is not in the one-time pending enrollment state")
+          if binding.get("phone_execution_authority") is not False:
+              raise SystemExit("manifest enrollment cannot grant phone execution authority")
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "User-Agent": "mobile-proxy-production-runtime-reconstruction-enrollment",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def api_json(url, *, method="GET", payload=None):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(url, data=data, method=method, headers=headers)
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.load(response)
+
+          current_private = api_json(f"https://api.github.com/repos/{repository}/commits/main").get("sha")
+          if current_private != expected_private_sha:
+              raise SystemExit("private main drifted after enrollment authority validation")
+
+          public_headers = dict(headers)
+          public_headers.pop("Authorization", None)
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers=public_headers,
+          )
+          with urllib.request.urlopen(request, timeout=15) as response:
+              current_public = json.load(response).get("sha")
+          if current_public != binding.get("canonical_sha"):
+              raise SystemExit("public canonical main drifted before enrollment commit")
+
+          contents_url = f"https://api.github.com/repos/{repository}/contents/.github/production/runtime-reconstruction-binding.json?ref=main"
+          current_file = api_json(contents_url)
+          current_bytes = base64.b64decode(current_file["content"])
+          if current_bytes != local_binding_bytes:
+              raise SystemExit("runtime reconstruction binding bytes drifted before enrollment commit")
+
+          binding["enrollment_status"] = "enrolled"
+          binding["manifest_fingerprint"]["sha256"] = fingerprint
+          binding["phone_execution_authority"] = False
+          updated_bytes = (json.dumps(binding, indent=2, sort_keys=True) + "\n").encode("utf-8")
+          payload = {
+              "message": "Enroll private runtime reconstruction manifest baseline",
+              "content": base64.b64encode(updated_bytes).decode("ascii"),
+              "sha": current_file["sha"],
+              "branch": "main",
+          }
+          api_json(
+              f"https://api.github.com/repos/{repository}/contents/.github/production/runtime-reconstruction-binding.json",
+              method="PUT",
+              payload=payload,
+          )
+
+          print("runtime reconstruction manifest enrollment: accepted")
+          print("enrollment_status=enrolled")
+          print("phone_execution_authority=false")
+          print("raw_manifest_recorded=false")
+          print("raw_device_identifier_recorded=false")
+          print("manifest_fingerprint_published=false")
+          print("runtime_secret_values_read=false")
+          print("phone_access=false")
+          PY
