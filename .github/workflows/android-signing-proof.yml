@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      PINNED_CANONICAL_SHA: 79fa8bc2c4977ab8ac029b11a92c7ef768c61311
+      PINNED_CANONICAL_SHA: a6735b3b64958699b50acc619e770d80f4bdfbc1
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
     steps:
