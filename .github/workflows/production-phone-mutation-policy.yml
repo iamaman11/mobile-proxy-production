@@ -1,0 +1,103 @@
+name: Production phone mutation policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-phone-workflow-classification:
+    name: Validate phone workflow mutation classification and global lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce production-phone mutation serialization policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          workflows = Path('.github/workflows')
+          required_group = 'production-phone-global-mutation'
+
+          mutators = {
+              'android-signing-migration.yml',
+              'phone-runtime-recovery.yml',
+              'phone-runtime-binary-repair.yml',
+          }
+          read_only_phone = {
+              'phone-preflight.yml',
+              'phone-post-migration-diagnostic.yml',
+              'phone-runtime-cutover-preflight.yml',
+              'phone-runtime-diagnostic.yml',
+              'phone-runtime-error-context.yml',
+              'phone-runtime-failure-diagnostic.yml',
+              'phone-runtime-release-inventory.yml',
+              'phone-runtime-tooling-diagnostic.yml',
+              'phone-signing-identity.yml',
+          }
+
+          missing = sorted(name for name in mutators | read_only_phone if not (workflows / name).is_file())
+          if missing:
+              raise SystemExit('classified production-phone workflow missing: ' + ', '.join(missing))
+
+          contents = {
+              path.name: path.read_text(encoding='utf-8')
+              for path in workflows.glob('*.yml')
+          }
+          phone_facing = {
+              name for name, text in contents.items()
+              if 'android-production' in text
+          }
+          classified = mutators | read_only_phone
+          unknown = sorted(phone_facing - classified)
+          if unknown:
+              raise SystemExit(
+                  'unclassified android-production workflow; classify it explicitly before merge: '
+                  + ', '.join(unknown)
+              )
+
+          for name in sorted(mutators):
+              text = contents[name]
+              if f'group: {required_group}' not in text:
+                  raise SystemExit(f'{name}: production phone mutator does not use {required_group}')
+              if 'cancel-in-progress: false' not in text:
+                  raise SystemExit(f'{name}: production phone mutator must use cancel-in-progress: false')
+
+          # Read-only phone workflows intentionally do not contend for the mutation lock.
+          # Reject common write primitives so a future behavioral change cannot silently
+          # retain the read-only classification.
+          write_patterns = {
+              'canonical destructive migration script': r'migrate_android_signing_lineage\.py',
+              'adb push': r"(?:adb\s+-s[^\n]*\s+push\s+|subprocess\.run\(\s*\[\s*['\"]adb['\"][\s\S]{0,400}?['\"]push['\"])",
+              'package mutation command': r"(?:\bpm\s+(?:install|uninstall|clear|grant|revoke|enable|disable)\b|['\"]pm['\"]\s*,\s*['\"](?:install|uninstall|clear|grant|revoke|enable|disable)['\"])",
+              'root file replacement': r'\b(?:install\s+-m\s+0?755|mv\s+-f|cp\s+-p|rm\s+-rf|mkdir\s+-p)\b',
+              'runtime service execution': r"(?:\bsh\s+[^\n]*service\.sh\b|['\"]sh['\"]\s*,\s*['\"]-c['\"][\s\S]{0,200}?service\.sh)",
+              'android component mutation': r'\b(?:am\s+(?:start|startservice|force-stop)|cmd\s+package\s+(?:install|uninstall))\b',
+          }
+
+          for name in sorted(read_only_phone):
+              text = contents[name]
+              if f'group: {required_group}' in text:
+                  raise SystemExit(f'{name}: read-only workflow must stay outside the global mutation lock')
+              for label, pattern in write_patterns.items():
+                  if re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE):
+                      raise SystemExit(
+                          f'{name}: read-only classification contains possible {label}; '
+                          'reclassify as a mutator and use the global lock or remove the write behavior'
+                      )
+
+          print('production phone mutation policy: accepted')
+          print('mutators=' + ','.join(sorted(mutators)))
+          print('read_only_phone=' + ','.join(sorted(read_only_phone)))
+          print('global_mutation_group=' + required_group)
+          PY
