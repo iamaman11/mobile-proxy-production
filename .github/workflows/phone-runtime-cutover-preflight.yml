@@ -1,0 +1,175 @@
+name: Production phone legacy runtime cutover preflight
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-legacy-runtime-cutover-preflight
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner cutover preflight command
+    if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-runtime-cutover-preflight ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-cutover-preflight ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid runtime cutover preflight command")
+          requested_sha = match.group(1)
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={"Accept": "application/vnd.github+json", "User-Agent": "mobile-proxy-production-runtime-cutover-preflight"},
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              canonical_main = json.load(response)["sha"]
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+          PY
+
+  capability-preflight:
+    name: Prove exact phone and runtime build capability read-only
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+          python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output "${RUNNER_TEMP}/phone-runtime-cutover-preflight.json"
+
+      - name: Record bounded local build and legacy-layout capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          tmp = Path(os.environ["RUNNER_TEMP"])
+
+          def adb_root_ok(script: str) -> bool:
+              try:
+                  result = subprocess.run(
+                      ["adb", "-s", serial, "shell", "su", "0", "sh", "-c", script],
+                      check=False, capture_output=True, text=True, timeout=20,
+                  )
+                  return result.returncode == 0
+              except (OSError, subprocess.TimeoutExpired):
+                  return False
+
+          def executable(path: str) -> bool:
+              return Path(path).is_file() and os.access(path, os.X_OK)
+
+          ndk_candidates = []
+          for env_name in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"):
+              value = os.environ.get(env_name)
+              if value:
+                  ndk_candidates.append(Path(value))
+          ndk_candidates.append(Path("/usr/lib/android-ndk"))
+          android_home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+          if android_home:
+              ndk_root = Path(android_home) / "ndk"
+              if ndk_root.is_dir():
+                  ndk_candidates.extend(sorted(ndk_root.iterdir(), reverse=True))
+          ndk_ready = any(
+              executable(str(root / "toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang"))
+              and executable(str(root / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"))
+              for root in ndk_candidates
+          )
+
+          legacy = {
+              "current_is_symlink": adb_root_ok('test -L /data/adb/mobile-proxy-node/current'),
+              "current_service_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/service.sh'),
+              "current_config_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/config/host-daemon.json && test -f /data/adb/mobile-proxy-node/current/config/sing-box.json'),
+              "current_supervisor_exists": adb_root_ok('test -f /data/adb/mobile-proxy-node/current/bin/runtime-supervisor'),
+              "immutable_release_absent": adb_root_ok('test ! -d /data/adb/mobile-proxy-node/releases || test -z "$(ls -A /data/adb/mobile-proxy-node/releases 2>/dev/null)"'),
+          }
+          tools = {name: shutil.which(name) is not None for name in ("adb", "cargo", "rustup", "curl", "git", "tar", "python3")}
+          disk_ready = shutil.disk_usage(tmp).free >= 4 * 1024 * 1024 * 1024
+          accepted = all(tools.values()) and ndk_ready and disk_ready and all(legacy.values())
+
+          path = tmp / "phone-runtime-cutover-preflight.json"
+          evidence = json.loads(path.read_text(encoding="utf-8"))
+          evidence.update({
+              "mode": "legacy_runtime_cutover_preflight",
+              "tooling_ready": all(tools.values()),
+              "android_ndk_ready": ndk_ready,
+              "workspace_capacity_ready": disk_ready,
+              "legacy_layout": legacy,
+              "phone_mutation_performed": False,
+              "apk_mutation_performed": False,
+              "provider_credentials_requested": False,
+              "raw_device_identifier_recorded": False,
+              "accepted": accepted,
+          })
+          path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print(
+              "bounded cutover capability: "
+              f"tooling_ready={str(all(tools.values())).lower()} "
+              f"android_ndk_ready={str(ndk_ready).lower()} "
+              f"workspace_capacity_ready={str(disk_ready).lower()} "
+              f"legacy_contract_ready={str(all(legacy.values())).lower()} "
+              f"accepted={str(accepted).lower()} phone_mutation=false apk_mutation=false"
+          )
+          if not accepted:
+              raise SystemExit("legacy runtime cutover capability is not ready")
+          PY
+
+      - name: Upload bounded private capability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-runtime-cutover-preflight-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-runtime-cutover-preflight.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Legacy runtime cutover preflight
+          - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Phone mutation performed: false
+          - APK mutation performed: false
+          - Provider credentials requested: false
+          - Raw device identifier recorded: false
+          EOF
