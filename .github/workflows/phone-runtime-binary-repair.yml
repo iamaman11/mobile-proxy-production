@@ -638,13 +638,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, re, subprocess
+          import json, os, re, subprocess, time
           from pathlib import Path
 
           serial = os.environ['ANDROID_PRODUCTION_SERIAL']
           run_id = os.environ['GITHUB_RUN_ID']
           backup = f'/data/local/tmp/mobile-proxy-runtime-backup-{run_id}'
           target = '/data/adb/mobile-proxy-node/current/bin'
+          supervisor = f'{target}/runtime-supervisor'
+          runtime_root = '/data/adb/mobile-proxy-node/current'
+          service = '/data/adb/mobile-proxy-node/current/service.sh'
           names = ('runtime-supervisor','host-daemon','sing-box')
           evidence_path = Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-rollback-evidence.json')
           stages = {
@@ -667,6 +670,10 @@ jobs:
               'restored_runtime_binary_digests_match_backup': False,
               'service_bootstrap_attempted': False,
               'service_bootstrap_succeeded': False,
+              'prior_repaired_supervisor_retired': False,
+              'restored_supervisor_count': 0,
+              'restored_supervisor_exact_executable': False,
+              'raw_process_identifiers_recorded': False,
               'installed_apk_unchanged': False,
               'installed_version_name': None,
               'installed_version_code': None,
@@ -699,6 +706,31 @@ jobs:
               except Exception as exc:
                   fail(stage, exc)
                   return False, None
+
+          def root(shell, *, timeout=30, check=True):
+              result = subprocess.run(
+                  ['adb','-s',serial,'shell','su','0','sh','-c',shell],
+                  check=False, capture_output=True, text=True, timeout=timeout,
+              )
+              if check and result.returncode != 0:
+                  raise RuntimeError('root_command_failed')
+              return result
+
+          def matching_pids():
+              script = f'''for proc in /proc/[0-9]*; do
+                [ -r "$proc/cmdline" ] || continue
+                cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                case "$cmd" in
+                  "{supervisor} --runtime-root {runtime_root} "*) printf '%s\\n' "${{proc#/proc/}}" ;;
+                esac
+              done'''
+              result = root(script, timeout=20)
+              pids = []
+              for line in result.stdout.splitlines():
+                  value = line.strip()
+                  if value.isdigit():
+                      pids.append(int(value))
+              return sorted(set(pids))
 
           try:
               preflight_script = str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py')
@@ -782,10 +814,45 @@ jobs:
                   if state['restored_runtime_binary_digests_match_backup']:
                       def bootstrap_restored():
                           state['service_bootstrap_attempted'] = True
-                          subprocess.run(
-                              ['adb','-s',serial,'shell','su','0','sh','-c','set -eu; sh /data/adb/mobile-proxy-node/current/service.sh'],
-                              check=True, timeout=60,
-                          )
+                          active_before = matching_pids()
+                          for pid in active_before:
+                              script = f'''proc=/proc/{pid}
+                              [ -r "$proc/cmdline" ] || exit 0
+                              cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                              case "$cmd" in
+                                "{supervisor} --runtime-root {runtime_root} "*) kill -TERM {pid} ;;
+                                *) exit 22 ;;
+                              esac'''
+                              root(script, timeout=20)
+
+                          retire_deadline = time.monotonic() + 30
+                          remaining = set(active_before)
+                          while remaining and time.monotonic() < retire_deadline:
+                              time.sleep(1)
+                              remaining = set(active_before).intersection(matching_pids())
+                          if remaining:
+                              raise RuntimeError('repaired_supervisor_did_not_retire')
+                          state['prior_repaired_supervisor_retired'] = True
+
+                          root(f'set -eu; sh "{service}"', timeout=60)
+                          start_deadline = time.monotonic() + 30
+                          restored = matching_pids()
+                          while len(restored) != 1 and time.monotonic() < start_deadline:
+                              time.sleep(1)
+                              restored = matching_pids()
+                          if len(restored) != 1:
+                              raise RuntimeError('restored_supervisor_count_differs')
+                          if set(active_before).intersection(restored):
+                              raise RuntimeError('repaired_supervisor_survived_rollback_activation')
+
+                          active_digest = root(
+                              f'sha256sum "/proc/{restored[0]}/exe"', timeout=20
+                          ).stdout.split()
+                          if not active_digest or active_digest[0] != before['runtime-supervisor']:
+                              raise RuntimeError('restored_supervisor_executable_digest_differs')
+                          state['restored_supervisor_count'] = len(restored)
+                          state['restored_supervisor_exact_executable'] = True
+                          return True
 
                       bootstrap_ok, _ = run_stage('service_bootstrap', bootstrap_restored)
                       state['service_bootstrap_succeeded'] = bootstrap_ok
@@ -820,6 +887,10 @@ jobs:
                   and state['rollback_invoked']
                   and state['restore_copy_succeeded']
                   and state['restored_runtime_binary_digests_match_backup']
+                  and state['service_bootstrap_succeeded']
+                  and state['prior_repaired_supervisor_retired']
+                  and state['restored_supervisor_count'] == 1
+                  and state['restored_supervisor_exact_executable']
                   and state['installed_apk_unchanged']
               )
               state['bounded_failures'] = failures[:8]
@@ -832,6 +903,7 @@ jobs:
                   f"restore={stages['restore_copy']}",
                   f"digest_verify={stages['restore_digest_verification']}",
                   f"bootstrap={stages['service_bootstrap']}",
+                  f"restored_supervisor_exact={state['restored_supervisor_exact_executable']}",
                   f"apk_verify={stages['apk_identity_verification']}",
                   f"rollback_accepted={state['rollback_accepted']}",
               ]))
@@ -895,6 +967,7 @@ jobs:
               f"- runtime watchdog running: `{repair.get('runtime_watchdog_running')}`",
               f"- repaired baseline accepted: `{repair.get('accepted')}`",
               f"- rollback required: `{rollback.get('rollback_required', False)}`",
+              f"- rollback restored active supervisor exact executable: `{rollback.get('restored_supervisor_exact_executable')}`",
               f"- rollback exact bytes accepted: `{rollback.get('rollback_accepted')}`",
               '- APK mutation performed: `False`',
               '- config mutation performed: `False`',
