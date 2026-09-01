@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-phone-runtime-recovery
+  group: production-phone-global-mutation
   cancel-in-progress: false
 
 jobs:
