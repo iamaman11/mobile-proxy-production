@@ -126,18 +126,15 @@ jobs:
           if binding.get('expected_token_env_names') != expected_token_names:
               raise SystemExit('runtime reconstruction token environment contract drift')
           expected_runtime_secrets = {
-              'MOBILE_PROXY_ADMIN_TOKEN',
-              'MOBILE_PROXY_DEVICE_TOKEN',
-              'MOBILE_PROXY_UI_TOKEN',
-              'MOBILE_PROXY_RELAY_USER',
-              'MOBILE_PROXY_RELAY_PASSWORD',
+              'MOBILE_PROXY_ADMIN_TOKEN', 'MOBILE_PROXY_DEVICE_TOKEN', 'MOBILE_PROXY_UI_TOKEN',
+              'MOBILE_PROXY_RELAY_USER', 'MOBILE_PROXY_RELAY_PASSWORD',
               'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64',
           }
           actual_runtime_secrets = binding.get('required_runtime_secret_names')
           if not isinstance(actual_runtime_secrets, list) or len(actual_runtime_secrets) != 6 or set(actual_runtime_secrets) != expected_runtime_secrets:
               raise SystemExit('runtime reconstruction required secret-name contract drift')
 
-          expected_evidence_policy = {
+          if binding.get('evidence_policy') != {
               'raw_manifest_recorded': False,
               'raw_device_identifier_recorded': False,
               'secret_values_recorded': False,
@@ -145,21 +142,16 @@ jobs:
               'config_digest_recorded': False,
               'manifest_fingerprint_publication_allowed': False,
               'credential_derived_identifiers_recorded': False,
-          }
-          if binding.get('evidence_policy') != expected_evidence_policy:
+          }:
               raise SystemExit('runtime reconstruction evidence policy drift')
 
           readiness = readiness_path.read_text(encoding='utf-8')
-          required_readiness = [
-              'name: Runtime reconstruction readiness',
-              '  workflow_dispatch:',
-              '  contents: read',
-              '    runs-on: ubuntu-latest',
-              'runtime-reconstruction-binding.json',
-              'production manifest enrollment is pending',
+          for fragment in (
+              'name: Runtime reconstruction readiness', '  workflow_dispatch:',
+              '  contents: read', '    runs-on: ubuntu-latest',
+              'runtime-reconstruction-binding.json', 'production manifest enrollment is pending',
               'no manifest/runtime secret access or config rendering is authorized',
-          ]
-          for fragment in required_readiness:
+          ):
               if fragment not in readiness:
                   raise SystemExit(f'runtime reconstruction readiness missing safe fragment: {fragment}')
           for fragment in (
@@ -175,11 +167,17 @@ jobs:
           required_enrollment = [
               'name: Runtime reconstruction manifest enrollment',
               '  workflow_dispatch:',
+              '  issue_comment:',
+              'types: [created]',
+              "github.event.issue.number == 1",
+              "github.event.comment.user.login == github.repository_owner",
+              "github.event.comment.body == '/runtime-reconstruction-enroll ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE'",
               '      confirm:',
               'ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE',
               '  contents: write',
               '    runs-on: ubuntu-latest',
               'persist-credentials: false',
+              'exact owner production-control enrollment command is required',
               'manifest enrollment must execute from exact current private main',
               'runtime reconstruction manifest top-level schema mismatch',
               'runtime reconstruction manifest token schema mismatch',
@@ -199,6 +197,8 @@ jobs:
               if fragment not in enrollment:
                   raise SystemExit(f'runtime reconstruction enrollment missing required fragment: {fragment}')
 
+          if 'startsWith(' in enrollment:
+              raise SystemExit('runtime reconstruction enrollment command gate must use exact equality, not prefix matching')
           if enrollment.count('secrets.') != 1 or 'secrets.ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON' not in enrollment:
               raise SystemExit('enrollment may reference exactly one approved manifest secret and no other secret')
           for fragment in (
@@ -211,8 +211,6 @@ jobs:
                   raise SystemExit(f'enrollment contains forbidden phone/runtime-secret/render/evidence behavior: {fragment}')
           if enrollment.count('runs-on: ubuntu-latest') != 1:
               raise SystemExit('enrollment must contain exactly one GitHub-hosted job')
-          if re.search(r'(?m)^\s*issue_comment\s*:', enrollment):
-              raise SystemExit('manifest enrollment must not subscribe to production issue-comment fan-out')
 
           recovery = recovery_path.read_text(encoding='utf-8')
           for fragment in (

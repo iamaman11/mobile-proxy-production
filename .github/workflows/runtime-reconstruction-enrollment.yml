@@ -7,6 +7,8 @@ on:
         description: "Type ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE exactly"
         required: true
         type: string
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -14,6 +16,12 @@ permissions:
 jobs:
   enroll-manifest:
     name: Enroll one explicit private reconstruction manifest baseline
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.number == 1 &&
+       github.event.comment.user.login == github.repository_owner &&
+       github.event.comment.body == '/runtime-reconstruction-enroll ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -27,7 +35,12 @@ jobs:
       - name: Validate authority and explicit enrollment confirmation before protected input
         shell: bash
         env:
-          CONFIRM: ${{ inputs.confirm }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_CONFIRM: ${{ inputs.confirm }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
           PRIVATE_REPOSITORY: ${{ github.repository }}
           PRIVATE_SHA: ${{ github.sha }}
           PRIVATE_TOKEN: ${{ github.token }}
@@ -41,8 +54,20 @@ jobs:
           import urllib.request
           from pathlib import Path
 
-          if os.environ.get("CONFIRM") != "ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE":
-              raise SystemExit("explicit runtime reconstruction baseline enrollment confirmation is required")
+          event_name = os.environ.get("EVENT_NAME", "")
+          if event_name == "workflow_dispatch":
+              if os.environ.get("DISPATCH_CONFIRM") != "ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE":
+                  raise SystemExit("explicit runtime reconstruction baseline enrollment confirmation is required")
+          elif event_name == "issue_comment":
+              if (
+                  os.environ.get("ISSUE_NUMBER") != "1"
+                  or os.environ.get("COMMENT_USER") != os.environ.get("REPOSITORY_OWNER")
+                  or os.environ.get("COMMENT_BODY")
+                  != "/runtime-reconstruction-enroll ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE"
+              ):
+                  raise SystemExit("exact owner production-control enrollment command is required")
+          else:
+              raise SystemExit("unsupported runtime reconstruction enrollment event")
 
           binding = json.loads(
               Path("private-execution/.github/production/runtime-reconstruction-binding.json").read_text(encoding="utf-8")
@@ -148,7 +173,6 @@ jobs:
           import json
           import os
           import re
-          import urllib.error
           import urllib.request
           from pathlib import Path
 
@@ -165,16 +189,11 @@ jobs:
               raise SystemExit("approved private runtime reconstruction manifest is not valid JSON") from error
           if not isinstance(manifest, dict):
               raise SystemExit("runtime reconstruction manifest must be a JSON object")
-
           if set(manifest) != {"deviceId", "nodeName", "operatorProfile", "controlPlaneUrl", "tokens", "relay"}:
               raise SystemExit("runtime reconstruction manifest top-level schema mismatch")
           if not isinstance(manifest.get("tokens"), dict) or set(manifest["tokens"]) != {
-              "adminTokenEnv",
-              "deviceTokenEnv",
-              "uiTokenEnv",
-              "reverseTunnelCertDerB64Env",
-              "relayUserEnv",
-              "relayPasswordEnv",
+              "adminTokenEnv", "deviceTokenEnv", "uiTokenEnv",
+              "reverseTunnelCertDerB64Env", "relayUserEnv", "relayPasswordEnv",
           }:
               raise SystemExit("runtime reconstruction manifest token schema mismatch")
           if not isinstance(manifest.get("relay"), dict) or set(manifest["relay"]) != {"host", "httpPort"}:
@@ -204,12 +223,7 @@ jobs:
           if manifest["tokens"] != expected_token_env:
               raise SystemExit("runtime reconstruction manifest token environment names differ from enrolled contract")
 
-          normalized = json.dumps(
-              manifest,
-              sort_keys=True,
-              separators=(",", ":"),
-              ensure_ascii=False,
-          ).encode("utf-8")
+          normalized = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
           fingerprint = hashlib.sha256(normalized).hexdigest()
 
           binding_path = Path("private-execution/.github/production/runtime-reconstruction-binding.json")
@@ -233,8 +247,7 @@ jobs:
               with urllib.request.urlopen(request, timeout=20) as response:
                   return json.load(response)
 
-          current_private = api_json(f"https://api.github.com/repos/{repository}/commits/main").get("sha")
-          if current_private != expected_private_sha:
+          if api_json(f"https://api.github.com/repos/{repository}/commits/main").get("sha") != expected_private_sha:
               raise SystemExit("private main drifted after enrollment authority validation")
 
           public_headers = dict(headers)
@@ -258,16 +271,15 @@ jobs:
           binding["manifest_fingerprint"]["sha256"] = fingerprint
           binding["phone_execution_authority"] = False
           updated_bytes = (json.dumps(binding, indent=2, sort_keys=True) + "\n").encode("utf-8")
-          payload = {
-              "message": "Enroll private runtime reconstruction manifest baseline",
-              "content": base64.b64encode(updated_bytes).decode("ascii"),
-              "sha": current_file["sha"],
-              "branch": "main",
-          }
           api_json(
               f"https://api.github.com/repos/{repository}/contents/.github/production/runtime-reconstruction-binding.json",
               method="PUT",
-              payload=payload,
+              payload={
+                  "message": "Enroll private runtime reconstruction manifest baseline",
+                  "content": base64.b64encode(updated_bytes).decode("ascii"),
+                  "sha": current_file["sha"],
+                  "branch": "main",
+              },
           )
 
           print("runtime reconstruction manifest enrollment: accepted")
