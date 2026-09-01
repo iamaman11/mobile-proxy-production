@@ -186,7 +186,6 @@ jobs:
               'self-hosted runner': 'self-hosted',
               'production phone label': 'android-production',
               'GitHub secret expression': 'secrets.',
-              'manifest secret reference': 'ANDROID_RUNTIME_RECONSTRUCTION_MANIFEST_JSON',
               'runtime packaging': 'package-device-release',
               'ADB command': 'adb ',
               'ADB executable list': "'adb'",
