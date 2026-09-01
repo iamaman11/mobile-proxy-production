@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   command-gate:
-    name: Bind migration to pinned canonical SHA and proved build run
+    name: Bind migration to execution binding and proved retained build
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
@@ -22,18 +22,68 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      PINNED_CANONICAL_SHA: 6d8591b680e4b029cd04c0108b4f8e284bba2477
-      MIGRATION_VERSION: 0.1.4
       MIGRATION_HARD_BLOCKED: "true"
       COMMAND: ${{ github.event.comment.body }}
       GH_TOKEN: ${{ github.token }}
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
       build_run_id: ${{ steps.command.outputs.build_run_id }}
+      version_name: ${{ steps.binding.outputs.version_name }}
+      version_code: ${{ steps.binding.outputs.version_code }}
+      old_version_name: ${{ steps.binding.outputs.old_version_name }}
+      old_version_code: ${{ steps.binding.outputs.old_version_code }}
     steps:
-      - name: Validate exact owner command, canonical main Quality, release order, and signed-candidate run
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+
+      - name: Load and validate single Android migration execution binding
+        id: binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          path = Path('private-execution/.github/production/android-v0.1.4-migration-binding.json')
+          binding = json.loads(path.read_text(encoding='utf-8'))
+          expected = {
+              'format_version': 1,
+              'binding_role': 'private_execution_only',
+              'canonical_repository': 'iamaman11/mobile-proxy',
+              'quality_required': True,
+              'migration_tracker_issue': 162,
+              'hardening_tracker_issue': 179,
+              'application_id': 'com.example.mobileproxy',
+              'version_name': '0.1.4',
+              'version_code': 1004,
+              'old_version_name': '1.1.0',
+              'old_version_code': 2,
+              'candidate_retention_days_minimum': 30,
+              'final_release_authority': False,
+          }
+          for key, value in expected.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f'Android migration binding mismatch: {key}')
+          canonical_sha = binding.get('canonical_sha')
+          if not isinstance(canonical_sha, str) or re.fullmatch(r'[0-9a-f]{40}', canonical_sha) is None:
+              raise SystemExit('Android migration binding canonical_sha is malformed')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={canonical_sha}\n')
+              handle.write(f"version_name={binding['version_name']}\n")
+              handle.write(f"version_code={binding['version_code']}\n")
+              handle.write(f"old_version_name={binding['old_version_name']}\n")
+              handle.write(f"old_version_code={binding['old_version_code']}\n")
+          PY
+
+      - name: Validate owner command, current canonical main, Quality, retained build, and release order
         id: command
         shell: bash
+        env:
+          BOUND_CANONICAL_SHA: ${{ steps.binding.outputs.canonical_sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -41,91 +91,115 @@ jobs:
           import os
           import re
           import urllib.error
+          import urllib.parse
           import urllib.request
 
-          command = os.environ.get("COMMAND", "").strip()
-          match = re.fullmatch(r"/android-release-migrate ([0-9a-f]{40}) ([1-9][0-9]*)", command)
+          command = os.environ.get('COMMAND', '').strip()
+          match = re.fullmatch(r'/android-release-migrate ([0-9a-f]{40}) ([1-9][0-9]*)', command)
           if match is None:
-              raise SystemExit("invalid Android release migration command")
-          if os.environ.get("MIGRATION_HARD_BLOCKED") == "true":
+              raise SystemExit('invalid Android release migration command')
+          if os.environ.get('MIGRATION_HARD_BLOCKED') == 'true':
               raise SystemExit(
-                  "destructive Android migration is hard-blocked by canonical tracker #179 until "
-                  "the required hardening, healthy-baseline, fresh-build, and retention gates are completed"
+                  'destructive Android migration is hard-blocked by canonical tracker #179 until '
+                  'the required hardening, healthy-baseline, fresh-build, and retention gates are completed'
               )
+
           requested_sha, build_run_id = match.groups()
-          pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
-          if requested_sha != pinned_sha:
-              raise SystemExit("requested SHA is not the pinned Android 0.1.4 migration baseline")
+          bound_sha = os.environ['BOUND_CANONICAL_SHA']
+          if requested_sha != bound_sha:
+              raise SystemExit('requested SHA is not the single Android migration execution binding')
 
           def get_json(url: str, token: str | None = None):
               headers = {
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "mobile-proxy-production-android-migration",
-                  "X-GitHub-Api-Version": "2022-11-28",
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'mobile-proxy-production-android-migration',
+                  'X-GitHub-Api-Version': '2022-11-28',
               }
               if token:
-                  headers["Authorization"] = f"Bearer {token}"
+                  headers['Authorization'] = f'Bearer {token}'
               request = urllib.request.Request(url, headers=headers)
               with urllib.request.urlopen(request, timeout=15) as response:
                   return json.load(response)
 
+          current_main = get_json('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main').get('sha')
+          if current_main != bound_sha:
+              raise SystemExit('private Android migration binding is stale relative to current canonical main')
+
           public_runs = get_json(
-              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={pinned_sha}&event=push&per_page=100"
-          ).get("workflow_runs", [])
+              f'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={bound_sha}&event=push&per_page=100'
+          ).get('workflow_runs', [])
           main_quality = [
               run for run in public_runs
-              if run.get("name") == "Quality"
-              and run.get("head_branch") == "main"
-              and run.get("head_sha") == pinned_sha
-              and run.get("status") == "completed"
-              and run.get("conclusion") == "success"
+              if run.get('name') == 'Quality'
+              and run.get('head_branch') == 'main'
+              and run.get('head_sha') == bound_sha
+              and run.get('status') == 'completed'
+              and run.get('conclusion') == 'success'
           ]
           if not main_quality:
-              raise SystemExit("exact pinned canonical main Quality success is absent")
+              raise SystemExit('exact bound canonical main Quality success is absent')
 
-          migration_issue = get_json("https://api.github.com/repos/iamaman11/mobile-proxy/issues/162")
-          if migration_issue.get("state") != "open":
-              raise SystemExit("canonical signing-generation migration tracker #162 is not open")
-          signing_gate = get_json("https://api.github.com/repos/iamaman11/mobile-proxy/issues/115")
-          if signing_gate.get("state") != "open":
-              raise SystemExit("canonical signing gate #115 must remain open while #162 migration is being satisfied")
+          migration_issue = get_json('https://api.github.com/repos/iamaman11/mobile-proxy/issues/162')
+          if migration_issue.get('state') != 'open':
+              raise SystemExit('canonical signing-generation migration tracker #162 is not open')
+          signing_gate = get_json('https://api.github.com/repos/iamaman11/mobile-proxy/issues/115')
+          if signing_gate.get('state') != 'open':
+              raise SystemExit('canonical signing gate #115 must remain open while #162 migration is being satisfied')
 
-          tag_url = "https://api.github.com/repos/iamaman11/mobile-proxy/git/ref/tags/v0.1.4"
+          tag_url = 'https://api.github.com/repos/iamaman11/mobile-proxy/git/ref/tags/v0.1.4'
           try:
               get_json(tag_url)
           except urllib.error.HTTPError as error:
               if error.code != 404:
                   raise
           else:
-              raise SystemExit("final public v0.1.4 tag exists before pre-Item20 migration; release ordering violated")
+              raise SystemExit('final public v0.1.4 tag exists before pre-Item20 migration; release ordering violated')
 
-          token = os.environ["GH_TOKEN"]
-          repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ['GH_TOKEN']
+          repository = os.environ['GITHUB_REPOSITORY']
           run = get_json(
-              f"https://api.github.com/repos/{repository}/actions/runs/{build_run_id}", token
+              f'https://api.github.com/repos/{repository}/actions/runs/{build_run_id}', token
           )
-          if run.get("event") != "issue_comment" or run.get("conclusion") != "success":
-              raise SystemExit("signed-candidate build run is not a successful issue-comment run")
-          if run.get("path") != ".github/workflows/android-release-build.yml":
-              raise SystemExit("build run did not execute the signed-candidate workflow")
-          if run.get("head_sha") != os.environ["GITHUB_SHA"]:
-              raise SystemExit("build run and migration caller are from different private revisions")
+          if run.get('event') != 'issue_comment' or run.get('conclusion') != 'success':
+              raise SystemExit('signed-candidate build run is not a successful issue-comment run')
+          if run.get('path') != '.github/workflows/android-release-build.yml':
+              raise SystemExit('build run did not execute the signed-candidate workflow')
+          if run.get('head_sha') != os.environ['GITHUB_SHA']:
+              raise SystemExit('build run and migration caller are from different private execution revisions')
 
-          expected_artifact = f"android-release-candidate-v0.1.4-{pinned_sha}"
+          expected_artifact = f'android-release-candidate-v0.1.4-{bound_sha}'
           artifacts = get_json(
-              f"https://api.github.com/repos/{repository}/actions/runs/{build_run_id}/artifacts?per_page=100",
-              token,
-          ).get("artifacts", [])
+              f'https://api.github.com/repos/{repository}/actions/runs/{build_run_id}/artifacts?per_page=100', token
+          ).get('artifacts', [])
           matches = [
               artifact for artifact in artifacts
-              if artifact.get("name") == expected_artifact and not artifact.get("expired", False)
+              if artifact.get('name') == expected_artifact and not artifact.get('expired', False)
           ]
           if len(matches) != 1:
-              raise SystemExit("exact retained signed-candidate artifact is unavailable or ambiguous")
+              raise SystemExit('exact signed-candidate artifact is unavailable or ambiguous')
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"canonical_sha={pinned_sha}\n")
-              handle.write(f"build_run_id={build_run_id}\n")
+          retention_tag = f'execution-candidate-android-v0.1.4-{bound_sha[:12]}-run-{build_run_id}'
+          encoded_tag = urllib.parse.quote(retention_tag, safe='')
+          try:
+              retention = get_json(
+                  f'https://api.github.com/repos/{repository}/releases/tags/{encoded_tag}', token
+              )
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  raise SystemExit('required private candidate retention prerelease is absent') from error
+              raise
+          if retention.get('draft') is not False or retention.get('prerelease') is not True:
+              raise SystemExit('candidate retention object is not the expected immutable-by-contract prerelease')
+          if retention.get('target_commitish') != os.environ['GITHUB_SHA']:
+              raise SystemExit('candidate retention and migration caller are from different private revisions')
+          asset_names = sorted(asset.get('name') for asset in retention.get('assets', []))
+          required_assets = sorted(['mobile-proxy-android-v0.1.4.apk', 'android-release-evidence.json'])
+          if asset_names != required_assets:
+              raise SystemExit('candidate retention asset set differs from required APK/evidence pair')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={bound_sha}\n')
+              handle.write(f'build_run_id={build_run_id}\n')
           PY
 
   prepare-tools:
@@ -191,6 +265,10 @@ jobs:
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       BUILD_RUN_ID: ${{ needs.command-gate.outputs.build_run_id }}
+      OLD_VERSION_NAME: ${{ needs.command-gate.outputs.old_version_name }}
+      OLD_VERSION_CODE: ${{ needs.command-gate.outputs.old_version_code }}
+      VERSION_NAME: ${{ needs.command-gate.outputs.version_name }}
+      VERSION_CODE: ${{ needs.command-gate.outputs.version_code }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
       - name: Download exact previously proved signed candidate
@@ -225,10 +303,10 @@ jobs:
             --release-evidence "${candidate}/android-release-evidence.json" \
             --digest-tool "${tools}/android-artifact-digest" \
             --retained-old-apk "${evidence}/retained-old-generation.apk" \
-            --expected-old-version-name "1.1.0" \
-            --expected-old-version-code 2 \
-            --expected-version-name "0.1.4" \
-            --expected-version-code 1004 \
+            --expected-old-version-name "${OLD_VERSION_NAME}" \
+            --expected-old-version-code "${OLD_VERSION_CODE}" \
+            --expected-version-name "${VERSION_NAME}" \
+            --expected-version-code "${VERSION_CODE}" \
             --authorization "DESTROY_OLD_SIGNING_LINEAGE_AND_APP_DATA" \
             --output "${evidence}/android-signing-migration.json"
 
@@ -248,14 +326,14 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Production Android 0.1.4 signing-generation migration
           - Canonical source SHA: ${{ env.CANONICAL_SHA }}
+          - Private execution SHA: ${{ github.sha }}
+          - Canonical SHA source: single private execution binding
           - Signed-candidate build run: ${{ env.BUILD_RUN_ID }}
-          - Migration authority: exact protected SHA + retained signed candidate
+          - Migration authority: exact current protected SHA + exact retained signed candidate + same private revision
           - Exact canonical main Quality required: true
           - Final public v0.1.4 tag required: false
-          - Final public v0.1.4 tag present before migration: false
-          - Expected package: com.example.mobileproxy
-          - Old expected version: 1.1.0 / 2
-          - New expected version: 0.1.4 / 1004
+          - Expected old version: ${{ env.OLD_VERSION_NAME }} / ${{ env.OLD_VERSION_CODE }}
+          - Expected new version: ${{ env.VERSION_NAME }} / ${{ env.VERSION_CODE }}
           - Canonical migration outcome: ${{ steps.migration.outcome }}
           - Same-run registered-device proof before each mutation: required by canonical script
           - Old installed signed APK retained before uninstall: required by canonical script
@@ -318,6 +396,7 @@ jobs:
 
           Canonical public version metadata: 0.1.4
           Canonical public source SHA: ${CANONICAL_SHA}
+          Private execution SHA: ${GITHUB_SHA}
           Final public release authority: not created by this private retention
           Signed-candidate private build run: ${BUILD_RUN_ID}
           Accepted private migration run: ${GITHUB_RUN_ID}
@@ -327,6 +406,7 @@ jobs:
           This private release is bounded execution evidence only. It is not canonical source, architecture, release policy, or final semantic release authority.
           EOF
           gh release create "${tag}" \
+            --target "${GITHUB_SHA}" \
             --title "Private execution retention — Android 0.1.4 accepted signing generation" \
             --notes-file "${RUNNER_TEMP}/retention-notes.md" \
             "${RUNNER_TEMP}/accepted/mobile-proxy-android-v0.1.4.apk" \
