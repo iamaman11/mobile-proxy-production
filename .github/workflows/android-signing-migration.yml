@@ -9,7 +9,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: production-phone-android-signing-generation-migration
+  group: production-phone-global-mutation
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +24,7 @@ jobs:
     env:
       PINNED_CANONICAL_SHA: 6d8591b680e4b029cd04c0108b4f8e284bba2477
       MIGRATION_VERSION: 0.1.4
+      MIGRATION_HARD_BLOCKED: "true"
       COMMAND: ${{ github.event.comment.body }}
       GH_TOKEN: ${{ github.token }}
     outputs:
@@ -46,6 +47,11 @@ jobs:
           match = re.fullmatch(r"/android-release-migrate ([0-9a-f]{40}) ([1-9][0-9]*)", command)
           if match is None:
               raise SystemExit("invalid Android release migration command")
+          if os.environ.get("MIGRATION_HARD_BLOCKED") == "true":
+              raise SystemExit(
+                  "destructive Android migration is hard-blocked by canonical tracker #179 until "
+                  "the required hardening, healthy-baseline, fresh-build, and retention gates are completed"
+              )
           requested_sha, build_run_id = match.groups()
           pinned_sha = os.environ["PINNED_CANONICAL_SHA"]
           if requested_sha != pinned_sha:
