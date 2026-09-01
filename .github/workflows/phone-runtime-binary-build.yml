@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: production-phone-immutable-runtime-binary-build
@@ -58,6 +59,7 @@ jobs:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
     steps:
       - name: Check out exact canonical public source
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: iamaman11/mobile-proxy
@@ -93,6 +95,7 @@ jobs:
           PY
 
       - name: Build and verify exact runtime binaries
+        id: compile
         shell: bash
         working-directory: canonical
         run: |
@@ -103,6 +106,7 @@ jobs:
           file deploy/device-runtime/bin/runtime-supervisor deploy/device-runtime/bin/host-daemon deploy/device-runtime/bin/sing-box
 
       - name: Stage bounded non-secret bundle
+        id: stage
         shell: bash
         working-directory: canonical
         run: |
@@ -112,6 +116,7 @@ jobs:
           cp deploy/device-runtime/bin/runtime-supervisor ../runtime-bundle/bin/runtime-supervisor
           cp deploy/device-runtime/bin/host-daemon ../runtime-bundle/bin/host-daemon
           cp deploy/device-runtime/bin/sing-box ../runtime-bundle/bin/sing-box
+          chmod 0755 ../runtime-bundle/bin/*
           python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -133,7 +138,8 @@ jobs:
           PY
 
       - name: Upload immutable runtime bundle
-        uses: actions/upload-artifact@v4
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: phone-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: runtime-bundle
@@ -141,6 +147,7 @@ jobs:
           retention-days: 30
 
       - name: Record safe result
+        if: always()
         shell: bash
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
@@ -151,3 +158,50 @@ jobs:
           - Phone mutation performed: false
           - APK mutation performed: false
           EOF
+
+      - name: Post bounded build audit pointer
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          NDK_OUTCOME: ${{ steps.ndk.outcome }}
+          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          STAGE_OUTCOME: ${{ steps.stage.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          body = "\n".join([
+              f"IMMUTABLE RUNTIME BUILD — run `{os.environ['RUN_ID']}`",
+              "",
+              f"- canonical SHA: `{os.environ['CANONICAL_SHA_SAFE']}`",
+              f"- checkout: `{os.environ.get('CHECKOUT_OUTCOME','')}`",
+              f"- NDK resolution: `{os.environ.get('NDK_OUTCOME','')}`",
+              f"- compile: `{os.environ.get('COMPILE_OUTCOME','')}`",
+              f"- stage: `{os.environ.get('STAGE_OUTCOME','')}`",
+              f"- artifact upload: `{os.environ.get('UPLOAD_OUTCOME','')}`",
+              "- production secrets requested: `False`",
+              "- phone mutation performed: `False`",
+              "- APK mutation performed: `False`",
+          ])
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments",
+              data=json.dumps({'body': body}).encode('utf-8'),
+              headers={
+                  'Accept':'application/vnd.github+json',
+                  'Authorization':f"Bearer {os.environ['GH_TOKEN']}",
+                  'Content-Type':'application/json',
+                  'User-Agent':'mobile-proxy-production-runtime-build',
+              },
+              method='POST',
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit('failed to post immutable runtime build audit pointer')
+          PY
