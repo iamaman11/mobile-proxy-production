@@ -1,0 +1,249 @@
+name: Production phone post-migration diagnostic
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: production-phone-post-migration-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner post-migration diagnostic command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-post-migration-diagnostic ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-post-migration-diagnostic ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid post-migration diagnostic command")
+          requested = match.group(1)
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "mobile-proxy-production-post-migration-diagnostic",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              current = json.load(response)["sha"]
+          if requested != current:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested}\n")
+          PY
+
+  diagnostic:
+    name: Inspect bounded post-migration phone state read-only
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Record bounded post-migration state
+        id: snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          canonical_sha = os.environ["CANONICAL_SHA"]
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          package = "com.example.mobileproxy"
+          runtime_root = "/data/adb/mobile-proxy-node/current"
+          service_entrypoint = f"{runtime_root}/service.sh"
+          supervisor = f"{runtime_root}/bin/runtime-supervisor"
+          config = f"{runtime_root}/config/host-daemon.json"
+          egress_service = "com.example.mobileproxy/.CellularEgressService"
+          watchdog_script = "/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh"
+          watchdog_pid = "/data/adb/mobile-proxy-node/logs/runtime-watchdog.pid"
+
+          spec = importlib.util.spec_from_file_location(
+              "phone_preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py"
+          )
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+          preflight.require_canonical_sha(canonical_sha)
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          def adb(*args, timeout=60):
+              return subprocess.run(
+                  ["adb", "-s", serial, *args],
+                  check=False,
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+              )
+
+          def root_ok(shell):
+              try:
+                  return adb("shell", "su", "0", "sh", "-c", shell, timeout=20).returncode == 0
+              except (OSError, subprocess.TimeoutExpired):
+                  return False
+
+          package_dump = adb("shell", "dumpsys", "package", package, timeout=60)
+          codes = re.findall(r"^\s*versionCode=([0-9]+)\b", package_dump.stdout, re.MULTILINE)
+          names = re.findall(r"^\s*versionName=([^\s]+)\s*$", package_dump.stdout, re.MULTILINE)
+          package_installed = (
+              package_dump.returncode == 0
+              and len(codes) == 1
+              and len(names) == 1
+          )
+
+          supervisor_running = root_ok(f'''for proc in /proc/[0-9]*; do
+            [ -r "$proc/cmdline" ] || continue
+            cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+            case "$cmd" in
+              "{supervisor} --runtime-root {runtime_root} "*) exit 0 ;;
+            esac
+          done
+          exit 1
+          ''')
+
+          egress = adb("shell", "dumpsys", "activity", "services", package, timeout=30)
+          egress_running = egress.returncode == 0 and egress_service in egress.stdout
+
+          ports_ready = root_ok('''BB=""
+          for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do
+            [ -x "$candidate" ] && BB="$candidate" && break
+          done
+          [ -n "$BB" ] || exit 1
+          "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1
+          "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1
+          ''')
+
+          watchdog_running = root_ok(f'''test -f "{watchdog_pid}" || exit 1
+          pid="$(cat "{watchdog_pid}" 2>/dev/null || true)"
+          test -n "$pid" || exit 1
+          test -r "/proc/$pid/cmdline" || exit 1
+          tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "{watchdog_script}"
+          ''')
+
+          state = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": canonical_sha,
+              "mode": "post_migration_read_only",
+              "package_installed": package_installed,
+              "installed_version_code": int(codes[0]) if package_installed else None,
+              "installed_version_name": names[0] if package_installed else None,
+              "runtime_service_entrypoint_present": root_ok(f'test -f "{service_entrypoint}"'),
+              "runtime_supervisor_binary_present": root_ok(f'test -x "{supervisor}"'),
+              "runtime_config_present": root_ok(f'test -f "{config}"'),
+              "runtime_supervisor_running": supervisor_running,
+              "cellular_egress_service_running": egress_running,
+              "local_proxy_ports_ready": ports_ready,
+              "runtime_watchdog_running": watchdog_running,
+              "registered_device_preflight_performed": True,
+              "phone_mutation_performed": False,
+              "apk_mutation_performed": False,
+              "phone_reboot_performed": False,
+              "provider_credentials_requested": False,
+              "raw_runtime_log_recorded": False,
+              "raw_device_identifier_recorded": False,
+          }
+          state["local_healthy"] = bool(
+              supervisor_running and egress_running and ports_ready
+          )
+          Path(os.environ["RUNNER_TEMP"], "phone-post-migration-diagnostic.json").write_text(
+              json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(
+              "bounded post-migration state: "
+              + " ".join(f"{key}={value}" for key, value in state.items() if key not in {"canonical_sha", "repository"})
+          )
+          PY
+
+      - name: Upload bounded diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-post-migration-diagnostic-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-post-migration-diagnostic.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Post safe audit pointer
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_OUTCOME: ${{ steps.snapshot.outcome }}
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          body = (
+              "POST-MIGRATION READ-ONLY DIAGNOSTIC — run `" + os.environ["RUN_ID"] + "`\n\n"
+              "- canonical SHA: `" + os.environ["CANONICAL_SHA_SAFE"] + "`\n"
+              "- bounded snapshot outcome: `" + os.environ["SNAPSHOT_OUTCOME"] + "`\n"
+              "- phone mutation performed: false\n"
+              "- APK mutation performed: false\n"
+              "- phone reboot performed: false\n"
+              "- raw device identifier recorded: false\n"
+              "- inspect run log/artifact for bounded state"
+          )
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments",
+              data=json.dumps({"body": body}).encode("utf-8"),
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "mobile-proxy-production-post-migration-diagnostic",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit("failed to post diagnostic audit pointer")
+          PY
