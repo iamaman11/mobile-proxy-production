@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: production-phone-runtime-failure-diagnostic
@@ -145,9 +146,74 @@ jobs:
           PY
 
       - name: Upload bounded diagnostic evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: phone-runtime-failure-diagnostic-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phone-runtime-failure-diagnostic.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
+
+      - name: Post bounded diagnostic audit pointer
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "phone-runtime-failure-diagnostic.json"
+          if path.is_file():
+              state = json.loads(path.read_text(encoding="utf-8"))
+              ordered = [
+                  "watchdog_pid_file_present",
+                  "watchdog_script_present",
+                  "watchdog_running",
+                  "recent_supervisor_exit_count",
+                  "recent_supervisor_last_exit_code",
+                  "boot_log_reports_watchdog_spawned",
+                  "boot_log_reports_watchdog_already_running",
+                  "config_error",
+                  "permission_error",
+                  "missing_file_error",
+                  "android_egress_deferred",
+                  "ui_control_deferred",
+                  "panic_detected",
+                  "raw_runtime_log_recorded",
+                  "raw_device_identifier_recorded",
+                  "phone_mutation_performed",
+              ]
+              lines = [f"- {key}: `{state.get(key)}`" for key in ordered]
+              outcome = "snapshot-complete"
+          else:
+              lines = ["- bounded snapshot file: `unavailable`"]
+              outcome = "snapshot-unavailable"
+          body = "\n".join([
+              f"RUNTIME FAILURE READ-ONLY DIAGNOSTIC — run `{os.environ['RUN_ID']}`",
+              "",
+              f"- canonical SHA: `{os.environ['CANONICAL_SHA_SAFE']}`",
+              f"- bounded outcome: `{outcome}`",
+              *lines,
+          ])
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments",
+              data=json.dumps({"body": body}).encode("utf-8"),
+              headers={
+                  "Accept":"application/vnd.github+json",
+                  "Authorization":f"Bearer {os.environ['GH_TOKEN']}",
+                  "Content-Type":"application/json",
+                  "User-Agent":"mobile-proxy-production-runtime-failure-diagnostic",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit("failed to post bounded runtime failure audit pointer")
+          PY
