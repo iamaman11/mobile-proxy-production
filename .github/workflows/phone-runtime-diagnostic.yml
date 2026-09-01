@@ -1,0 +1,122 @@
+name: Production phone runtime layout diagnostic
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-runtime-layout-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner runtime diagnostic command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-runtime-diagnostic ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-diagnostic ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid phone runtime diagnostic command")
+          requested = match.group(1)
+          request = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={"Accept":"application/vnd.github+json","User-Agent":"mobile-proxy-production-runtime-diagnostic"},
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              current = json.load(response)["sha"]
+          if requested != current:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested}\n")
+          PY
+
+  diagnostic:
+    name: Inspect bounded installed runtime layout read-only
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Record bounded runtime layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, os, subprocess
+          from pathlib import Path
+
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          spec = importlib.util.spec_from_file_location("preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py")
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+          preflight.require_canonical_sha(os.environ["CANONICAL_SHA"])
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          def root_test(expr):
+              result = subprocess.run(
+                  ["adb","-s",serial,"shell","su","0","sh","-c",expr],
+                  check=False, capture_output=True, text=True, timeout=20,
+              )
+              return result.returncode == 0
+
+          root = "/data/adb/mobile-proxy-node"
+          state = {
+              "runtime_root_exists": root_test(f'test -d "{root}"'),
+              "current_exists": root_test(f'test -e "{root}/current"'),
+              "current_is_symlink": root_test(f'test -L "{root}/current"'),
+              "current_service_exists": root_test(f'test -f "{root}/current/service.sh"'),
+              "current_supervisor_exists": root_test(f'test -f "{root}/current/bin/runtime-supervisor"'),
+              "current_supervisor_executable": root_test(f'test -x "{root}/current/bin/runtime-supervisor"'),
+              "current_config_exists": root_test(f'test -f "{root}/current/config/host-daemon.json"'),
+              "root_service_exists": root_test(f'test -f "{root}/service.sh"'),
+              "magisk_module_service_exists": root_test('test -f /data/adb/modules/mobile-proxy-node/service.sh'),
+              "magisk_module_alt_service_exists": root_test('test -f /data/adb/modules/mobile_proxy_node/service.sh'),
+              "any_release_service_exists": root_test(f'find "{root}/releases" -mindepth 2 -maxdepth 2 -type f -name service.sh -print -quit 2>/dev/null | grep -q .'),
+              "any_release_supervisor_exists": root_test(f'find "{root}/releases" -mindepth 3 -maxdepth 3 -type f -name runtime-supervisor -print -quit 2>/dev/null | grep -q .'),
+              "any_release_config_exists": root_test(f'find "{root}/releases" -mindepth 3 -maxdepth 3 -type f -name host-daemon.json -print -quit 2>/dev/null | grep -q .'),
+              "raw_paths_or_identifiers_recorded": False,
+              "phone_mutation_performed": False,
+          }
+          output = Path(os.environ["RUNNER_TEMP"]) / "phone-runtime-layout.json"
+          output.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print("bounded runtime layout: " + " ".join(f"{k}={str(v).lower()}" for k,v in state.items()))
+          PY
+
+      - name: Upload bounded diagnostic evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-runtime-layout-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-runtime-layout.json
+          if-no-files-found: error
+          retention-days: 30
