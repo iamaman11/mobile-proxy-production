@@ -546,7 +546,7 @@ jobs:
                 [ -r "$proc/cmdline" ] || continue
                 cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
                 case "$cmd" in
-                  "{supervisor} --runtime-root {runtime_root} "*) printf '%s\\n' "${{proc#/proc/}}" ;;
+                  "{supervisor} --runtime-root {runtime_root} "*) basename "$proc" ;;
                 esac
               done'''
               result = root(script, timeout=20)
@@ -562,7 +562,7 @@ jobs:
                 [ -r "$proc/cmdline" ] || continue
                 cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
                 case "$cmd" in
-                  "{supervisor} --runtime-root {runtime_root} "*) kill -TERM "${{proc#/proc/}}" 2>/dev/null || true ;;
+                  "{supervisor} --runtime-root {runtime_root} "*) kill -TERM "$(basename "$proc")" 2>/dev/null || true ;;
                 esac
               done'''
               root(script, timeout=20)
@@ -818,7 +818,7 @@ jobs:
                 [ -r "$proc/cmdline" ] || continue
                 cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
                 case "$cmd" in
-                  "{supervisor} --runtime-root {runtime_root} "*) printf '%s\\n' "${{proc#/proc/}}" ;;
+                  "{supervisor} --runtime-root {runtime_root} "*) basename "$proc" ;;
                 esac
               done'''
               result = root(script, timeout=20)
@@ -834,7 +834,7 @@ jobs:
                 [ -r "$proc/cmdline" ] || continue
                 cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
                 case "$cmd" in
-                  "{supervisor} --runtime-root {runtime_root} "*) kill -TERM "${{proc#/proc/}}" 2>/dev/null || true ;;
+                  "{supervisor} --runtime-root {runtime_root} "*) kill -TERM "$(basename "$proc")" 2>/dev/null || true ;;
                 esac
               done'''
               root(script, timeout=20)
