@@ -1,0 +1,109 @@
+name: Android migration execution binding policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-binding-policy:
+    name: Validate single-source Android migration execution binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce Android migration binding invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          binding_path = Path('.github/production/android-v0.1.4-migration-binding.json')
+          binding = json.loads(binding_path.read_text(encoding='utf-8'))
+          expected = {
+              'format_version': 1,
+              'binding_role': 'private_execution_only',
+              'canonical_repository': 'iamaman11/mobile-proxy',
+              'quality_required': True,
+              'migration_tracker_issue': 162,
+              'hardening_tracker_issue': 179,
+              'application_id': 'com.example.mobileproxy',
+              'version_name': '0.1.4',
+              'version_code': 1004,
+              'old_version_name': '1.1.0',
+              'old_version_code': 2,
+              'candidate_retention_days_minimum': 30,
+              'final_release_authority': False,
+          }
+          for key, value in expected.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f'Android migration binding policy mismatch: {key}')
+          canonical_sha = binding.get('canonical_sha')
+          if not isinstance(canonical_sha, str) or re.fullmatch(r'[0-9a-f]{40}', canonical_sha) is None:
+              raise SystemExit('Android migration binding canonical_sha is malformed')
+
+          workflow_paths = {
+              'build': Path('.github/workflows/android-release-build.yml'),
+              'retention': Path('.github/workflows/android-release-candidate-retention.yml'),
+              'migration': Path('.github/workflows/android-signing-migration.yml'),
+              'audit': Path('.github/workflows/android-signing-migration-audit.yml'),
+          }
+          texts = {name: path.read_text(encoding='utf-8') for name, path in workflow_paths.items()}
+          binding_ref = '.github/production/android-v0.1.4-migration-binding.json'
+
+          for name, text in texts.items():
+              if binding_ref not in text:
+                  raise SystemExit(f'{name}: Android migration workflow does not consume the single binding')
+              if canonical_sha in text:
+                  raise SystemExit(f'{name}: copied bound canonical SHA detected outside the binding file')
+              forbidden_assignments = [
+                  r'PINNED_CANONICAL_SHA\s*:\s*[0-9a-f]{40}',
+                  r'(?m)^\s*CANONICAL_SHA\s*:\s*[0-9a-f]{40}\s*$',
+                  r'["\']canonical_sha["\']\s*:\s*["\'][0-9a-f]{40}["\']',
+              ]
+              for pattern in forbidden_assignments:
+                  if re.search(pattern, text):
+                      raise SystemExit(f'{name}: copied canonical SHA assignment detected')
+
+          required_fragments = {
+              'build': [
+                  'ref: ${{ github.sha }}',
+                  "current_main != bound_sha",
+                  "requested_sha != bound_sha",
+              ],
+              'retention': [
+                  'SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}',
+                  'ref: ${{ env.SOURCE_RUN_SHA }}',
+                  "current_main != canonical_sha",
+              ],
+              'migration': [
+                  'ref: ${{ github.sha }}',
+                  "run.get('head_sha') != os.environ['GITHUB_SHA']",
+                  "current_main != bound_sha",
+                  'releases/tags/',
+                  "retention.get('target_commitish') != os.environ['GITHUB_SHA']",
+              ],
+              'audit': [
+                  'SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}',
+                  'ref: ${{ env.SOURCE_RUN_SHA }}',
+              ],
+          }
+          for name, fragments in required_fragments.items():
+              for fragment in fragments:
+                  if fragment not in texts[name]:
+                      raise SystemExit(f'{name}: required same-revision/binding invariant missing: {fragment}')
+
+          print('Android migration execution binding policy: accepted')
+          print('binding_role=private_execution_only')
+          print('canonical_sha=' + canonical_sha)
+          print('workflow_set=' + ','.join(str(path) for path in workflow_paths.values()))
+          PY
