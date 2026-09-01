@@ -1,0 +1,71 @@
+name: Production phone runtime tooling diagnostic
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-phone-runtime-tooling-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner tooling diagnostic command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-runtime-tooling-diagnostic ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-tooling-diagnostic ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid runtime tooling diagnostic command")
+          requested = match.group(1)
+          req = urllib.request.Request(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
+              headers={"Accept":"application/vnd.github+json","User-Agent":"mobile-proxy-production-runtime-tooling-diagnostic"},
+          )
+          with urllib.request.urlopen(req, timeout=10) as response:
+              current = json.load(response)["sha"]
+          if requested != current:
+              raise SystemExit("requested SHA is not current canonical main")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested}\n")
+          PY
+
+  diagnostic:
+    name: Inspect bounded local runtime build tools read-only
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    steps:
+      - name: Record bounded tool availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in adb cargo curl git tar python3; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              printf '%s=true\n' "$tool"
+            else
+              printf '%s=false\n' "$tool"
+            fi
+          done
+          echo 'phone_mutation=false'
+          echo 'apk_mutation=false'
+          echo 'runner_mutation=false'
