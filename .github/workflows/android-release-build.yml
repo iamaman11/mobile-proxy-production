@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      PINNED_CANONICAL_SHA: fcec49634b86be8c34f387e4166eb3d0cb371af6
+      PINNED_CANONICAL_SHA: 20702dda4df3b539cac4402503f7a107a20ef38b
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
     steps:
@@ -159,7 +159,7 @@ jobs:
           with open(path, "r", encoding="utf-8") as handle:
               evidence = json.load(handle)
           expected = {
-              "canonical_sha": "fcec49634b86be8c34f387e4166eb3d0cb371af6",
+              "canonical_sha": "20702dda4df3b539cac4402503f7a107a20ef38b",
               "android_baseline_ref": "v0.1.3",
               "android_functional_source_preserved": True,
               "application_id": "com.example.mobileproxy",
