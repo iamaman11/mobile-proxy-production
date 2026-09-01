@@ -101,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup show active-toolchain
-          cargo run -p operator-cli -- prepare-runtime-binaries --android-ndk '${{ steps.ndk.outputs.path }}'
+          cargo run -p operator-cli --bin operator-cli -- prepare-runtime-binaries --android-ndk '${{ steps.ndk.outputs.path }}'
           test -x target/debug/operator-cli
           file deploy/device-runtime/bin/runtime-supervisor deploy/device-runtime/bin/host-daemon deploy/device-runtime/bin/sing-box
 
