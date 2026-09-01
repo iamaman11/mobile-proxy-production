@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
-      CANONICAL_SHA: 83ebcffb1b2d56b481b395d694ed91755fcace69
+      CANONICAL_SHA: 895a52efd5f84ad2d4852f3d061cbd5872479294
       SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
       SOURCE_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
       SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
