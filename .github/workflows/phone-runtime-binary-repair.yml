@@ -492,7 +492,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-rollback-proof.json"
           python3 - <<'PY'
           import json, os, re, subprocess
           from pathlib import Path
@@ -502,79 +501,196 @@ jobs:
           backup = f'/data/local/tmp/mobile-proxy-runtime-backup-{run_id}'
           target = '/data/adb/mobile-proxy-node/current/bin'
           names = ('runtime-supervisor','host-daemon','sing-box')
-
-          before = {}
-          backup_complete = True
-          for name in names:
-              result = subprocess.run(
-                  ['adb','-s',serial,'shell','su','0','sh','-c',f'test -s "{backup}/{name}" && sha256sum "{backup}/{name}"'],
-                  check=False, capture_output=True, text=True, timeout=30,
-              )
-              if result.returncode != 0 or not result.stdout.split():
-                  backup_complete = False
-              else:
-                  before[name] = result.stdout.split()[0]
-
-          rollback_invoked = False
-          restored_match = False
-          if backup_complete:
-              script = f'''set -eu
-              current=/data/adb/mobile-proxy-node/current
-              test -L "$current"
-              resolved="$(readlink -f "$current")"
-              case "$resolved" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
-              for name in runtime-supervisor host-daemon sing-box; do
-                test -s "{backup}/$name"
-                cp -p "{backup}/$name" "$resolved/bin/$name"
-              done
-              sh "$resolved/service.sh" || true
-              '''
-              subprocess.run(
-                  ['adb','-s',serial,'shell','su','0','sh','-c',script],
-                  check=True, timeout=120,
-              )
-              rollback_invoked = True
-              restored = {}
-              for name in names:
-                  result = subprocess.run(
-                      ['adb','-s',serial,'shell','su','0','sh','-c',f'sha256sum "{target}/{name}"'],
-                      check=True, capture_output=True, text=True, timeout=30,
-                  )
-                  restored[name] = result.stdout.split()[0]
-              restored_match = all(restored.get(name) == before.get(name) for name in names)
-
-          package = subprocess.run(
-              ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
-              check=False, capture_output=True, text=True, timeout=60,
-          )
-          codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
-          versions = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
-          apk_unchanged = package.returncode == 0 and codes == ['2'] and versions == ['1.1.0']
-
+          evidence_path = Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-rollback-evidence.json')
+          stages = {
+              'registered_device_preflight': 'pending',
+              'backup_inspection': 'pending',
+              'restore_copy': 'pending',
+              'restore_digest_verification': 'pending',
+              'service_bootstrap': 'pending',
+              'apk_identity_verification': 'pending',
+          }
           state = {
-              'format_version': 1,
+              'format_version': 2,
               'canonical_sha': os.environ['CANONICAL_SHA'],
               'private_execution_sha': os.environ['GITHUB_SHA'],
               'rollback_required': True,
-              'backup_complete': backup_complete,
-              'rollback_invoked': rollback_invoked,
-              'restored_runtime_binary_digests_match_backup': restored_match,
-              'installed_apk_unchanged': apk_unchanged,
-              'installed_version_name': versions[0] if len(versions) == 1 else None,
-              'installed_version_code': int(codes[0]) if len(codes) == 1 else None,
+              'stages': stages,
+              'backup_complete': False,
+              'rollback_invoked': False,
+              'restore_copy_succeeded': False,
+              'restored_runtime_binary_digests_match_backup': False,
+              'service_bootstrap_attempted': False,
+              'service_bootstrap_succeeded': False,
+              'installed_apk_unchanged': False,
+              'installed_version_name': None,
+              'installed_version_code': None,
               'apk_mutation_performed': False,
               'config_mutation_performed': False,
               'phone_reboot_performed': False,
               'provider_credentials_requested': False,
               'raw_device_identifier_recorded': False,
-              'rollback_accepted': backup_complete and rollback_invoked and restored_match and apk_unchanged,
+              'failure_stage': None,
+              'failure_kind': None,
+              'rollback_accepted': False,
           }
-          Path(os.environ['RUNNER_TEMP'],'runtime-binary-repair-rollback-evidence.json').write_text(
-              json.dumps(state,indent=2,sort_keys=True)+'\n',encoding='utf-8'
-          )
-          print('runtime binary rollback verification: ' + ' '.join(
-              f'{k}={v}' for k,v in state.items() if k not in ('canonical_sha','private_execution_sha')
-          ))
+          failures = []
+          before = {}
+
+          def fail(stage, exc):
+              stages[stage] = 'failed'
+              kind = type(exc).__name__
+              failures.append({'stage': stage, 'kind': kind})
+              if state['failure_stage'] is None:
+                  state['failure_stage'] = stage
+                  state['failure_kind'] = kind
+
+          def run_stage(stage, action):
+              stages[stage] = 'running'
+              try:
+                  value = action()
+                  stages[stage] = 'success'
+                  return True, value
+              except Exception as exc:
+                  fail(stage, exc)
+                  return False, None
+
+          try:
+              preflight_script = str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py')
+              preflight_ok, _ = run_stage(
+                  'registered_device_preflight',
+                  lambda: subprocess.run(
+                      [
+                          'python3', preflight_script,
+                          '--canonical-sha', os.environ['CANONICAL_SHA'],
+                          '--output', str(Path(os.environ['RUNNER_TEMP']) / 'pre-rollback-proof.json'),
+                      ],
+                      check=True, timeout=90,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  ),
+              )
+
+              def inspect_backup():
+                  captured = {}
+                  for name in names:
+                      result = subprocess.run(
+                          ['adb','-s',serial,'shell','su','0','sh','-c',f'test -s "{backup}/{name}" && sha256sum "{backup}/{name}"'],
+                          check=False, capture_output=True, text=True, timeout=30,
+                      )
+                      parts = result.stdout.split()
+                      if result.returncode != 0 or not parts:
+                          raise RuntimeError('backup_not_complete')
+                      captured[name] = parts[0]
+                  return captured
+
+              backup_ok, captured = run_stage('backup_inspection', inspect_backup)
+              if backup_ok:
+                  before.update(captured)
+                  state['backup_complete'] = True
+
+              if not preflight_ok or not backup_ok:
+                  stages['restore_copy'] = 'skipped'
+                  stages['restore_digest_verification'] = 'skipped'
+                  stages['service_bootstrap'] = 'skipped'
+              else:
+                  def restore_copy():
+                      state['rollback_invoked'] = True
+                      script = f'''set -eu
+                      current=/data/adb/mobile-proxy-node/current
+                      test -L "$current"
+                      resolved="$(readlink -f "$current")"
+                      case "$resolved" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
+                      for name in runtime-supervisor host-daemon sing-box; do
+                        test -s "{backup}/$name"
+                        cp -p "{backup}/$name" "$resolved/bin/$name"
+                      done
+                      '''
+                      subprocess.run(
+                          ['adb','-s',serial,'shell','su','0','sh','-c',script],
+                          check=True, timeout=120,
+                      )
+
+                  restore_ok, _ = run_stage('restore_copy', restore_copy)
+                  state['restore_copy_succeeded'] = restore_ok
+
+                  if state['rollback_invoked']:
+                      def verify_restored():
+                          restored = {}
+                          for name in names:
+                              result = subprocess.run(
+                                  ['adb','-s',serial,'shell','su','0','sh','-c',f'sha256sum "{target}/{name}"'],
+                                  check=True, capture_output=True, text=True, timeout=30,
+                              )
+                              parts = result.stdout.split()
+                              if not parts:
+                                  raise RuntimeError('restored_digest_missing')
+                              restored[name] = parts[0]
+                          if not all(restored.get(name) == before.get(name) for name in names):
+                              raise RuntimeError('restored_digest_mismatch')
+                          return True
+
+                      digest_ok, _ = run_stage('restore_digest_verification', verify_restored)
+                      state['restored_runtime_binary_digests_match_backup'] = digest_ok
+                  else:
+                      stages['restore_digest_verification'] = 'skipped'
+
+                  if state['restored_runtime_binary_digests_match_backup']:
+                      def bootstrap_restored():
+                          state['service_bootstrap_attempted'] = True
+                          subprocess.run(
+                              ['adb','-s',serial,'shell','su','0','sh','-c','set -eu; sh /data/adb/mobile-proxy-node/current/service.sh'],
+                              check=True, timeout=60,
+                          )
+
+                      bootstrap_ok, _ = run_stage('service_bootstrap', bootstrap_restored)
+                      state['service_bootstrap_succeeded'] = bootstrap_ok
+                  else:
+                      stages['service_bootstrap'] = 'skipped'
+
+              def verify_apk():
+                  package = subprocess.run(
+                      ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
+                      check=False, capture_output=True, text=True, timeout=60,
+                  )
+                  codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
+                  versions = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
+                  if package.returncode != 0 or codes != ['2'] or versions != ['1.1.0']:
+                      raise RuntimeError('installed_apk_identity_differs')
+                  return versions[0], int(codes[0])
+
+              apk_ok, apk_identity = run_stage('apk_identity_verification', verify_apk)
+              if apk_ok:
+                  state['installed_apk_unchanged'] = True
+                  state['installed_version_name'], state['installed_version_code'] = apk_identity
+          except Exception as exc:
+              kind = type(exc).__name__
+              failures.append({'stage': 'internal_guard', 'kind': kind})
+              if state['failure_stage'] is None:
+                  state['failure_stage'] = 'internal_guard'
+                  state['failure_kind'] = kind
+          finally:
+              state['rollback_accepted'] = bool(
+                  stages['registered_device_preflight'] == 'success'
+                  and state['backup_complete']
+                  and state['rollback_invoked']
+                  and state['restore_copy_succeeded']
+                  and state['restored_runtime_binary_digests_match_backup']
+                  and state['installed_apk_unchanged']
+              )
+              state['bounded_failures'] = failures[:8]
+              evidence_path.write_text(
+                  json.dumps(state, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+              )
+              print('runtime binary rollback verification: ' + ' '.join([
+                  f"preflight={stages['registered_device_preflight']}",
+                  f"backup={stages['backup_inspection']}",
+                  f"restore={stages['restore_copy']}",
+                  f"digest_verify={stages['restore_digest_verification']}",
+                  f"bootstrap={stages['service_bootstrap']}",
+                  f"apk_verify={stages['apk_identity_verification']}",
+                  f"rollback_accepted={state['rollback_accepted']}",
+              ]))
+
           if not state['rollback_accepted']:
               raise SystemExit('runtime binary rollback could not prove exact pre-repair restoration')
           PY
