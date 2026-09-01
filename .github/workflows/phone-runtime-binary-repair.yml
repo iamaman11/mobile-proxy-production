@@ -195,12 +195,26 @@ jobs:
     name: Replace only source-bound runtime binaries and prove local health
     needs: [command-gate, build]
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 15
+    timeout-minutes: 45
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
+      - name: Initialize bounded repair and rollback budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, time
+          started = int(time.time())
+          replace_deadline = started + 900
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write(f'REPAIR_JOB_STARTED_EPOCH={started}\n')
+              handle.write(f'REPAIR_REPLACE_DEADLINE_EPOCH={replace_deadline}\n')
+          print('runtime repair budget initialized: replacement must begin within 15 minutes; >=30 minutes remain for post-replace verification/rollback')
+          PY
+
       - name: Download exact runtime bundle from this run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -212,6 +226,7 @@ jobs:
         run: |
           set -euo pipefail
           curl --retry 3 --retry-all-errors --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 60 \
             "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
             --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
 
@@ -272,7 +287,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-stage-proof.json"
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          subprocess.run([
+              'python3', str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py'),
+              '--canonical-sha', os.environ['CANONICAL_SHA'],
+              '--output', str(Path(os.environ['RUNNER_TEMP']) / 'pre-stage-proof.json'),
+          ], check=True, timeout=90)
+          PY
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
@@ -303,7 +326,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-replace-proof.json"
+          python3 - <<'PY'
+          import os, subprocess, time
+          from pathlib import Path
+          deadline = int(os.environ['REPAIR_REPLACE_DEADLINE_EPOCH'])
+          if int(time.time()) > deadline:
+              raise SystemExit('runtime replacement refused: reserved rollback budget would be violated')
+          subprocess.run([
+              'python3', str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py'),
+              '--canonical-sha', os.environ['CANONICAL_SHA'],
+              '--output', str(Path(os.environ['RUNNER_TEMP']) / 'pre-replace-proof.json'),
+          ], check=True, timeout=90)
+          if int(time.time()) > deadline:
+              raise SystemExit('runtime replacement refused after preflight: reserved rollback budget would be violated')
+          PY
           python3 - <<'PY'
           import os, subprocess
 
@@ -387,7 +423,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-bootstrap-proof.json"
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          subprocess.run([
+              'python3', str(Path(os.environ['RUNNER_TEMP']) / 'run_private_phone_preflight.py'),
+              '--canonical-sha', os.environ['CANONICAL_SHA'],
+              '--output', str(Path(os.environ['RUNNER_TEMP']) / 'pre-bootstrap-proof.json'),
+          ], check=True, timeout=90)
+          PY
           python3 - <<'PY'
           import os, subprocess
           subprocess.run([
