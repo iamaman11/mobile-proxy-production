@@ -129,7 +129,7 @@ jobs:
           PY
 
       - name: Upload exact runtime bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: exact-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: runtime-bundle
@@ -146,7 +146,7 @@ jobs:
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
       - name: Download exact runtime bundle from this run
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: exact-runtime-binaries-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/runtime-bundle
@@ -197,17 +197,28 @@ jobs:
           print('exact bundle verified; installed APK baseline=1.1.0/2; phone_mutation=false')
           PY
 
-      - name: Stage exact binaries on registered phone
+      - name: Stage and verify exact binaries on registered phone
         shell: bash
         run: |
           set -euo pipefail
           python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-stage-proof.json"
-          stage="/data/local/tmp/mobile-proxy-runtime-repair-${GITHUB_RUN_ID}"
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" shell rm -rf "$stage"
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" shell mkdir -p "$stage"
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" push "${RUNNER_TEMP}/runtime-bundle/bin/runtime-supervisor" "$stage/runtime-supervisor" >/dev/null
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" push "${RUNNER_TEMP}/runtime-bundle/bin/host-daemon" "$stage/host-daemon" >/dev/null
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" push "${RUNNER_TEMP}/runtime-bundle/bin/sing-box" "$stage/sing-box" >/dev/null
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          run_id = os.environ['GITHUB_RUN_ID']
+          local_root = Path(os.environ['RUNNER_TEMP']) / 'runtime-bundle'
+          evidence = json.loads((local_root / 'build-evidence.json').read_text(encoding='utf-8'))
+          stage = f'/data/local/tmp/mobile-proxy-runtime-repair-{run_id}'
+          subprocess.run(['adb','-s',serial,'shell','rm','-rf',stage], check=True, timeout=30)
+          subprocess.run(['adb','-s',serial,'shell','mkdir','-p',stage], check=True, timeout=30)
+          for name in ('runtime-supervisor','host-daemon','sing-box'):
+              subprocess.run(['adb','-s',serial,'push',str(local_root/'bin'/name),f'{stage}/{name}'], check=True, stdout=subprocess.DEVNULL, timeout=180)
+              remote = subprocess.run(['adb','-s',serial,'shell','sha256sum',f'{stage}/{name}'], check=True, capture_output=True, text=True, timeout=30).stdout.split()[0]
+              if remote != evidence['files'][name]['sha256']:
+                  raise SystemExit('staged runtime binary digest differs')
+          print('exact runtime binaries staged and digest-verified')
+          PY
 
       - name: Atomically replace only runtime binaries with bounded backup
         id: replace
@@ -215,35 +226,62 @@ jobs:
         run: |
           set -euo pipefail
           python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-replace-proof.json"
-          stage="/data/local/tmp/mobile-proxy-runtime-repair-${GITHUB_RUN_ID}"
-          backup="/data/local/tmp/mobile-proxy-runtime-backup-${GITHUB_RUN_ID}"
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" shell su 0 sh -c "'
-            set -eu
-            current=/data/adb/mobile-proxy-node/current
-            test -L \"$current\"
-            target=\"$(readlink -f \"$current\")\"
-            case \"$target\" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
-            test -d \"$target/bin\"
-            test -f \"$target/service.sh\"
-            rm -rf \"$backup\"
-            mkdir -p \"$backup\"
-            for name in runtime-supervisor host-daemon sing-box; do
-              test -f \"$target/bin/$name\"
-              test ! -L \"$target/bin/$name\"
-              cp -p \"$target/bin/$name\" \"$backup/$name\"
-              install -m 0755 \"$stage/$name\" \"$target/bin/.$name.repair-${GITHUB_RUN_ID}\"
-              mv -f \"$target/bin/.$name.repair-${GITHUB_RUN_ID}\" \"$target/bin/$name\"
-            done
-            rm -rf \"$stage\"
-          '"
-          echo "backup=$backup" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os, subprocess
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          run_id = os.environ['GITHUB_RUN_ID']
+          stage = f'/data/local/tmp/mobile-proxy-runtime-repair-{run_id}'
+          backup = f'/data/local/tmp/mobile-proxy-runtime-backup-{run_id}'
+          script = f'''set -eu
+          current=/data/adb/mobile-proxy-node/current
+          test -L "$current"
+          target="$(readlink -f "$current")"
+          case "$target" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
+          test -d "$target/bin"
+          test -f "$target/service.sh"
+          rm -rf "{backup}"
+          mkdir -p "{backup}"
+          committed=0
+          rollback() {{
+            if [ "$committed" -eq 0 ]; then
+              for name in runtime-supervisor host-daemon sing-box; do
+                if [ -f "{backup}/$name" ]; then cp -p "{backup}/$name" "$target/bin/$name" || true; fi
+              done
+            fi
+          }}
+          trap rollback EXIT INT TERM
+          for name in runtime-supervisor host-daemon sing-box; do
+            test -f "$target/bin/$name"
+            test ! -L "$target/bin/$name"
+            cp -p "$target/bin/$name" "{backup}/$name"
+          done
+          for name in runtime-supervisor host-daemon sing-box; do
+            install -m 0755 "{stage}/$name" "$target/bin/.$name.repair-{run_id}"
+            mv -f "$target/bin/.$name.repair-{run_id}" "$target/bin/$name"
+            test -x "$target/bin/$name"
+          done
+          committed=1
+          trap - EXIT INT TERM
+          rm -rf "{stage}"
+          '''
+          subprocess.run(['adb','-s',serial,'shell','su','0','sh','-c',script], check=True, timeout=120)
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as handle:
+              handle.write(f'backup={backup}\n')
+          print('runtime binary replacement transaction committed')
+          PY
 
       - name: Bootstrap exact repaired runtime
         shell: bash
         run: |
           set -euo pipefail
           python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-bootstrap-proof.json"
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" shell su 0 sh -c "'set -eu; sh /data/adb/mobile-proxy-node/current/service.sh'"
+          python3 - <<'PY'
+          import os, subprocess
+          subprocess.run([
+              'adb','-s',os.environ['ANDROID_PRODUCTION_SERIAL'],'shell','su','0','sh','-c',
+              'set -eu; sh /data/adb/mobile-proxy-node/current/service.sh'
+          ], check=True, timeout=60)
+          PY
 
       - name: Verify full local health and record evidence
         id: health
@@ -303,22 +341,30 @@ jobs:
         run: |
           set -euo pipefail
           python3 "${RUNNER_TEMP}/run_private_phone_preflight.py" --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/pre-rollback-proof.json"
-          backup="${{ steps.replace.outputs.backup }}"
-          adb -s "${ANDROID_PRODUCTION_SERIAL}" shell su 0 sh -c "'
-            set -eu
-            current=/data/adb/mobile-proxy-node/current
-            target=\"$(readlink -f \"$current\")\"
-            case \"$target\" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
-            for name in runtime-supervisor host-daemon sing-box; do
-              test -f \"$backup/$name\"
-              cp -p \"$backup/$name\" \"$target/bin/$name\"
-            done
-            sh \"$target/service.sh\" || true
-          '"
+          python3 - <<'PY'
+          import os, subprocess
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          backup = os.environ['BACKUP']
+          script = f'''set -eu
+          current=/data/adb/mobile-proxy-node/current
+          test -L "$current"
+          target="$(readlink -f "$current")"
+          case "$target" in /data/adb/mobile-proxy-node/*) ;; *) exit 21 ;; esac
+          for name in runtime-supervisor host-daemon sing-box; do
+            test -f "{backup}/$name"
+            cp -p "{backup}/$name" "$target/bin/$name"
+          done
+          sh "$target/service.sh" || true
+          '''
+          subprocess.run(['adb','-s',serial,'shell','su','0','sh','-c',script], check=True, timeout=120)
+          print('runtime binary rollback invoked')
+          PY
+        env:
+          BACKUP: ${{ steps.replace.outputs.backup }}
 
       - name: Upload bounded repair evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-binary-repair-evidence-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/runtime-binary-repair-evidence.json
@@ -348,7 +394,7 @@ jobs:
               f"EXACT RUNTIME BINARY REPAIR — run `{os.environ['RUN_ID']}`",
               '',
               f"- canonical SHA: `{os.environ['CANONICAL_SHA_SAFE']}`",
-              f"- health step outcome: `{os.environ['HEALTH_OUTCOME']}`",
+              f"- health step outcome: `{os.environ.get('HEALTH_OUTCOME','')}`",
               '- installed APK baseline required: `1.1.0/2`',
               '- runtime binaries targeted: `runtime-supervisor`, `host-daemon`, `sing-box`',
               *lines,
