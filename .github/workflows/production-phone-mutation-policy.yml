@@ -31,6 +31,7 @@ jobs:
 
           mutation_jobs = {
               'android-signing-migration.yml': 'migrate-phone',
+              'phone-filesystem-certification.yml': 'certify-filesystem',
               'phone-runtime-recovery.yml': 'recover-runtime',
               'phone-runtime-binary-repair.yml': 'repair',
               'runtime-reconstruction-execution.yml': 'reconstruct-phone',
