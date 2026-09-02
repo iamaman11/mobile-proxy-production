@@ -1,0 +1,181 @@
+name: Phone preflight source transport policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-phone-preflight-source-transport:
+    name: Validate preflight source retry and operation-once contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce bounded immutable-source transport retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/phone-preflight.yml')
+          if not path.is_file():
+              raise SystemExit('phone preflight workflow is missing')
+          text = path.read_text(encoding='utf-8')
+          lines = text.splitlines()
+
+          required = (
+              'group: production-phone-read-only-preflight',
+              'cancel-in-progress: false',
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'id: source-download-1',
+              'id: source-download-2',
+              'id: source-download-3',
+              'Back off before immutable preflight source retry 2',
+              'Back off before immutable preflight source retry 3',
+              "steps.source-download-1.outcome == 'failure'",
+              "steps.source-download-2.outcome == 'failure'",
+              'id: source-transport',
+              'SOURCE_DOWNLOAD_1_OUTCOME:',
+              'SOURCE_DOWNLOAD_2_OUTCOME:',
+              'SOURCE_DOWNLOAD_3_OUTCOME:',
+              'no immutable preflight source download attempt succeeded',
+              'destination="${RUNNER_TEMP}/phone-preflight-source"',
+              'if [ -e "${destination}" ] || [ -L "${destination}" ]; then',
+              'immutable preflight source destination already exists',
+              'mv "${selected}" "${destination}"',
+              'Verify canonical source bundle before phone access',
+              'Run exact registered-device CONTROL preflight',
+              'PHONE_ACCESS_PROVEN',
+              'PHONE_ACCESS_OBSERVED_UNPERSISTED',
+              'PHONE_ACCESS_UNOBSERVED',
+          )
+          missing = [item for item in required if item not in text]
+          if missing:
+              raise SystemExit('phone preflight transport contract missing: ' + ', '.join(missing))
+
+          if 'production-phone-global-mutation' in text:
+              raise SystemExit('read-only phone preflight must stay outside the global mutation lock')
+
+          def named_step_blocks(step_prefix):
+              blocks = []
+              for index, line in enumerate(lines):
+                  if line.strip().startswith(f'- name: {step_prefix}'):
+                      end = index + 1
+                      while end < len(lines) and not lines[end].startswith('      - name: '):
+                          end += 1
+                      blocks.append(lines[index:end])
+              return blocks
+
+          downloads = named_step_blocks('Download immutable canonical preflight logic (attempt ')
+          if len(downloads) != 3:
+              raise SystemExit('phone preflight must have exactly three bounded source download attempts')
+
+          names = []
+          paths = []
+          for attempt, block in enumerate(downloads, start=1):
+              block_text = '\n'.join(block)
+              if block_text.count('uses: actions/download-artifact@v4') != 1:
+                  raise SystemExit(f'preflight source attempt {attempt} must use download-artifact exactly once')
+              if block_text.count('continue-on-error: true') != 1:
+                  raise SystemExit(f'preflight source attempt {attempt} must expose transport failure for bounded retry')
+              name_lines = [line.strip() for line in block if line.strip().startswith('name: phone-preflight-source-')]
+              path_lines = [line.strip() for line in block if line.strip().startswith('path: ') and 'phone-preflight-source-attempt-' in line]
+              if len(name_lines) != 1 or len(path_lines) != 1:
+                  raise SystemExit(f'preflight source attempt {attempt} has ambiguous artifact identity or path')
+              names.append(name_lines[0])
+              paths.append(path_lines[0])
+              if not path_lines[0].endswith(f'phone-preflight-source-attempt-{attempt}'):
+                  raise SystemExit(f'preflight source attempt {attempt} must use isolated temporary state')
+          if len(set(names)) != 1:
+              raise SystemExit('all preflight source retries must request the same immutable artifact identity')
+          if len(set(paths)) != 3:
+              raise SystemExit('preflight source retries must use three isolated temporary paths')
+
+          second = '\n'.join(downloads[1])
+          third = '\n'.join(downloads[2])
+          if "steps.source-download-1.outcome == 'failure'" not in second:
+              raise SystemExit('preflight source retry 2 must require attempt 1 transport failure')
+          if (
+              "steps.source-download-1.outcome == 'failure'" not in third
+              or "steps.source-download-2.outcome == 'failure'" not in third
+          ):
+              raise SystemExit('preflight source retry 3 must require both prior transport failures')
+          if text.count('run: sleep 3') != 1 or text.count('run: sleep 6') != 1:
+              raise SystemExit('preflight source transport backoff must stay bounded to two retries')
+
+          promote = named_step_blocks('Promote one successfully downloaded immutable source bundle')
+          if len(promote) != 1:
+              raise SystemExit('preflight source transport must have one fail-closed promotion gate')
+          promote_text = '\n'.join(promote[0])
+          if 'continue-on-error: true' in promote_text or 'if: always()' in promote_text:
+              raise SystemExit('preflight source promotion must fail closed before device access')
+          for token in (
+              'SOURCE_DOWNLOAD_1_OUTCOME',
+              'SOURCE_DOWNLOAD_2_OUTCOME',
+              'SOURCE_DOWNLOAD_3_OUTCOME',
+              '= success',
+              'exit 1',
+              'if [ -e "${destination}" ] || [ -L "${destination}" ]; then',
+              'immutable preflight source destination already exists',
+              'mv "${selected}" "${destination}"',
+          ):
+              if token not in promote_text:
+                  raise SystemExit(f'preflight source promotion contract missing: {token}')
+          for destructive in ('rm -rf', 'mv -f', 'cp -p', 'install -m 0755', 'mkdir -p'):
+              if destructive in promote_text:
+                  raise SystemExit(
+                      'preflight source promotion must not delete or force-replace runner state: ' + destructive
+                  )
+
+          verify = named_step_blocks('Verify canonical source bundle before phone access')
+          operation = named_step_blocks('Run exact registered-device CONTROL preflight')
+          if len(verify) != 1 or len(operation) != 1:
+              raise SystemExit('preflight must keep exactly one verification gate and one device operation step')
+          if 'continue-on-error: true' in '\n'.join(verify[0]) or 'if: always()' in '\n'.join(verify[0]):
+              raise SystemExit('canonical source verification must fail closed before device access')
+          operation_text = '\n'.join(operation[0])
+          invocation = 'python3 "${RUNNER_TEMP}/phone-preflight-source/run_private_phone_preflight.py"'
+          if text.count(invocation) != 1 or operation_text.count(invocation) != 1:
+              raise SystemExit('registered-device CONTROL preflight must be invoked exactly once')
+
+          promote_index = text.index('Promote one successfully downloaded immutable source bundle')
+          verify_index = text.index('Verify canonical source bundle before phone access')
+          operation_index = text.index('Run exact registered-device CONTROL preflight')
+          if not promote_index < verify_index < operation_index:
+              raise SystemExit('source transport and verification must complete before the device operation')
+
+          def select_attempt(outcomes):
+              for index, outcome in enumerate(outcomes, start=1):
+                  if outcome == 'success':
+                      return index
+              return None
+
+          truth_table = (
+              (('success', 'skipped', 'skipped'), 1),
+              (('failure', 'success', 'skipped'), 2),
+              (('failure', 'failure', 'success'), 3),
+              (('failure', 'failure', 'failure'), None),
+          )
+          for outcomes, expected in truth_table:
+              actual = select_attempt(outcomes)
+              if actual != expected:
+                  raise SystemExit(
+                      f'preflight source transport truth table differs: outcomes={outcomes} expected={expected} actual={actual}'
+                  )
+
+          print('phone preflight source transport policy: accepted')
+          print('source_download_attempts=3')
+          print('isolated_download_state=accepted')
+          print('immutable_artifact_identity=accepted')
+          print('promotion_destination_preexistence=fail-closed')
+          print('device_operation_invocations=1')
+          print('transport_failure_state=PHONE_ACCESS_UNOBSERVED')
+          PY
