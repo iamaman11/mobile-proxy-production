@@ -61,19 +61,28 @@ jobs:
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
     steps:
-      - name: Fail closed unless persistent PATH bootstrap is available
+      - name: Fail closed unless user-local Rust bootstrap is available
         shell: bash
         run: |
           set -euo pipefail
-          for tool in curl sha256sum sudo; do
+          for tool in curl sha256sum; do
             command -v "$tool" >/dev/null 2>&1 || {
               echo "required runner bootstrap tool unavailable: $tool" >&2
               exit 1
             }
           done
-          sudo -n true
-          sudo -n test -d /usr/local/bin
+          CARGO_HOME="${HOME}/.cargo"
+          RUSTUP_HOME="${HOME}/.rustup"
+          case "$CARGO_HOME" in "${HOME}/"*) ;; *) echo 'CARGO_HOME escaped runner home' >&2; exit 1 ;; esac
+          case "$RUSTUP_HOME" in "${HOME}/"*) ;; *) echo 'RUSTUP_HOME escaped runner home' >&2; exit 1 ;; esac
+          {
+            printf 'CARGO_HOME=%s\n' "$CARGO_HOME"
+            printf 'RUSTUP_HOME=%s\n' "$RUSTUP_HOME"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
           echo 'runner_bootstrap_preflight=true'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
           echo 'phone_access=false'
           echo 'phone_mutation=false'
           echo 'provider_access=false'
@@ -86,7 +95,7 @@ jobs:
           path: canonical
           persist-credentials: false
 
-      - name: Install checksum-pinned rustup and exact project toolchain
+      - name: Install checksum-pinned rustup and exact project toolchain user-locally
         shell: bash
         env:
           RUSTUP_VERSION: '1.28.2'
@@ -94,6 +103,8 @@ jobs:
           RUST_TOOLCHAIN: '1.95.0'
         run: |
           set -euo pipefail
+          test "$CARGO_HOME" = "${HOME}/.cargo"
+          test "$RUSTUP_HOME" = "${HOME}/.rustup"
           installer="${RUNNER_TEMP}/rustup-init-${RUSTUP_VERSION}"
           url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
           curl --fail --location --silent --show-error \
@@ -102,30 +113,33 @@ jobs:
           printf '%s  %s\n' "$RUSTUP_INIT_SHA256" "$installer" | sha256sum -c -
           chmod 0755 "$installer"
           "$installer" -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" --no-modify-path
-          "$HOME/.cargo/bin/rustup" default "$RUST_TOOLCHAIN"
+          "$CARGO_HOME/bin/rustup" default "$RUST_TOOLCHAIN"
           for tool in cargo rustc rustup rustdoc; do
-            test -x "$HOME/.cargo/bin/$tool"
-            sudo -n ln -sfn "$HOME/.cargo/bin/$tool" "/usr/local/bin/$tool"
+            test -x "$CARGO_HOME/bin/$tool"
           done
           rm -f "$installer"
 
-      - name: Verify persistent exact Rust prerequisite without phone access
+      - name: Verify persistent exact user-local Rust prerequisite without phone access
         shell: bash
         run: |
           set -euo pipefail
-          command -v cargo >/dev/null 2>&1
-          command -v rustc >/dev/null 2>&1
-          cargo --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
-          rustc --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          test "$CARGO_HOME" = "${HOME}/.cargo"
+          test "$RUSTUP_HOME" = "${HOME}/.rustup"
+          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
+          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
           (
             cd canonical
-            cargo metadata --format-version 1 --locked --no-deps >/dev/null
+            "$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps >/dev/null
             git diff --check
             test -z "$(git status --porcelain)"
           )
           echo 'runner_rust_toolchain_ready=true'
           echo 'rust_toolchain=1.95.0'
           echo 'runner_tooling_mutation=true'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
           echo 'phone_access=false'
           echo 'phone_mutation=false'
           echo 'provider_access=false'
