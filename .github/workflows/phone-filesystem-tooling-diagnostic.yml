@@ -106,6 +106,7 @@ jobs:
           root.mkdir(parents=True, exist_ok=False)
           scripts = (
               "run_private_phone_preflight.py",
+              "android_filesystem_comparator.py",
               "run_android_filesystem_tooling_diagnostic.py",
           )
           digests = {}
@@ -188,6 +189,7 @@ jobs:
           expected = manifest.get("scripts_sha256")
           required = {
               "run_private_phone_preflight.py",
+              "android_filesystem_comparator.py",
               "run_android_filesystem_tooling_diagnostic.py",
           }
           if not isinstance(expected, dict) or set(expected) != required:
