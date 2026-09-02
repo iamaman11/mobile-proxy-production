@@ -33,6 +33,7 @@ jobs:
               'android-signing-migration.yml': 'migrate-phone',
               'phone-runtime-recovery.yml': 'recover-runtime',
               'phone-runtime-binary-repair.yml': 'repair',
+              'phone-scratch-certification.yml': 'certify-scratch',
               'runtime-reconstruction-execution.yml': 'reconstruct-phone',
           }
           mutators = set(mutation_jobs)
