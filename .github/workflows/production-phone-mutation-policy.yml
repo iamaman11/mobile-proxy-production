@@ -32,6 +32,7 @@ jobs:
           mutation_jobs = {
               'android-signing-migration.yml': 'migrate-phone',
               'phone-filesystem-certification.yml': 'certify-filesystem',
+              'phone-filesystem-quarantine-cleanup.yml': 'cleanup-quarantine',
               'phone-runtime-recovery.yml': 'recover-runtime',
               'phone-runtime-binary-repair.yml': 'repair',
               'runtime-reconstruction-execution.yml': 'reconstruct-phone',
@@ -39,6 +40,7 @@ jobs:
           mutators = set(mutation_jobs)
           read_only_phone = {
               'phone-capability-inventory.yml',
+              'phone-filesystem-quarantine-observation.yml',
               'phone-filesystem-tooling-diagnostic.yml',
               'phone-preflight.yml',
               'phone-post-migration-diagnostic.yml',
