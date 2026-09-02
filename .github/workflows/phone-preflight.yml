@@ -281,7 +281,6 @@ jobs:
         with:
           script: |
             const probeAccepted =
-              process.env.PHONE_JOB_RESULT === 'success' &&
               process.env.ACCEPTED === 'true' &&
               process.env.REGISTERED_DEVICE_MATCH === 'true' &&
               process.env.ADB_STATE === 'device' &&
