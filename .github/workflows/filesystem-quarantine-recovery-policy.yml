@@ -35,6 +35,41 @@ jobs:
           cleanup = cleanup_path.read_text(encoding='utf-8')
           required_group = 'production-phone-global-mutation'
 
+          def upload_attempt_blocks(text, step_prefix):
+              lines = text.splitlines()
+              blocks = []
+              for index, line in enumerate(lines):
+                  if line.strip().startswith(f'- name: {step_prefix} (attempt '):
+                      end = index + 1
+                      while end < len(lines) and not lines[end].startswith('      - name: '):
+                          end += 1
+                      blocks.append(lines[index:end])
+              return blocks
+
+          def assert_same_bounded_artifact(text, step_prefix, artifact_prefix, error_prefix):
+              blocks = upload_attempt_blocks(text, step_prefix)
+              if len(blocks) != 3:
+                  raise SystemExit(f'{error_prefix} must have exactly three bounded upload steps')
+              names = []
+              paths = []
+              for block in blocks:
+                  name_lines = [
+                      line.strip()
+                      for line in block
+                      if line.strip().startswith(f'name: {artifact_prefix}')
+                  ]
+                  path_lines = [
+                      line.strip()
+                      for line in block
+                      if line.strip().startswith('path: ') and 'phone-filesystem-quarantine-' in line
+                  ]
+                  if len(name_lines) != 1 or len(path_lines) != 1:
+                      raise SystemExit(f'{error_prefix} upload step has ambiguous artifact identity')
+                  names.append(name_lines[0])
+                  paths.append(path_lines[0])
+              if len(set(names)) != 1 or len(set(paths)) != 1:
+                  raise SystemExit(f'{error_prefix} retries must preserve one exact artifact name and path')
+
           observation_contract = (
               "github.event.comment.user.login == github.repository_owner",
               "startsWith(github.event.comment.body, '/phone-filesystem-quarantine-observe ')",
@@ -85,13 +120,12 @@ jobs:
               raise SystemExit('quarantine observation device subprocess must execute exactly once')
           if observe.count('id: evidence-upload-') != 3:
               raise SystemExit('quarantine observation must have exactly three evidence upload attempts')
-          observation_artifact_names = [
-              line.strip()
-              for line in observe.splitlines()
-              if line.strip().startswith('name: phone-filesystem-quarantine-observation-')
-          ]
-          if len(observation_artifact_names) != 3 or len(set(observation_artifact_names)) != 1:
-              raise SystemExit('quarantine observation retry attempts must preserve one exact artifact name')
+          assert_same_bounded_artifact(
+              observe,
+              'Upload bounded quarantine observation evidence',
+              'phone-filesystem-quarantine-observation-',
+              'quarantine observation',
+          )
           if observe.count('overwrite: true') != 2:
               raise SystemExit('quarantine observation retries must overwrite only after failed prior attempts')
           if observe.count('run: sleep 3') != 1 or observe.count('run: sleep 6') != 1:
@@ -155,13 +189,12 @@ jobs:
               raise SystemExit('quarantine cleanup device subprocess must execute exactly once')
           if cleanup.count('id: evidence-upload-') != 3:
               raise SystemExit('quarantine cleanup must have exactly three evidence upload attempts')
-          cleanup_artifact_names = [
-              line.strip()
-              for line in cleanup.splitlines()
-              if line.strip().startswith('name: phone-filesystem-quarantine-cleanup-')
-          ]
-          if len(cleanup_artifact_names) != 3 or len(set(cleanup_artifact_names)) != 1:
-              raise SystemExit('quarantine cleanup retry attempts must preserve one exact artifact name')
+          assert_same_bounded_artifact(
+              cleanup,
+              'Upload bounded quarantine cleanup evidence',
+              'phone-filesystem-quarantine-cleanup-',
+              'quarantine cleanup',
+          )
           if cleanup.count('overwrite: true') != 2:
               raise SystemExit('quarantine cleanup retries must overwrite only after failed prior attempts')
           if cleanup.count('run: sleep 3') != 1 or cleanup.count('run: sleep 6') != 1:
