@@ -146,6 +146,7 @@ jobs:
       registered_device_match: ${{ steps.bounded-result.outputs.registered_device_match }}
       adb_state: ${{ steps.bounded-result.outputs.adb_state }}
       shell_probe: ${{ steps.bounded-result.outputs.shell_probe }}
+      artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
     steps:
       - name: Download immutable canonical preflight logic
         uses: actions/download-artifact@v4
@@ -218,13 +219,30 @@ jobs:
           PY
 
       - name: Upload bounded private evidence
+        id: evidence-upload
         if: success()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: phone-read-only-preflight-${{ env.CANONICAL_SHA }}
           path: ${{ runner.temp }}/phone-preflight.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Export evidence persistence state
+        id: evidence-state
+        if: always()
+        shell: bash
+        env:
+          BOUNDED_RESULT_OUTCOME: ${{ steps.bounded-result.outcome }}
+          EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+        run: |
+          set -euo pipefail
+          persisted=false
+          if [ "${BOUNDED_RESULT_OUTCOME}" = success ] && [ "${EVIDENCE_UPLOAD_OUTCOME}" = success ]; then
+            persisted=true
+          fi
+          echo "artifact_persisted=${persisted}" >> "$GITHUB_OUTPUT"
 
       - name: Record safe result
         if: always()
@@ -236,6 +254,8 @@ jobs:
           - Quality run: ${{ env.QUALITY_RUN_ID }}
           - Runner labels: self-hosted, Linux, X64, android-production
           - Preflight outcome: ${{ steps.preflight.outcome }}
+          - Bounded result outcome: ${{ steps.bounded-result.outcome }}
+          - Evidence artifact persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
           - Device identifier recorded: false
           - Phone mutation performed: false
           EOF
@@ -257,15 +277,21 @@ jobs:
           REGISTERED_DEVICE_MATCH: ${{ needs.phone-preflight.outputs.registered_device_match }}
           ADB_STATE: ${{ needs.phone-preflight.outputs.adb_state }}
           SHELL_PROBE: ${{ needs.phone-preflight.outputs.shell_probe }}
+          ARTIFACT_PERSISTED: ${{ needs.phone-preflight.outputs.artifact_persisted }}
         with:
           script: |
-            const proven =
-              process.env.PHONE_JOB_RESULT === 'success' &&
+            const probeAccepted =
               process.env.ACCEPTED === 'true' &&
               process.env.REGISTERED_DEVICE_MATCH === 'true' &&
               process.env.ADB_STATE === 'device' &&
               process.env.SHELL_PROBE === 'true';
-            const classification = proven ? 'PHONE_ACCESS_PROVEN' : 'PHONE_ACCESS_UNOBSERVED';
+            const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';
+            const proven = probeAccepted && artifactPersisted;
+            const classification = proven
+              ? 'PHONE_ACCESS_PROVEN'
+              : probeAccepted
+                ? 'PHONE_ACCESS_OBSERVED_UNPERSISTED'
+                : 'PHONE_ACCESS_UNOBSERVED';
             const body = [
               '## CONTROL PHONE PREFLIGHT RESULT',
               '',
@@ -274,9 +300,11 @@ jobs:
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
               `- workflow_run_id: \`${context.runId}\``,
               `- phone_job_result: \`${process.env.PHONE_JOB_RESULT}\``,
+              `- probe_accepted: \`${probeAccepted}\``,
               `- registered_device_match: \`${process.env.REGISTERED_DEVICE_MATCH || 'unobserved'}\``,
               `- adb_state: \`${process.env.ADB_STATE || 'unobserved'}\``,
               `- shell_probe: \`${process.env.SHELL_PROBE || 'unobserved'}\``,
+              `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
               '- raw_device_identifier_recorded: `false`',
               '- phone_mutation_performed: `false`',
             ].join('\n');
