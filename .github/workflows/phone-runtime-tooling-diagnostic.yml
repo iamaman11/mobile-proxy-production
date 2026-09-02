@@ -54,6 +54,13 @@ jobs:
     needs: command-gate
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 5
+    env:
+      ACTIONS_PROBE_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+      ACTIONS_PROBE_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+      ACTIONS_PROBE_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+      ACTIONS_PROBE_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+      ACTIONS_PROBE_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+      ACTIONS_PROBE_REVERSE_TUNNEL_CERT: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
     steps:
       - name: Record bounded tool availability
         shell: bash
@@ -69,3 +76,41 @@ jobs:
           echo 'phone_mutation=false'
           echo 'apk_mutation=false'
           echo 'runner_mutation=false'
+
+      - name: Classify runtime input presence without values
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          runner_present=true
+          for name in \
+            MOBILE_PROXY_ADMIN_TOKEN \
+            MOBILE_PROXY_DEVICE_TOKEN \
+            MOBILE_PROXY_UI_TOKEN \
+            MOBILE_PROXY_RELAY_USER \
+            MOBILE_PROXY_RELAY_PASSWORD \
+            MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64; do
+            if [ -z "${!name:-}" ]; then
+              runner_present=false
+            fi
+          done
+
+          actions_present=true
+          for name in \
+            ACTIONS_PROBE_ADMIN_TOKEN \
+            ACTIONS_PROBE_DEVICE_TOKEN \
+            ACTIONS_PROBE_UI_TOKEN \
+            ACTIONS_PROBE_RELAY_USER \
+            ACTIONS_PROBE_RELAY_PASSWORD \
+            ACTIONS_PROBE_REVERSE_TUNNEL_CERT; do
+            if [ -z "${!name:-}" ]; then
+              actions_present=false
+            fi
+          done
+
+          printf 'runner_runtime_inputs_present=%s\n' "$runner_present"
+          printf 'actions_runtime_inputs_present=%s\n' "$actions_present"
+          echo 'secret_values_recorded=false'
+          echo 'config_rendered=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
