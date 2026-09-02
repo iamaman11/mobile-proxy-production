@@ -25,10 +25,10 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('.github/workflows/production-runner-rust-bootstrap.yml')
-          if not path.is_file():
+          bootstrap_path = Path('.github/workflows/production-runner-rust-bootstrap.yml')
+          if not bootstrap_path.is_file():
               raise SystemExit('production runner Rust bootstrap workflow is missing')
-          text = path.read_text(encoding='utf-8')
+          text = bootstrap_path.read_text(encoding='utf-8')
 
           required = (
               "github.event.issue.number == 1",
@@ -41,16 +41,22 @@ jobs:
               "RUSTUP_VERSION: '1.28.2'",
               "RUSTUP_INIT_SHA256: '20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c'",
               "RUST_TOOLCHAIN: '1.95.0'",
+              "CARGO_HOME=\"${HOME}/.cargo\"",
+              "RUSTUP_HOME=\"${HOME}/.rustup\"",
+              "printf '%s\\n' \"$CARGO_HOME/bin\" >> \"$GITHUB_PATH\"",
               "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init",
               "sha256sum -c -",
               "--default-toolchain \"$RUST_TOOLCHAIN\" --no-modify-path",
-              "sudo -n true",
-              "sudo -n test -d /usr/local/bin",
-              "sudo -n ln -sfn \"$HOME/.cargo/bin/$tool\" \"/usr/local/bin/$tool\"",
-              "cargo --version | grep -Eq '^cargo 1\\.95\\.0([[:space:]]|$)'",
-              "rustc --version | grep -Eq '^rustc 1\\.95\\.0([[:space:]]|$)'",
-              "cargo metadata --format-version 1 --locked --no-deps",
+              "test \"$CARGO_HOME\" = \"${HOME}/.cargo\"",
+              "test \"$RUSTUP_HOME\" = \"${HOME}/.rustup\"",
+              "test \"$(command -v cargo)\" = \"$CARGO_HOME/bin/cargo\"",
+              "test \"$(command -v rustc)\" = \"$CARGO_HOME/bin/rustc\"",
+              "\"$CARGO_HOME/bin/cargo\" --version | grep -Eq '^cargo 1\\.95\\.0([[:space:]]|$)'",
+              "\"$CARGO_HOME/bin/rustc\" --version | grep -Eq '^rustc 1\\.95\\.0([[:space:]]|$)'",
+              "cargo\" metadata --format-version 1 --locked --no-deps",
               "runner_tooling_mutation=true",
+              "user_local_tooling=true",
+              "system_path_mutation=false",
               "phone_access=false",
               "phone_mutation=false",
               "provider_access=false",
@@ -76,6 +82,8 @@ jobs:
               'gcloud ',
               'pm install',
               'pm uninstall',
+              'sudo ',
+              '/usr/local/bin',
           )
           present = [snippet for snippet in forbidden if snippet in text]
           if present:
@@ -86,9 +94,40 @@ jobs:
           if text.count("/runner-rust-bootstrap ") != 2:
               raise SystemExit('runner Rust bootstrap command surface drifted')
 
+          reconstruction_path = Path('.github/workflows/runtime-reconstruction-execution.yml')
+          if not reconstruction_path.is_file():
+              raise SystemExit('runtime reconstruction execution workflow is missing')
+          reconstruction = reconstruction_path.read_text(encoding='utf-8')
+          reconstruction_required = (
+              '- name: Require exact user-local Rust toolchain before render or phone access',
+              'CARGO_HOME="${HOME}/.cargo"',
+              'RUSTUP_HOME="${HOME}/.rustup"',
+              'PATH="${CARGO_HOME}/bin:${PATH}"',
+              'export CARGO_HOME RUSTUP_HOME PATH',
+              'test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"',
+              'test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"',
+              '"$CARGO_HOME/bin/cargo" --version | grep -Eq \'^cargo 1\\.95\\.0([[:space:]]|$)\'',
+              '"$CARGO_HOME/bin/rustc" --version | grep -Eq \'^rustc 1\\.95\\.0([[:space:]]|$)\'',
+              'reconstruction_rust_prerequisite=true',
+              'config_rendered=false',
+              'phone_access=false',
+          )
+          reconstruction_missing = [snippet for snippet in reconstruction_required if snippet not in reconstruction]
+          if reconstruction_missing:
+              raise SystemExit('reconstruction Rust prerequisite invariant missing: ' + ' | '.join(reconstruction_missing))
+
+          prereq = reconstruction.index('- name: Require exact user-local Rust toolchain before render or phone access')
+          render = reconstruction.index('- name: Render and verify complete source-bound release ephemerally')
+          phone = reconstruction.index('- name: Mark conservative phone-access boundary')
+          if not prereq < render < phone:
+              raise SystemExit('reconstruction Rust prerequisite must fail closed before render and phone access')
+
           print('production runner tooling policy: accepted')
           print('rustup_version=1.28.2')
           print('rust_toolchain=1.95.0')
+          print('user_local_tooling=true')
+          print('system_path_mutation=false')
+          print('reconstruction_rust_prerequisite=true')
           print('phone_access=false')
           print('provider_access=false')
           print('secret_access=false')
