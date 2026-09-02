@@ -1,0 +1,49 @@
+{
+  "accepted_readiness": {
+    "owner_comment_id": 5502167058,
+    "private_sha": "b58366e8f7695bd444540a211b30b6723a64bbfa",
+    "readiness_run_id": 33572661956,
+    "transport_run_id": 33572652019
+  },
+  "authority_role": "private_execution_only",
+  "canonical_repository": "iamaman11/mobile-proxy",
+  "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
+  "command_issue": 1,
+  "command_prefix": "/runtime-reconstruction-execute",
+  "config_render_authority": false,
+  "duplicate_rule": "first_exact_issue_comment_only",
+  "empty_layout_policy": {
+    "current_must_be_absent": true,
+    "preexisting_boot_hook_must_be_absent_or_backed_up": true,
+    "release_count_must_be_zero": true,
+    "rollback_restores_admitted_prestate": true,
+    "unexpected_managed_state_fails_closed": true
+  },
+  "evidence_policy": {
+    "config_digest_recorded": false,
+    "credential_derived_identifiers_recorded": false,
+    "raw_device_identifier_recorded": false,
+    "raw_manifest_recorded": false,
+    "raw_process_identifier_recorded": false,
+    "rendered_config_recorded": false,
+    "runtime_secret_values_recorded": false
+  },
+  "execution_id": "9a3dae4e-7b75-4d71-8636-b7b08500bd82",
+  "final_release_authority": false,
+  "format_version": 1,
+  "full_serving_authority": false,
+  "future_phone_job": "reconstruct-phone",
+  "global_mutation_group": "production-phone-global-mutation",
+  "item20_transport_authority": "deferred_to_sealed_handoff",
+  "mode": "local_runtime_reconstruction_gate",
+  "phone_execution_authority": false,
+  "provider_access_authority": false,
+  "quality_run_id": 33525893784,
+  "readiness_workflow_path": ".github/workflows/runtime-reconstruction-readiness.yml",
+  "reconstruction_binding_path": ".github/production/runtime-reconstruction-binding.json",
+  "reconstruction_manifest_path": ".github/production/runtime-reconstruction-manifest.json",
+  "recovery_health_scope": "local_runtime_only",
+  "runtime_secret_access_authority": false,
+  "source_private_sha": "b58366e8f7695bd444540a211b30b6723a64bbfa",
+  "status": "hard_blocked"
+}

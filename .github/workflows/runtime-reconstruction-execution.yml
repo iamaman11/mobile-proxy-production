@@ -1,0 +1,228 @@
+name: Production phone local runtime reconstruction gate
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: read
+  actions: read
+
+jobs:
+  command-gate:
+    name: Validate one-time local reconstruction execution authority
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/runtime-reconstruction-execute ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+          persist-credentials: false
+
+      - name: Validate exact one-time command, inherited readiness, and current authority
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PRIVATE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          authority_path = Path(
+              'private-execution/.github/production/runtime-reconstruction-execution-authority.json'
+          )
+          authority = json.loads(authority_path.read_text(encoding='utf-8'))
+          expected_command = (
+              f"{authority['command_prefix']} {authority['execution_id']} {authority['canonical_sha']}"
+          )
+          command = os.environ.get('COMMAND', '').strip()
+          if command != expected_command:
+              raise SystemExit('reconstruction execution command differs from exact one-time authority')
+          if authority.get('status') != 'hard_blocked':
+              raise SystemExit('reconstruction execution skeleton must remain hard-blocked')
+          for key in (
+              'phone_execution_authority',
+              'runtime_secret_access_authority',
+              'config_render_authority',
+              'provider_access_authority',
+              'full_serving_authority',
+              'final_release_authority',
+          ):
+              if authority.get(key) is not False:
+                  raise SystemExit(f'reconstruction execution authority unexpectedly enabled: {key}')
+          if authority.get('recovery_health_scope') != 'local_runtime_only':
+              raise SystemExit('reconstruction execution health scope drift')
+          if authority.get('item20_transport_authority') != 'deferred_to_sealed_handoff':
+              raise SystemExit('Item20 authority must remain deferred')
+          if authority.get('duplicate_rule') != 'first_exact_issue_comment_only':
+              raise SystemExit('reconstruction duplicate-command rule drift')
+
+          token = os.environ.get('GH_TOKEN', '')
+          if not token:
+              raise SystemExit('GitHub token unavailable for private authority validation')
+          repository = os.environ['REPOSITORY']
+          owner = os.environ['REPOSITORY_OWNER']
+          private_sha = os.environ['PRIVATE_SHA']
+          comment_id = int(os.environ['COMMENT_ID'])
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {token}',
+              'User-Agent': 'mobile-proxy-production-runtime-reconstruction-execution-gate',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+          public_headers = {
+              key: value for key, value in headers.items() if key != 'Authorization'
+          }
+
+          def get_json(url, *, private=True):
+              request = urllib.request.Request(url, headers=headers if private else public_headers)
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          matching_comment_ids = []
+          for page in range(1, 11):
+              comments = get_json(
+                  f'https://api.github.com/repos/{repository}/issues/1/comments?per_page=100&page={page}'
+              )
+              if not comments:
+                  break
+              for item in comments:
+                  if (
+                      item.get('user', {}).get('login') == owner
+                      and str(item.get('body', '')).strip() == expected_command
+                      and isinstance(item.get('id'), int)
+                  ):
+                      matching_comment_ids.append(item['id'])
+              if len(comments) < 100:
+                  break
+          if not matching_comment_ids:
+              raise SystemExit('exact reconstruction execution command comment not found')
+          if comment_id != min(matching_comment_ids):
+              raise SystemExit('duplicate reconstruction execution command refused before phone access')
+
+          if get_json(f'https://api.github.com/repos/{repository}/commits/main').get('sha') != private_sha:
+              raise SystemExit('reconstruction execution gate must run from exact current private main')
+          canonical_sha = authority['canonical_sha']
+          if get_json(
+              'https://api.github.com/repos/iamaman11/mobile-proxy/commits/main',
+              private=False,
+          ).get('sha') != canonical_sha:
+              raise SystemExit('reconstruction execution canonical SHA is not current public main')
+
+          quality = get_json(
+              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs/{authority['quality_run_id']}",
+              private=False,
+          )
+          if not (
+              quality.get('name') == 'Quality'
+              and quality.get('event') == 'push'
+              and quality.get('head_branch') == 'main'
+              and quality.get('head_sha') == canonical_sha
+              and quality.get('status') == 'completed'
+              and quality.get('conclusion') == 'success'
+          ):
+              raise SystemExit('exact reconstruction execution Quality authority is not successful')
+
+          readiness = authority['accepted_readiness']
+          source_private_sha = authority['source_private_sha']
+          if readiness.get('private_sha') != source_private_sha:
+              raise SystemExit('accepted readiness private SHA differs from source authority')
+          accepted_comment = get_json(
+              f"https://api.github.com/repos/{repository}/issues/comments/{readiness['owner_comment_id']}"
+          )
+          if not (
+              accepted_comment.get('user', {}).get('login') == owner
+              and str(accepted_comment.get('body', '')).strip()
+              == '/runtime-reconstruction-readiness RUN_ENROLLED_LOCAL_RECOVERY_READINESS'
+          ):
+              raise SystemExit('accepted readiness owner comment differs from exact authority')
+
+          transport = get_json(
+              f"https://api.github.com/repos/{repository}/actions/runs/{readiness['transport_run_id']}"
+          )
+          child = get_json(
+              f"https://api.github.com/repos/{repository}/actions/runs/{readiness['readiness_run_id']}"
+          )
+          if not (
+              transport.get('name') == 'Runtime reconstruction readiness transport'
+              and transport.get('event') == 'issue_comment'
+              and transport.get('head_sha') == source_private_sha
+              and transport.get('status') == 'completed'
+              and transport.get('conclusion') == 'success'
+          ):
+              raise SystemExit('accepted readiness transport run differs from exact authority')
+          if not (
+              child.get('name') == 'Runtime reconstruction readiness'
+              and child.get('event') == 'workflow_dispatch'
+              and child.get('head_sha') == source_private_sha
+              and child.get('status') == 'completed'
+              and child.get('conclusion') == 'success'
+          ):
+              raise SystemExit('accepted readiness child run differs from exact authority')
+
+          for path in (
+              authority['reconstruction_binding_path'],
+              authority['reconstruction_manifest_path'],
+              authority['readiness_workflow_path'],
+          ):
+              encoded = urllib.parse.quote(path, safe='/')
+              source = get_json(
+                  f'https://api.github.com/repos/{repository}/contents/{encoded}?ref={source_private_sha}'
+              )
+              current = get_json(
+                  f'https://api.github.com/repos/{repository}/contents/{encoded}?ref={private_sha}'
+              )
+              if source.get('sha') != current.get('sha'):
+                  raise SystemExit('inherited readiness source identity changed after accepted readiness')
+
+          print('reconstruction execution hosted authority gate: accepted')
+          print('first_exact_comment=true')
+          print('accepted_readiness_inherited=true')
+          print('source_identity_unchanged=true')
+          print('phone_execution_authority=false')
+          print('runtime_secret_access=false')
+          print('config_rendered=false')
+          print('provider_access=false')
+          print('phone_access=false')
+          PY
+
+      - name: Refuse phone execution until a later tracker checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'reconstruction execution control plane validated; phone execution remains hard-blocked'
+          exit 1
+
+  reconstruct-phone:
+    name: Future globally serialized local-runtime reconstruction (hard-blocked)
+    needs: command-gate
+    if: ${{ false }}
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    steps:
+      - name: Refuse production-phone reconstruction until explicit authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'phone reconstruction is machine-hard-blocked'
+          exit 1

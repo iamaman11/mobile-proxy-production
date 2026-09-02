@@ -33,6 +33,7 @@ jobs:
               'android-signing-migration.yml': 'migrate-phone',
               'phone-runtime-recovery.yml': 'recover-runtime',
               'phone-runtime-binary-repair.yml': 'repair',
+              'runtime-reconstruction-execution.yml': 'reconstruct-phone',
           }
           mutators = set(mutation_jobs)
           read_only_phone = {
@@ -103,9 +104,6 @@ jobs:
               if 'runs-on: [self-hosted, Linux, X64, android-production]' not in body:
                   raise SystemExit(f'{name}: classified mutation job {job_id} is not the exact production-phone job')
 
-          # Read-only phone workflows intentionally do not contend for the mutation lock.
-          # Reject common write primitives so a future behavioral change cannot silently
-          # retain the read-only classification.
           write_patterns = {
               'canonical destructive migration script': r'migrate_android_signing_lineage\.py',
               'adb push': r"(?:adb\s+-s[^\n]*\s+push\s+|subprocess\.run\(\s*\[\s*['\"]adb['\"][\s\S]{0,400}?['\"]push['\"])",
