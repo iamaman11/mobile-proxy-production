@@ -114,3 +114,70 @@ jobs:
           echo 'config_rendered=false'
           echo 'phone_access=false'
           echo 'phone_mutation=false'
+
+      - name: Classify runtime input shape without values
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import binascii
+          import os
+          import unicodedata
+
+          probes = (
+              ('MOBILE_PROXY_ADMIN_TOKEN', 'ACTIONS_PROBE_ADMIN_TOKEN'),
+              ('MOBILE_PROXY_DEVICE_TOKEN', 'ACTIONS_PROBE_DEVICE_TOKEN'),
+              ('MOBILE_PROXY_UI_TOKEN', 'ACTIONS_PROBE_UI_TOKEN'),
+              ('MOBILE_PROXY_RELAY_USER', 'ACTIONS_PROBE_RELAY_USER'),
+              ('MOBILE_PROXY_RELAY_PASSWORD', 'ACTIONS_PROBE_RELAY_PASSWORD'),
+              ('MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64', 'ACTIONS_PROBE_REVERSE_TUNNEL_CERT'),
+          )
+
+          def has_control(value):
+              return any(unicodedata.category(ch) == 'Cc' for ch in value)
+
+          def flag(value):
+              return 'true' if value else 'false'
+
+          all_validator_compatible = True
+          for canonical_name, probe_name in probes:
+              value = os.environ.get(probe_name, '')
+              present = bool(value)
+              bounded = present and len(value) <= 4096
+              control_chars = present and has_control(value)
+              validator_compatible = bounded and not control_chars
+              all_validator_compatible = all_validator_compatible and validator_compatible
+              print(
+                  'runtime_input_shape|'
+                  f'{canonical_name}|present={flag(present)}|bounded={flag(bounded)}|'
+                  f'control_chars={flag(control_chars)}|validator_compatible={flag(validator_compatible)}'
+              )
+
+              if canonical_name == 'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64':
+                  trimmed = value.strip()
+                  internal_control_chars = bool(trimmed) and has_control(trimmed)
+                  internal_whitespace = bool(trimmed) and any(ch.isspace() for ch in trimmed)
+                  base64_valid = False
+                  if trimmed:
+                      try:
+                          base64.b64decode(trimmed, validate=True)
+                      except (binascii.Error, ValueError):
+                          base64_valid = False
+                      else:
+                          base64_valid = True
+                  print(
+                      'runtime_cert_shape|'
+                      f'control_chars_after_outer_trim={flag(internal_control_chars)}|'
+                      f'whitespace_after_outer_trim={flag(internal_whitespace)}|'
+                      f'standard_base64_after_outer_trim={flag(base64_valid)}'
+                  )
+
+          print(f'all_runtime_inputs_validator_compatible={flag(all_validator_compatible)}')
+          print('secret_values_recorded=false')
+          print('secret_lengths_recorded=false')
+          print('secret_hashes_recorded=false')
+          print('config_rendered=false')
+          print('phone_access=false')
+          print('phone_mutation=false')
+          PY
