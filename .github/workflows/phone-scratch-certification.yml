@@ -1,0 +1,300 @@
+name: Production Android scratch mutation certification
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  command-gate:
+    name: Validate scratch command and prepare canonical source
+    if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-scratch-certify ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
+    steps:
+      - name: Validate exact command, canonical main SHA, and Quality
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-scratch-certify ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid scratch certification command")
+          requested_sha = match.group(1)
+
+          def get_json(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "mobile-proxy-production-scratch-cert",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          canonical_main = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main"
+          )["sha"]
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+
+          query = urllib.parse.urlencode(
+              {"head_sha": requested_sha, "status": "completed", "per_page": 100}
+          )
+          runs = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?" + query
+          ).get("workflow_runs", [])
+          quality = [
+              run for run in runs
+              if run.get("name") == "Quality"
+              and run.get("head_sha") == requested_sha
+              and run.get("conclusion") == "success"
+          ]
+          if not quality:
+              raise SystemExit("exact canonical SHA has no successful Quality run")
+          quality.sort(key=lambda run: (run.get("run_attempt", 0), run.get("id", 0)), reverse=True)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+              handle.write(f"quality_run_id={quality[0]['id']}\n")
+          PY
+
+      - name: Checkout exact canonical source
+        uses: actions/checkout@v4
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ steps.command.outputs.canonical_sha }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Build immutable scratch certification source bundle
+        shell: bash
+        env:
+          CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
+        run: |
+          set -euo pipefail
+          test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-scratch-source"
+          root.mkdir(parents=True, exist_ok=False)
+          scripts = (
+              "run_private_phone_preflight.py",
+              "run_android_scratch_certification.py",
+          )
+          digests = {}
+          for name in scripts:
+              source = Path("canonical/scripts") / name
+              if not source.is_file():
+                  raise SystemExit(f"canonical source missing: {name}")
+              target = root / name
+              shutil.copyfile(source, target)
+              digests[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+
+          manifest = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": os.environ["CANONICAL_SHA"],
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "scripts_sha256": digests,
+          }
+          (root / "source-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload immutable scratch certification source
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-scratch-source-${{ steps.command.outputs.canonical_sha }}
+          path: ${{ runner.temp }}/phone-scratch-source
+          if-no-files-found: error
+          retention-days: 1
+
+  certify-scratch:
+    name: Certify bounded production phone scratch mutation
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      TRANSACTION_ID: scratch-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      state: ${{ steps.result.outputs.state }}
+      accepted: ${{ steps.result.outputs.accepted }}
+      recovery_succeeded: ${{ steps.result.outputs.recovery_succeeded }}
+    steps:
+      - name: Download immutable canonical scratch logic
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-scratch-source-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-scratch-source
+
+      - name: Verify source bundle before mutation boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-scratch-source"
+          manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
+          if manifest.get("format_version") != 1:
+              raise SystemExit("unsupported source manifest")
+          if manifest.get("repository") != "iamaman11/mobile-proxy":
+              raise SystemExit("source repository differs")
+          if manifest.get("canonical_sha") != os.environ["CANONICAL_SHA"]:
+              raise SystemExit("source canonical SHA differs")
+          if manifest.get("quality_run_id") != int(os.environ["QUALITY_RUN_ID"]):
+              raise SystemExit("source Quality authority differs")
+          expected = manifest.get("scripts_sha256")
+          if not isinstance(expected, dict) or set(expected) != {
+              "run_private_phone_preflight.py",
+              "run_android_scratch_certification.py",
+          }:
+              raise SystemExit("source script set differs")
+          for name, digest in expected.items():
+              path = root / name
+              if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f"source digest differs: {name}")
+          PY
+
+      - name: Execute bounded scratch mutation transaction
+        id: certification
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${RUNNER_TEMP}/phone-scratch-source/run_android_scratch_certification.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --transaction-id "${TRANSACTION_ID}" \
+            --output "${RUNNER_TEMP}/phone-scratch-certification.json"
+
+      - name: Export bounded scratch transaction result
+        id: result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "phone-scratch-certification.json"
+          if not path.is_file():
+              values = {"state": "NO_EVIDENCE", "accepted": False, "recovery_succeeded": False}
+          else:
+              evidence = json.loads(path.read_text(encoding="utf-8"))
+              values = {
+                  "state": evidence.get("state", "INVALID"),
+                  "accepted": evidence.get("accepted") is True,
+                  "recovery_succeeded": evidence.get("recovery_succeeded") is True,
+              }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if isinstance(value, bool):
+                      value = str(value).lower()
+                  handle.write(f"{key}={value}\n")
+          PY
+
+      - name: Upload bounded scratch certification evidence
+        if: always() && steps.result.outputs.state != 'NO_EVIDENCE'
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-scratch-certification-${{ env.CANONICAL_SHA }}-${{ env.TRANSACTION_ID }}
+          path: ${{ runner.temp }}/phone-scratch-certification.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce certification acceptance
+        if: always()
+        shell: bash
+        env:
+          ACCEPTED: ${{ steps.result.outputs.accepted }}
+        run: |
+          set -euo pipefail
+          test "${ACCEPTED}" = "true"
+
+  report:
+    name: Publish scratch certification classification
+    if: always() && needs.command-gate.result != 'skipped'
+    needs: [command-gate, certify-scratch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment bounded result on control issue
+        uses: actions/github-script@v7
+        env:
+          CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+          JOB_RESULT: ${{ needs.certify-scratch.result }}
+          STATE: ${{ needs.certify-scratch.outputs.state }}
+          ACCEPTED: ${{ needs.certify-scratch.outputs.accepted }}
+          RECOVERY_SUCCEEDED: ${{ needs.certify-scratch.outputs.recovery_succeeded }}
+        with:
+          script: |
+            let classification = 'SCRATCH_MUTATION_FAILED';
+            if (process.env.JOB_RESULT === 'success' && process.env.ACCEPTED === 'true' && process.env.STATE === 'ACCEPTED') {
+              classification = 'SCRATCH_MUTATION_PROVEN';
+            } else if (process.env.STATE === 'RECOVERED' && process.env.RECOVERY_SUCCEEDED === 'true') {
+              classification = 'SCRATCH_MUTATION_RECOVERED';
+            } else if (process.env.STATE === 'QUARANTINED') {
+              classification = 'SCRATCH_MUTATION_QUARANTINED';
+            } else if (process.env.STATE === 'REFUSED') {
+              classification = 'SCRATCH_MUTATION_REFUSED';
+            }
+            const body = [
+              '## CONTROL ANDROID SCRATCH MUTATION RESULT',
+              '',
+              `- classification: **${classification}**`,
+              `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
+              `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
+              `- workflow_run_id: \`${context.runId}\``,
+              `- mutation_job_result: \`${process.env.JOB_RESULT}\``,
+              `- transaction_state: \`${process.env.STATE || 'unobserved'}\``,
+              `- accepted: \`${process.env.ACCEPTED || 'unobserved'}\``,
+              `- recovery_succeeded: \`${process.env.RECOVERY_SUCCEEDED || 'unobserved'}\``,
+              '- namespace: `/data/local/tmp/mobile-proxy-adapter-test/<transaction-id>`',
+              '- raw_device_identifier_recorded: `false`',
+              '- provider_access_performed: `false`',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
