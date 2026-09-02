@@ -1,0 +1,269 @@
+name: Production Android capability inventory
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  command-gate:
+    name: Validate capability command and prepare canonical source
+    if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-capabilities ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
+    steps:
+      - name: Validate exact command, canonical main SHA, and Quality
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-capabilities ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid capability command")
+          requested_sha = match.group(1)
+
+          def get_json(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "mobile-proxy-production-capabilities",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          canonical_main = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main"
+          )["sha"]
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+
+          query = urllib.parse.urlencode(
+              {"head_sha": requested_sha, "status": "completed", "per_page": 100}
+          )
+          runs = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?" + query
+          ).get("workflow_runs", [])
+          quality = [
+              run for run in runs
+              if run.get("name") == "Quality"
+              and run.get("head_sha") == requested_sha
+              and run.get("conclusion") == "success"
+          ]
+          if not quality:
+              raise SystemExit("exact canonical SHA has no successful Quality run")
+          quality.sort(key=lambda run: (run.get("run_attempt", 0), run.get("id", 0)), reverse=True)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+              handle.write(f"quality_run_id={quality[0]['id']}\n")
+          PY
+
+      - name: Checkout exact canonical source
+        uses: actions/checkout@v4
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ steps.command.outputs.canonical_sha }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Build immutable capability source bundle
+        shell: bash
+        env:
+          CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
+        run: |
+          set -euo pipefail
+          test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-capability-source"
+          root.mkdir(parents=True, exist_ok=False)
+          scripts = (
+              "run_private_phone_preflight.py",
+              "run_android_capability_inventory.py",
+          )
+          digests = {}
+          for name in scripts:
+              source = Path("canonical/scripts") / name
+              if not source.is_file():
+                  raise SystemExit(f"canonical source missing: {name}")
+              target = root / name
+              shutil.copyfile(source, target)
+              digests[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+
+          manifest = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": os.environ["CANONICAL_SHA"],
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "scripts_sha256": digests,
+          }
+          (root / "source-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload immutable capability source
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-capability-source-${{ steps.command.outputs.canonical_sha }}
+          path: ${{ runner.temp }}/phone-capability-source
+          if-no-files-found: error
+          retention-days: 1
+
+  inventory:
+    name: Registered production phone capability inventory
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    outputs:
+      read_only_proven: ${{ steps.result.outputs.read_only_proven }}
+      unresolved_count: ${{ steps.result.outputs.unresolved_count }}
+    steps:
+      - name: Download immutable canonical capability logic
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-capability-source-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-capability-source
+
+      - name: Verify source bundle before device access
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-capability-source"
+          manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
+          if manifest.get("format_version") != 1:
+              raise SystemExit("unsupported source manifest")
+          if manifest.get("repository") != "iamaman11/mobile-proxy":
+              raise SystemExit("source repository differs")
+          if manifest.get("canonical_sha") != os.environ["CANONICAL_SHA"]:
+              raise SystemExit("source canonical SHA differs")
+          if manifest.get("quality_run_id") != int(os.environ["QUALITY_RUN_ID"]):
+              raise SystemExit("source Quality authority differs")
+          expected = manifest.get("scripts_sha256")
+          if not isinstance(expected, dict) or set(expected) != {
+              "run_private_phone_preflight.py",
+              "run_android_capability_inventory.py",
+          }:
+              raise SystemExit("source script set differs")
+          for name, digest in expected.items():
+              path = root / name
+              if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f"source digest differs: {name}")
+          PY
+
+      - name: Run bounded read-only capability inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${RUNNER_TEMP}/phone-capability-source/run_android_capability_inventory.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output "${RUNNER_TEMP}/phone-capabilities.json"
+
+      - name: Export bounded capability result
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "phone-capabilities.json").read_text(encoding="utf-8")
+          )
+          proven = evidence.get("read_only_capabilities_proven") is True
+          unresolved = evidence.get("unresolved_capabilities")
+          if not isinstance(unresolved, list):
+              raise SystemExit("invalid capability evidence")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"read_only_proven={str(proven).lower()}\n")
+              handle.write(f"unresolved_count={len(unresolved)}\n")
+          PY
+
+      - name: Upload bounded capability evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-capability-inventory-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-capabilities.json
+          if-no-files-found: error
+          retention-days: 30
+
+  report:
+    name: Publish bounded capability classification
+    if: always() && needs.command-gate.result != 'skipped'
+    needs: [command-gate, inventory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment bounded result on control issue
+        uses: actions/github-script@v7
+        env:
+          CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          READ_ONLY_PROVEN: ${{ needs.inventory.outputs.read_only_proven }}
+          UNRESOLVED_COUNT: ${{ needs.inventory.outputs.unresolved_count }}
+        with:
+          script: |
+            const proven =
+              process.env.INVENTORY_RESULT === 'success' &&
+              process.env.READ_ONLY_PROVEN === 'true';
+            const classification = proven
+              ? 'READ_ONLY_CAPABILITIES_PROVEN'
+              : 'CAPABILITIES_INCOMPLETE';
+            const body = [
+              '## CONTROL ANDROID CAPABILITY RESULT',
+              '',
+              `- classification: **${classification}**`,
+              `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
+              `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
+              `- workflow_run_id: \`${context.runId}\``,
+              `- inventory_job_result: \`${process.env.INVENTORY_RESULT}\``,
+              `- read_only_capabilities_proven: \`${process.env.READ_ONLY_PROVEN || 'unobserved'}\``,
+              `- unresolved_capability_count: \`${process.env.UNRESOLVED_COUNT || 'unobserved'}\``,
+              '- mutation_capabilities_are_not_inferred: `true`',
+              '- raw_device_identifier_recorded: `false`',
+              '- phone_mutation_performed: `false`',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
