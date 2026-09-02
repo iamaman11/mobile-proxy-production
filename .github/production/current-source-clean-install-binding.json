@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "binding_role": "private_execution_only",
+  "status": "prepared",
+  "canonical_repository": "iamaman11/mobile-proxy",
+  "canonical_sha": "ac6188eaa62d4294179c0c883ab048a70a3cdb1a",
+  "quality_run_id": 33639572280,
+  "quality_required": true,
+  "application_id": "com.example.mobileproxy",
+  "version_name": "0.1.4",
+  "version_code": 1004,
+  "legacy_package_required": false,
+  "legacy_runtime_required": false,
+  "legacy_rollback_authority": false,
+  "registered_device_preflight_required": true,
+  "same_job_pre_destructive_preflight_required": true,
+  "global_mutation_group": "production-phone-global-mutation",
+  "phone_execution_authority": false,
+  "runtime_secret_access_authority": false,
+  "provider_credentials_allowed": false,
+  "final_release_authority": false,
+  "notes": "Prepared control-plane binding only. Must be explicitly armed by a later authoritative #179 checkpoint after FULL_CYCLE_READINESS is accepted."
+}
