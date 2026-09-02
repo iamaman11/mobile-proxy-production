@@ -1,0 +1,213 @@
+name: Production phone full-cycle readiness
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: read
+  actions: read
+
+jobs:
+  command-gate:
+    name: Validate readiness command and exact canonical authority
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-full-cycle-readiness ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.authority.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.authority.outputs.quality_run_id }}
+    steps:
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+          persist-credentials: false
+
+      - name: Validate bound current-source authority
+        id: authority
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          from pathlib import Path
+
+          binding = json.loads(Path('private-execution/.github/production/current-source-clean-install-binding.json').read_text())
+          sha = binding.get('canonical_sha', '')
+          run_id = binding.get('quality_run_id')
+          if re.fullmatch(r'[0-9a-f]{40}', sha) is None or not isinstance(run_id, int):
+              raise SystemExit('clean-install binding authority is malformed')
+          if os.environ.get('COMMAND', '').strip() != f'/phone-full-cycle-readiness {sha}':
+              raise SystemExit('readiness command differs from exact bound canonical SHA')
+          if binding.get('status') not in ('prepared', 'armed'):
+              raise SystemExit('clean-install binding is not prepared')
+          if binding.get('quality_required') is not True:
+              raise SystemExit('Quality authority unexpectedly disabled')
+          if binding.get('legacy_package_required') is not False or binding.get('legacy_runtime_required') is not False:
+              raise SystemExit('legacy application/runtime state leaked into clean-install admission')
+          if binding.get('global_mutation_group') != 'production-phone-global-mutation':
+              raise SystemExit('global mutation group drift')
+
+          headers = {'Accept':'application/vnd.github+json','User-Agent':'mobile-proxy-full-cycle-readiness','X-GitHub-Api-Version':'2022-11-28'}
+          def get(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  return json.load(r)
+          main = get('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main')
+          if main.get('sha') != sha:
+              raise SystemExit('bound canonical SHA is not current public main')
+          quality = get(f'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs/{run_id}')
+          if not (quality.get('name') == 'Quality' and quality.get('event') == 'push' and quality.get('head_branch') == 'main' and quality.get('head_sha') == sha and quality.get('status') == 'completed' and quality.get('conclusion') == 'success'):
+              raise SystemExit('exact bound main Quality is not successful')
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as h:
+              h.write(f'canonical_sha={sha}\nquality_run_id={run_id}\n')
+          print('authority_current=true')
+          print('legacy_state_required=false')
+          print('phone_access=false')
+          PY
+
+  hosted-readiness:
+    name: Prove source, build, signing and runtime toolchain readiness off-phone
+    needs: command-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+      ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Check out exact canonical public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ env.CANONICAL_SHA }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Prove signing identity and exact signed APK build
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="${RUNNER_TEMP}/signing-proof.json"
+          output="${RUNNER_TEMP}/android-release-output"
+          python3 canonical/scripts/verify_android_release_keystore.py --canonical-sha "${CANONICAL_SHA}" --output "${proof}"
+          python3 canonical/scripts/build_signed_android_release.py --repository-root canonical --canonical-sha "${CANONICAL_SHA}" --output-dir "${output}" --android-baseline-ref v0.1.3
+          test -s "${output}/mobile-proxy-android-v0.1.4.apk"
+          python3 - "${output}/android-release-evidence.json" <<'PY'
+          import json, os, sys
+          e=json.load(open(sys.argv[1],encoding='utf-8'))
+          for k,v in {'canonical_sha':os.environ['CANONICAL_SHA'],'application_id':'com.example.mobileproxy','version_name':'0.1.4','version_code':1004,'production_apk_signed':True,'accepted':True,'phone_access_performed':False,'phone_mutation_performed':False}.items():
+              if e.get(k)!=v: raise SystemExit(f'APK readiness evidence mismatch: {k}')
+          PY
+
+      - name: Prove native runtime build prerequisites and exact binaries
+        shell: bash
+        working-directory: canonical
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          candidates=[]
+          for key in ('ANDROID_NDK_HOME','ANDROID_NDK_ROOT'):
+              if os.environ.get(key): candidates.append(Path(os.environ[key]))
+          sdk=os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
+          if sdk:
+              root=Path(sdk)/'ndk'
+              if root.is_dir(): candidates.extend(sorted((p for p in root.iterdir() if p.is_dir()), reverse=True))
+          for c in candidates:
+              if (c/'toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang').is_file() and (c/'toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar').is_file():
+                  print(c)
+                  Path(os.environ['RUNNER_TEMP'],'ndk-path').write_text(str(c),encoding='utf-8')
+                  raise SystemExit(0)
+          raise SystemExit('compatible Android NDK unavailable')
+          PY
+          ndk="$(cat "${RUNNER_TEMP}/ndk-path")"
+          cargo run --locked -p operator-cli --bin operator-cli -- prepare-runtime-binaries --android-ndk "${ndk}"
+          test -x deploy/device-runtime/bin/runtime-supervisor
+          test -x deploy/device-runtime/bin/host-daemon
+          test -x deploy/device-runtime/bin/sing-box
+
+      - name: Record hosted readiness
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## FULL_CYCLE_READINESS / hosted
+          - exact canonical main + Quality: PASS
+          - production signing identity: PASS
+          - signed APK 0.1.4/1004 build: PASS
+          - Android NDK/native runtime build: PASS
+          - phone access performed: false
+          - phone mutation performed: false
+          EOF
+
+  phone-readiness:
+    name: Prove registered phone access and mutation prerequisites read-only
+    needs: [command-gate, hosted-readiness]
+    if: ${{ needs.command-gate.result == 'success' && needs.hosted-readiness.result == 'success' }}
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Check out exact canonical source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ env.CANONICAL_SHA }}
+          path: canonical
+          persist-credentials: false
+
+      - name: PHONE_ACCESS independent registered-device proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 canonical/scripts/run_private_phone_preflight.py --canonical-sha "${CANONICAL_SHA}" --output "${RUNNER_TEMP}/phone-access.json"
+
+      - name: Read-only mutation capability checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in adb python3 git curl cargo java; do command -v "$tool" >/dev/null || { echo "missing_tool=$tool"; exit 1; }; done
+          serial="${ANDROID_PRODUCTION_SERIAL}"
+          adb -s "$serial" shell 'command -v sh >/dev/null && command -v pm >/dev/null && command -v dumpsys >/dev/null'
+          adb -s "$serial" shell 'test -d /data/local/tmp'
+          adb -s "$serial" shell 'su -c true'
+          adb -s "$serial" shell 'df /data /data/local/tmp' >/dev/null
+          echo 'phone_access=PASS'
+          echo 'root_shell=PASS'
+          echo 'package_manager_tools=PASS'
+          echo 'staging_filesystem_present=PASS'
+          echo 'phone_mutation_performed=false'
+
+      - name: Record phone readiness
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## FULL_CYCLE_READINESS / phone
+          - PHONE_ACCESS: PASS
+          - exact registered-device match: PASS
+          - adb state + shell probe: PASS
+          - root shell capability: PASS
+          - package-manager tooling: PASS
+          - staging filesystem present: PASS
+          - phone mutation performed: false
+          - raw device identifier recorded: false
+          EOF
