@@ -1,0 +1,133 @@
+name: Production runner Rust bootstrap
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-runner-rust-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner runner-tooling bootstrap command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/runner-rust-bootstrap ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          command = os.environ.get('COMMAND', '').strip()
+          match = re.fullmatch(r'/runner-rust-bootstrap ([0-9a-f]{40})', command)
+          if match is None:
+              raise SystemExit('invalid runner Rust bootstrap command')
+          requested = match.group(1)
+          req = urllib.request.Request(
+              'https://api.github.com/repos/iamaman11/mobile-proxy/commits/main',
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'mobile-proxy-production-runner-rust-bootstrap',
+              },
+          )
+          with urllib.request.urlopen(req, timeout=10) as response:
+              current = json.load(response)['sha']
+          if requested != current:
+              raise SystemExit('requested SHA is not current canonical main')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={requested}\n')
+          PY
+
+  bootstrap:
+    name: Bootstrap pinned Rust toolchain on production runner
+    needs: command-gate
+    if: ${{ needs.command-gate.result == 'success' }}
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 25
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+    steps:
+      - name: Fail closed unless persistent PATH bootstrap is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in curl sha256sum sudo; do
+            command -v "$tool" >/dev/null 2>&1 || {
+              echo "required runner bootstrap tool unavailable: $tool" >&2
+              exit 1
+            }
+          done
+          sudo -n true
+          sudo -n test -d /usr/local/bin
+          echo 'runner_bootstrap_preflight=true'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+
+      - name: Check out exact canonical public source read-only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ env.CANONICAL_SHA }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Install checksum-pinned rustup and exact project toolchain
+        shell: bash
+        env:
+          RUSTUP_VERSION: '1.28.2'
+          RUSTUP_INIT_SHA256: '20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c'
+          RUST_TOOLCHAIN: '1.95.0'
+        run: |
+          set -euo pipefail
+          installer="${RUNNER_TEMP}/rustup-init-${RUSTUP_VERSION}"
+          url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            "$url" -o "$installer"
+          printf '%s  %s\n' "$RUSTUP_INIT_SHA256" "$installer" | sha256sum -c -
+          chmod 0755 "$installer"
+          "$installer" -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" --no-modify-path
+          "$HOME/.cargo/bin/rustup" default "$RUST_TOOLCHAIN"
+          for tool in cargo rustc rustup rustdoc; do
+            test -x "$HOME/.cargo/bin/$tool"
+            sudo -n ln -sfn "$HOME/.cargo/bin/$tool" "/usr/local/bin/$tool"
+          done
+          rm -f "$installer"
+
+      - name: Verify persistent exact Rust prerequisite without phone access
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v cargo >/dev/null 2>&1
+          command -v rustc >/dev/null 2>&1
+          cargo --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          rustc --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          (
+            cd canonical
+            cargo metadata --format-version 1 --locked --no-deps >/dev/null
+            git diff --check
+            test -z "$(git status --porcelain)"
+          )
+          echo 'runner_rust_toolchain_ready=true'
+          echo 'rust_toolchain=1.95.0'
+          echo 'runner_tooling_mutation=true'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+          echo 'config_rendered=false'
+          echo 'secret_access=false'

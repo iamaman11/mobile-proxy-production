@@ -1,0 +1,95 @@
+name: Production runner tooling policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-runner-rust-bootstrap:
+    name: Validate bounded production runner Rust bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce runner-tooling bootstrap invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/production-runner-rust-bootstrap.yml')
+          if not path.is_file():
+              raise SystemExit('production runner Rust bootstrap workflow is missing')
+          text = path.read_text(encoding='utf-8')
+
+          required = (
+              "github.event.issue.number == 1",
+              "github.event.comment.user.login == github.repository_owner",
+              "startsWith(github.event.comment.body, '/runner-rust-bootstrap ')",
+              "re.fullmatch(r'/runner-rust-bootstrap ([0-9a-f]{40})', command)",
+              "runs-on: [self-hosted, Linux, X64, android-production]",
+              "group: production-runner-rust-bootstrap",
+              "cancel-in-progress: false",
+              "RUSTUP_VERSION: '1.28.2'",
+              "RUSTUP_INIT_SHA256: '20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c'",
+              "RUST_TOOLCHAIN: '1.95.0'",
+              "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init",
+              "sha256sum -c -",
+              "--default-toolchain \"$RUST_TOOLCHAIN\" --no-modify-path",
+              "sudo -n true",
+              "sudo -n test -d /usr/local/bin",
+              "sudo -n ln -sfn \"$HOME/.cargo/bin/$tool\" \"/usr/local/bin/$tool\"",
+              "cargo --version | grep -Eq '^cargo 1\\.95\\.0([[:space:]]|$)'",
+              "rustc --version | grep -Eq '^rustc 1\\.95\\.0([[:space:]]|$)'",
+              "cargo metadata --format-version 1 --locked --no-deps",
+              "runner_tooling_mutation=true",
+              "phone_access=false",
+              "phone_mutation=false",
+              "provider_access=false",
+              "config_rendered=false",
+              "secret_access=false",
+          )
+          missing = [snippet for snippet in required if snippet not in text]
+          if missing:
+              raise SystemExit('runner Rust bootstrap invariant missing: ' + ' | '.join(missing))
+
+          forbidden = (
+              'production-phone-global-mutation',
+              'secrets.',
+              'ANDROID_PRODUCTION_SERIAL',
+              '/data/adb/',
+              ' adb ',
+              "['adb'",
+              'package-device-release',
+              'verify-release-integrity',
+              'runtime-reconstruction-execute',
+              'VULTR_API',
+              'GOOGLE_APPLICATION_CREDENTIALS',
+              'gcloud ',
+              'pm install',
+              'pm uninstall',
+          )
+          present = [snippet for snippet in forbidden if snippet in text]
+          if present:
+              raise SystemExit('runner Rust bootstrap crossed a forbidden boundary: ' + ' | '.join(present))
+
+          if text.count("runs-on: [self-hosted, Linux, X64, android-production]") != 1:
+              raise SystemExit('runner Rust bootstrap must have exactly one production self-hosted job')
+          if text.count("/runner-rust-bootstrap ") != 2:
+              raise SystemExit('runner Rust bootstrap command surface drifted')
+
+          print('production runner tooling policy: accepted')
+          print('rustup_version=1.28.2')
+          print('rust_toolchain=1.95.0')
+          print('phone_access=false')
+          print('provider_access=false')
+          print('secret_access=false')
+          PY

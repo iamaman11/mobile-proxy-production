@@ -46,6 +46,7 @@ jobs:
               'phone-runtime-release-inventory.yml',
               'phone-runtime-tooling-diagnostic.yml',
               'phone-signing-identity.yml',
+              'production-runner-rust-bootstrap.yml',
           }
 
           missing = sorted(name for name in mutators | read_only_phone if not (workflows / name).is_file())
