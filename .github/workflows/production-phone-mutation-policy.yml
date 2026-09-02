@@ -39,6 +39,7 @@ jobs:
           mutators = set(mutation_jobs)
           read_only_phone = {
               'phone-capability-inventory.yml',
+              'phone-filesystem-tooling-diagnostic.yml',
               'phone-preflight.yml',
               'phone-post-migration-diagnostic.yml',
               'phone-runtime-cutover-preflight.yml',
