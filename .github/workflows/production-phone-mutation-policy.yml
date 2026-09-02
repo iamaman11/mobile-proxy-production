@@ -125,10 +125,57 @@ jobs:
                           'reclassify as a mutator and use the global lock or remove the write behavior'
                       )
 
+          diagnostic = contents['phone-runtime-diagnostic.yml']
+          required_prestate_classifier = (
+              'current_absent=true',
+              'release_count_zero=true',
+              'managed_root_entries_allowed_only=true',
+              'routefix_absent=true',
+              'boot_hook_shape=absent',
+              'managed_executable_process_absent=true',
+              'managed_root_cmdline_process_absent=true',
+              'watchdog_cmdline_process_absent=true',
+              'failure_code=current_present',
+              'failure_code=release_count_nonzero',
+              'failure_code=unexpected_managed_entry',
+              'failure_code=routefix_present',
+              'failure_code=boot_hook_invalid_shape',
+              'failure_code=managed_executable_running',
+              'failure_code=managed_cmdline_running',
+              'failure_code=watchdog_running',
+              '"empty_prestate_failure_code": failure_code',
+              '"empty_prestate_admissible": empty_prestate_admissible',
+              '"raw_process_identifier_recorded": False',
+              '"raw_device_identifier_recorded": False',
+              '"raw_config_recorded": False',
+              '"runtime_secret_values_recorded": False',
+              '"provider_access_performed": False',
+              '"phone_mutation_performed": False',
+          )
+          missing_classifier = [
+              snippet for snippet in required_prestate_classifier if snippet not in diagnostic
+          ]
+          if missing_classifier:
+              raise SystemExit(
+                  'phone-runtime-diagnostic.yml: bounded reconstruction prestate classifier invariant missing: '
+                  + ', '.join(missing_classifier)
+              )
+          diagnostic_secret_refs = set(re.findall(r'secrets\.([A-Z0-9_]+)', diagnostic))
+          if diagnostic_secret_refs != {'ANDROID_PRODUCTION_SERIAL'}:
+              raise SystemExit(
+                  'phone-runtime-diagnostic.yml: read-only prestate classifier may reference only '
+                  'ANDROID_PRODUCTION_SERIAL secret binding'
+              )
+          if 'issues: write' in diagnostic:
+              raise SystemExit(
+                  'phone-runtime-diagnostic.yml: bounded read-only prestate classifier must not write issue comments'
+              )
+
           print('production phone mutation policy: accepted')
           print('mutators=' + ','.join(sorted(mutators)))
           print('read_only_phone=' + ','.join(sorted(read_only_phone)))
           print('global_mutation_group=' + required_group)
           print('global_mutation_lock_scope=exact-self-hosted-mutation-jobs')
           print('global_mutation_pending_queue=max')
+          print('reconstruction_prestate_classifier=bounded-read-only')
           PY
