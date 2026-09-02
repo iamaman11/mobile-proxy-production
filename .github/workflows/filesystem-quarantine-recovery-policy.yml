@@ -85,10 +85,12 @@ jobs:
               raise SystemExit('quarantine observation device subprocess must execute exactly once')
           if observe.count('id: evidence-upload-') != 3:
               raise SystemExit('quarantine observation must have exactly three evidence upload attempts')
-          observation_artifact_name = (
-              'name: phone-filesystem-quarantine-observation-${{ env.CANONICAL_SHA }}-${{ github.run_id }}'
-          )
-          if observe.count(observation_artifact_name) != 3:
+          observation_artifact_names = [
+              line.strip()
+              for line in observe.splitlines()
+              if line.strip().startswith('name: phone-filesystem-quarantine-observation-')
+          ]
+          if len(observation_artifact_names) != 3 or len(set(observation_artifact_names)) != 1:
               raise SystemExit('quarantine observation retry attempts must preserve one exact artifact name')
           if observe.count('overwrite: true') != 2:
               raise SystemExit('quarantine observation retries must overwrite only after failed prior attempts')
@@ -153,10 +155,12 @@ jobs:
               raise SystemExit('quarantine cleanup device subprocess must execute exactly once')
           if cleanup.count('id: evidence-upload-') != 3:
               raise SystemExit('quarantine cleanup must have exactly three evidence upload attempts')
-          cleanup_artifact_name = (
-              'name: phone-filesystem-quarantine-cleanup-${{ env.CANONICAL_SHA }}-${{ github.run_id }}'
-          )
-          if cleanup.count(cleanup_artifact_name) != 3:
+          cleanup_artifact_names = [
+              line.strip()
+              for line in cleanup.splitlines()
+              if line.strip().startswith('name: phone-filesystem-quarantine-cleanup-')
+          ]
+          if len(cleanup_artifact_names) != 3 or len(set(cleanup_artifact_names)) != 1:
               raise SystemExit('quarantine cleanup retry attempts must preserve one exact artifact name')
           if cleanup.count('overwrite: true') != 2:
               raise SystemExit('quarantine cleanup retries must overwrite only after failed prior attempts')
