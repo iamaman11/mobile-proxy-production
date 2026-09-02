@@ -44,8 +44,11 @@ jobs:
               "'transaction_ids': json.loads(os.environ['TRANSACTION_IDS_JSON'])",
               "'--mode', 'observe'",
               "'android.filesystem-quarantine-observation.v1'",
-              "evidence.get('phone_mutation_performed') is not False",
-              "evidence.get('raw_directory_contents_recorded')",
+              "'raw_directory_contents_recorded'",
+              "'raw_command_output_recorded'",
+              "'raw_device_identifier_recorded'",
+              "'phone_mutation_performed'",
+              "if evidence.get(flag) is not False",
               "observation_validated: ${{ steps.result.outputs.observation_validated }}",
               "artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}",
               "id: evidence-upload",
@@ -67,7 +70,9 @@ jobs:
           if required_group in observe:
               raise SystemExit('read-only quarantine observation must stay outside global mutation lock')
           if observe.count("'run_android_filesystem_quarantine_recovery.py'") < 2:
-              raise SystemExit('quarantine observation canonical recovery script must be copied and manifest-required')
+              raise SystemExit(
+                  'quarantine observation canonical recovery script must be copied and manifest-required'
+              )
           if "process.env.OBSERVATION_JOB_RESULT === 'success'" in observe:
               raise SystemExit('quarantine observation state must be independent from job conclusion')
 
@@ -111,7 +116,9 @@ jobs:
           if "process.env.CLEANUP_JOB_RESULT === 'success'" in cleanup:
               raise SystemExit('quarantine cleanup state must be independent from job conclusion')
           if cleanup.count("'run_android_filesystem_quarantine_recovery.py'") < 2:
-              raise SystemExit('quarantine cleanup canonical recovery script must be copied and manifest-required')
+              raise SystemExit(
+                  'quarantine cleanup canonical recovery script must be copied and manifest-required'
+              )
 
           def classify_observation(validated, persisted, complete, all_absent, admissible):
               if not validated:
