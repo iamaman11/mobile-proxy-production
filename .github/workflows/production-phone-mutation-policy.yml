@@ -31,12 +31,14 @@ jobs:
 
           mutation_jobs = {
               'android-signing-migration.yml': 'migrate-phone',
+              'current-source-clean-install.yml': 'clean-install-phone',
               'phone-runtime-recovery.yml': 'recover-runtime',
               'phone-runtime-binary-repair.yml': 'repair',
               'runtime-reconstruction-execution.yml': 'reconstruct-phone',
           }
           mutators = set(mutation_jobs)
           read_only_phone = {
+              'phone-full-cycle-readiness.yml',
               'phone-preflight.yml',
               'phone-post-migration-diagnostic.yml',
               'phone-runtime-cutover-preflight.yml',
@@ -171,11 +173,40 @@ jobs:
                   'phone-runtime-diagnostic.yml: bounded read-only prestate classifier must not write issue comments'
               )
 
+          readiness = contents['phone-full-cycle-readiness.yml']
+          readiness_secret_refs = set(re.findall(r'secrets\.([A-Z0-9_]+)', readiness))
+          allowed_readiness_secrets = {
+              'ANDROID_PRODUCTION_SERIAL',
+              'ANDROID_RELEASE_KEYSTORE_B64',
+              'ANDROID_RELEASE_KEYSTORE_PASSWORD',
+              'ANDROID_RELEASE_KEY_ALIAS',
+              'ANDROID_RELEASE_KEY_PASSWORD',
+          }
+          if readiness_secret_refs != allowed_readiness_secrets:
+              raise SystemExit('phone-full-cycle-readiness.yml: secret surface drift')
+          for forbidden in ('adb push', 'adb install', 'adb uninstall', 'pm install', 'pm uninstall', 'rm -rf', 'mkdir -p'):
+              if forbidden in readiness:
+                  raise SystemExit('phone-full-cycle-readiness.yml: mutation-like command present: ' + forbidden)
+
+          clean_install = contents['current-source-clean-install.yml']
+          for required in (
+              'current-source clean install is deliberately DISARMED pending accepted FULL_CYCLE_READINESS',
+              'same_job_pre_destructive_preflight_required',
+              'python3 canonical/scripts/run_private_phone_preflight.py',
+              'python3 canonical/scripts/clean_install_android_production.py',
+              'legacy APK/runtime required: false',
+              'runtime materialization: NOT part of this APK-only gate',
+          ):
+              if required not in clean_install:
+                  raise SystemExit('current-source-clean-install.yml: required fail-closed invariant missing')
+
           print('production phone mutation policy: accepted')
           print('mutators=' + ','.join(sorted(mutators)))
           print('read_only_phone=' + ','.join(sorted(read_only_phone)))
           print('global_mutation_group=' + required_group)
           print('global_mutation_lock_scope=exact-self-hosted-mutation-jobs')
           print('global_mutation_pending_queue=max')
+          print('full_cycle_readiness=classified-read-only')
+          print('current_source_clean_install=classified-disarmed-mutator')
           print('reconstruction_prestate_classifier=bounded-read-only')
           PY
