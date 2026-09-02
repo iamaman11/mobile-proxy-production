@@ -554,6 +554,27 @@ jobs:
           print('same-run source bundle, enrolled manifest, and armed reconstruction authority accepted')
           PY
 
+      - name: Require exact user-local Rust toolchain before render or phone access
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${HOME}/.cargo"
+          RUSTUP_HOME="${HOME}/.rustup"
+          PATH="${CARGO_HOME}/bin:${PATH}"
+          export CARGO_HOME RUSTUP_HOME PATH
+          test "$CARGO_HOME" = "${HOME}/.cargo"
+          test "$RUSTUP_HOME" = "${HOME}/.rustup"
+          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
+          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo 'reconstruction_rust_prerequisite=true'
+          echo 'config_rendered=false'
+          echo 'phone_access=false'
+
       - name: Render and verify complete source-bound release ephemerally
         timeout-minutes: 8
         shell: bash
