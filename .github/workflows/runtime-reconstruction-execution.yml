@@ -18,6 +18,10 @@ jobs:
       startsWith(github.event.comment.body, '/runtime-reconstruction-execute ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.authority.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.authority.outputs.quality_run_id }}
+      execution_id: ${{ steps.authority.outputs.execution_id }}
     steps:
       - name: Check out exact private execution revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -27,6 +31,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate exact one-time command, inherited readiness, and current authority
+        id: authority
         shell: bash
         env:
           COMMAND: ${{ github.event.comment.body }}
@@ -191,6 +196,11 @@ jobs:
               if source.get('sha') != current.get('sha'):
                   raise SystemExit('inherited readiness source identity changed after accepted readiness')
 
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f"canonical_sha={authority['canonical_sha']}\n")
+              handle.write(f"quality_run_id={authority['quality_run_id']}\n")
+              handle.write(f"execution_id={authority['execution_id']}\n")
+
           print('reconstruction execution hosted authority gate: accepted')
           print('first_exact_comment=true')
           print('accepted_readiness_inherited=true')
@@ -209,20 +219,1111 @@ jobs:
           echo 'reconstruction execution control plane validated; phone execution remains hard-blocked'
           exit 1
 
+  build:
+    name: Build exact non-secret Android ARM reconstruction runtime
+    needs: command-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      EXECUTION_ID: ${{ needs.command-gate.outputs.execution_id }}
+    steps:
+      - name: Check out exact canonical public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ env.CANONICAL_SHA }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Resolve installed Android NDK
+        id: ndk
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          candidates = []
+          for key in ('ANDROID_NDK_HOME', 'ANDROID_NDK_ROOT'):
+              value = os.environ.get(key)
+              if value:
+                  candidates.append(Path(value))
+          sdk = os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
+          if sdk:
+              root = Path(sdk) / 'ndk'
+              if root.is_dir():
+                  candidates.extend(sorted((p for p in root.iterdir() if p.is_dir()), reverse=True))
+          for candidate in candidates:
+              clang = candidate / 'toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang'
+              ar = candidate / 'toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+              if clang.is_file() and ar.is_file():
+                  with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+                      handle.write(f'path={candidate}\n')
+                  raise SystemExit(0)
+          raise SystemExit('no compatible Android NDK found on hosted runner')
+          PY
+
+      - name: Build exact canonical runtime binaries
+        shell: bash
+        working-directory: canonical
+        run: |
+          set -euo pipefail
+          cargo run --locked -p operator-cli --bin operator-cli -- prepare-runtime-binaries --android-ndk '${{ steps.ndk.outputs.path }}'
+          file deploy/device-runtime/bin/runtime-supervisor deploy/device-runtime/bin/host-daemon deploy/device-runtime/bin/sing-box
+
+      - name: Stage bounded non-secret reconstruction bundle
+        shell: bash
+        working-directory: canonical
+        run: |
+          set -euo pipefail
+          mkdir -p ../reconstruction-bundle/bin
+          cp deploy/device-runtime/bin/runtime-supervisor ../reconstruction-bundle/bin/runtime-supervisor
+          cp deploy/device-runtime/bin/host-daemon ../reconstruction-bundle/bin/host-daemon
+          cp deploy/device-runtime/bin/sing-box ../reconstruction-bundle/bin/sing-box
+          chmod 0755 ../reconstruction-bundle/bin/*
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('../reconstruction-bundle')
+          files = {}
+          for path in sorted((root / 'bin').iterdir()):
+              files[path.name] = {
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'size': path.stat().st_size,
+              }
+          (root / 'build-evidence.json').write_text(json.dumps({
+              'format_version': 1,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'execution_id': os.environ['EXECUTION_ID'],
+              'contains_production_secrets': False,
+              'phone_access_performed': False,
+              'provider_access_performed': False,
+              'files': files,
+          }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+
+      - name: Upload exact non-secret reconstruction bundle
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-reconstruction-${{ env.EXECUTION_ID }}-${{ github.run_id }}
+          path: reconstruction-bundle
+          if-no-files-found: error
+          retention-days: 7
+
   reconstruct-phone:
     name: Future globally serialized local-runtime reconstruction (hard-blocked)
-    needs: command-gate
+    needs: [command-gate, build]
     if: ${{ false }}
     concurrency:
       group: production-phone-global-mutation
       cancel-in-progress: false
       queue: max
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 5
+    timeout-minutes: 45
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      EXECUTION_ID: ${{ needs.command-gate.outputs.execution_id }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+      MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+      MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+      MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+      MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
     steps:
-      - name: Refuse production-phone reconstruction until explicit authority
+      - name: Initialize bounded reconstruction transaction
         shell: bash
         run: |
           set -euo pipefail
-          echo 'phone reconstruction is machine-hard-blocked'
+          python3 - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          started = int(time.time())
+          mutation_deadline = started + 900
+          evidence = {
+              'format_version': 1,
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
+              'private_execution_sha': os.environ['GITHUB_SHA'],
+              'execution_id': os.environ['EXECUTION_ID'],
+              'phone_access_started': False,
+              'authority_revalidated_at_mutation_boundary': False,
+              'empty_prestate_accepted': False,
+              'boot_hook_baseline': 'unobserved',
+              'root_dir_preexisting': None,
+              'releases_dir_preexisting': None,
+              'logs_dir_preexisting': None,
+              'state_dir_preexisting': None,
+              'bounded_prestate_backup_complete': False,
+              'release_rendered_ephemerally': False,
+              'release_integrity_verified': False,
+              'release_staged': False,
+              'mutation_boundary_crossed': False,
+              'release_materialized': False,
+              'current_published': False,
+              'runtime_started': False,
+              'local_runtime_health_accepted': False,
+              'apk_unchanged': False,
+              'rollback_required': False,
+              'rollback_attempted': False,
+              'rollback_restored_empty_prestate': False,
+              'config_reconstruction_performed': False,
+              'config_mutation_performed': False,
+              'apk_mutation_performed': False,
+              'provider_access_performed': False,
+              'phone_reboot_performed': False,
+              'full_serving_probe_performed': False,
+              'raw_device_identifier_recorded': False,
+              'raw_manifest_recorded': False,
+              'rendered_config_recorded': False,
+              'runtime_secret_values_recorded': False,
+              'config_digest_recorded': False,
+              'credential_derived_identifiers_recorded': False,
+              'raw_process_identifier_recorded': False,
+              'accepted': False,
+          }
+          path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write(f'RECONSTRUCTION_MUTATION_DEADLINE_EPOCH={mutation_deadline}\n')
+              handle.write(f'RECONSTRUCTION_RELEASE_ID=recovery-{os.environ["CANONICAL_SHA"][:12]}-{os.environ["EXECUTION_ID"][:8]}\n')
+          print('bounded reconstruction initialized: first mutation must begin within 15 minutes')
+          PY
+
+      - name: Check out exact private execution state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+          persist-credentials: false
+
+      - name: Check out exact canonical public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ env.CANONICAL_SHA }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Download exact reconstruction bundle attempt 1
+        id: reconstruction-download-1
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-reconstruction-${{ env.EXECUTION_ID }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/reconstruction-bundle
+
+      - name: Reset reconstruction bundle before retry 2
+        if: steps.reconstruction-download-1.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/reconstruction-bundle"
+          sleep 1
+
+      - name: Download exact reconstruction bundle attempt 2
+        id: reconstruction-download-2
+        timeout-minutes: 2
+        if: steps.reconstruction-download-1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-reconstruction-${{ env.EXECUTION_ID }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/reconstruction-bundle
+
+      - name: Reset reconstruction bundle before retry 3
+        if: steps.reconstruction-download-1.outcome == 'failure' && steps.reconstruction-download-2.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/reconstruction-bundle"
+          sleep 2
+
+      - name: Download exact reconstruction bundle attempt 3
+        id: reconstruction-download-3
+        timeout-minutes: 2
+        if: steps.reconstruction-download-1.outcome == 'failure' && steps.reconstruction-download-2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-reconstruction-${{ env.EXECUTION_ID }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/reconstruction-bundle
+
+      - name: Require exact same-run bundle and future execution authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          private = Path('private-execution')
+          authority = json.loads((private / '.github/production/runtime-reconstruction-execution-authority.json').read_text(encoding='utf-8'))
+          binding = json.loads((private / '.github/production/runtime-reconstruction-binding.json').read_text(encoding='utf-8'))
+          manifest_path = private / '.github/production/runtime-reconstruction-manifest.json'
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          normalized = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+          enrolled = binding.get('manifest_fingerprint', {}).get('sha256')
+          if not isinstance(enrolled, str) or hashlib.sha256(normalized).hexdigest() != enrolled:
+              raise SystemExit('enrolled synthetic manifest identity differs')
+          if authority.get('execution_id') != os.environ['EXECUTION_ID']:
+              raise SystemExit('execution authority ID differs')
+          if authority.get('canonical_sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('execution canonical SHA differs')
+          for key in ('phone_execution_authority', 'runtime_secret_access_authority', 'config_render_authority'):
+              if authority.get(key) is not True:
+                  raise SystemExit(f'future reconstruction authority is not enabled: {key}')
+          for key in ('provider_access_authority', 'full_serving_authority', 'final_release_authority'):
+              if authority.get(key) is not False:
+                  raise SystemExit(f'forbidden reconstruction authority enabled: {key}')
+          if authority.get('recovery_health_scope') != 'local_runtime_only':
+              raise SystemExit('reconstruction health scope differs')
+          if authority.get('item20_transport_authority') != 'deferred_to_sealed_handoff':
+              raise SystemExit('Item20 transport must remain deferred')
+          if binding.get('enrollment_status') != 'enrolled':
+              raise SystemExit('reconstruction manifest is not enrolled')
+          if binding.get('phone_execution_authority') is not True:
+              raise SystemExit('binding phone execution authority is not enabled')
+          if binding.get('full_serving_authority') is not False or binding.get('provider_credentials_allowed') is not False:
+              raise SystemExit('binding widened into serving/provider authority')
+          if binding.get('recovery_health_scope') != 'local_runtime_only':
+              raise SystemExit('binding local runtime scope differs')
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'reconstruction-bundle'
+          evidence_path = root / 'build-evidence.json'
+          if not evidence_path.is_file():
+              raise SystemExit('same-run reconstruction build evidence is absent')
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          if not (
+              evidence.get('format_version') == 1
+              and evidence.get('canonical_sha') == os.environ['CANONICAL_SHA']
+              and evidence.get('quality_run_id') == int(os.environ['QUALITY_RUN_ID'])
+              and evidence.get('private_execution_sha') == os.environ['GITHUB_SHA']
+              and evidence.get('execution_id') == os.environ['EXECUTION_ID']
+              and evidence.get('contains_production_secrets') is False
+          ):
+              raise SystemExit('same-run reconstruction bundle authority differs')
+          expected = {'runtime-supervisor', 'host-daemon', 'sing-box'}
+          if set(evidence.get('files', {})) != expected:
+              raise SystemExit('same-run reconstruction binary set differs')
+          for name in sorted(expected):
+              path = root / 'bin' / name
+              if not path.is_file() or path.stat().st_size <= 0:
+                  raise SystemExit('same-run reconstruction runtime binary missing')
+              if hashlib.sha256(path.read_bytes()).hexdigest() != evidence['files'][name]['sha256']:
+                  raise SystemExit('same-run reconstruction runtime binary digest differs')
+
+          for name in (
+              'MOBILE_PROXY_ADMIN_TOKEN',
+              'MOBILE_PROXY_DEVICE_TOKEN',
+              'MOBILE_PROXY_UI_TOKEN',
+              'MOBILE_PROXY_RELAY_USER',
+              'MOBILE_PROXY_RELAY_PASSWORD',
+              'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64',
+          ):
+              value = os.environ.get(name, '')
+              if not value or len(value) > 4096:
+                  raise SystemExit('required bounded runtime secret is unavailable')
+          if not os.environ.get('ANDROID_PRODUCTION_SERIAL', ''):
+              raise SystemExit('registered production device selector is unavailable')
+          print('same-run source bundle, enrolled manifest, and future reconstruction authority accepted')
+          PY
+
+      - name: Render and verify complete source-bound release ephemerally
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "${RUNNER_TEMP}/reconstruction-bundle/bin/runtime-supervisor" canonical/deploy/device-runtime/bin/runtime-supervisor
+          cp "${RUNNER_TEMP}/reconstruction-bundle/bin/host-daemon" canonical/deploy/device-runtime/bin/host-daemon
+          cp "${RUNNER_TEMP}/reconstruction-bundle/bin/sing-box" canonical/deploy/device-runtime/bin/sing-box
+          chmod 0755 canonical/deploy/device-runtime/bin/runtime-supervisor canonical/deploy/device-runtime/bin/host-daemon canonical/deploy/device-runtime/bin/sing-box
+          (
+            cd canonical
+            cargo run --locked -p operator-cli --bin operator-cli -- package-device-release \
+              --manifest-path "${GITHUB_WORKSPACE}/private-execution/.github/production/runtime-reconstruction-manifest.json" \
+              --release-id "${RECONSTRUCTION_RELEASE_ID}" \
+              --output-dir "${RUNNER_TEMP}/device-releases" \
+              --tunnel-owner first_party_reverse_tunnel
+            cargo run --locked -p operator-cli --bin operator-cli -- verify-release-integrity \
+              --root "${RUNNER_TEMP}/device-releases/${RECONSTRUCTION_RELEASE_ID}" >/dev/null
+          )
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          release = Path(os.environ['RUNNER_TEMP']) / 'device-releases' / os.environ['RECONSTRUCTION_RELEASE_ID']
+          for rel in (
+              'service.sh', 'module.prop', 'integrity.json', 'release-metadata.json',
+              'bin/runtime-supervisor', 'bin/host-daemon', 'bin/sing-box', 'bin/curl',
+              'config/host-daemon.json', 'config/sing-box.json',
+          ):
+              path = release / rel
+              if not path.is_file() or path.stat().st_size <= 0:
+                  raise SystemExit('rendered reconstruction release is incomplete')
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          evidence['release_rendered_ephemerally'] = True
+          evidence['release_integrity_verified'] = True
+          evidence['config_reconstruction_performed'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('complete source-bound release rendered and integrity-verified ephemerally; config bytes not published')
+          PY
+
+      - name: Mark conservative phone-access boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(path.read_text(encoding='utf-8'))
+          if evidence.get('release_integrity_verified') is not True:
+              raise SystemExit('phone access refused before complete local release verification')
+          evidence['phone_access_started'] = True
+          path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('phone access boundary marked')
+          PY
+
+      - name: Registered-device admission and exact empty-prestate proof
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, os, re, subprocess
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          canonical = Path('canonical')
+          spec = importlib.util.spec_from_file_location('preflight', canonical / 'scripts/run_private_phone_preflight.py')
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+          preflight.require_canonical_sha(os.environ['CANONICAL_SHA'])
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          package = subprocess.run(
+              ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
+              check=False, capture_output=True, text=True, timeout=60,
+          )
+          codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
+          names = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
+          if package.returncode != 0 or codes != ['2'] or names != ['1.1.0']:
+              raise SystemExit('installed APK baseline differs before reconstruction')
+
+          shell = r'''
+          set -eu
+          ROOT=/data/adb/mobile-proxy-node
+          BOOT=/data/adb/service.d/99-mobile-proxy-runtime.sh
+          ROUTEFIX=/data/adb/service.d/99-mobile-proxy-routefix.sh
+          [ ! -e "$ROOT/current" ] && [ ! -L "$ROOT/current" ]
+          release_count=0
+          if [ -d "$ROOT/releases" ]; then
+            for item in "$ROOT"/releases/*; do
+              [ -e "$item" ] || [ -L "$item" ] || continue
+              release_count=$((release_count + 1))
+            done
+          fi
+          [ "$release_count" -eq 0 ]
+          if [ -d "$ROOT" ]; then
+            for item in "$ROOT"/*; do
+              [ -e "$item" ] || [ -L "$item" ] || continue
+              name="${item##*/}"
+              case "$name" in releases|logs|state) ;;
+                *) exit 31 ;;
+              esac
+            done
+          fi
+          [ ! -e "$ROUTEFIX" ] && [ ! -L "$ROUTEFIX" ]
+          boot=absent
+          if [ -f "$BOOT" ] && [ ! -L "$BOOT" ]; then boot=present; fi
+          if [ -e "$BOOT" ] && [ "$boot" != present ]; then exit 32; fi
+          for proc in /proc/[0-9]*; do
+            [ -r "$proc/cmdline" ] || continue
+            cmd="$(tr '\000' ' ' < "$proc/cmdline")"
+            exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+            case "$exe" in "$ROOT"/*) exit 33 ;; esac
+            case "$cmd" in *"$ROOT"*|*"/data/local/tmp/mobile-proxy-logs/runtime-watchdog.sh"*) exit 34 ;; esac
+          done
+          printf 'EMPTY_PRESTATE|%s\n' "$boot"
+          '''
+          result = subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-c',shell],
+              check=False, capture_output=True, text=True, timeout=60,
+          )
+          if result.returncode != 0 or result.stdout.strip() not in ('EMPTY_PRESTATE|absent','EMPTY_PRESTATE|present'):
+              raise SystemExit('exact canonical empty prestate is not admissible')
+
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          evidence['empty_prestate_accepted'] = True
+          evidence['boot_hook_baseline'] = result.stdout.strip().split('|',1)[1]
+          evidence['apk_unchanged'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('registered device and exact empty canonical prestate accepted')
+          PY
+
+      - name: Stage and byte-verify complete release before mutation
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, posixpath, subprocess
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          release = Path(os.environ['RUNNER_TEMP']) / 'device-releases' / os.environ['RECONSTRUCTION_RELEASE_ID']
+          stage = f"/data/local/tmp/mobile-proxy-reconstruct-{os.environ['EXECUTION_ID']}"
+          subprocess.run(['adb','-s',serial,'shell','rm','-rf',stage], check=True, timeout=30)
+          subprocess.run(['adb','-s',serial,'shell','mkdir','-p',stage], check=True, timeout=30)
+          subprocess.run(['adb','-s',serial,'push',str(release) + '/.',stage + '/'], check=True, stdout=subprocess.DEVNULL, timeout=180)
+
+          local = {}
+          for path in sorted(p for p in release.rglob('*') if p.is_file()):
+              rel = path.relative_to(release).as_posix()
+              local[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+          if not local:
+              raise SystemExit('local reconstruction release file inventory is empty')
+          for rel, digest in local.items():
+              remote = subprocess.run(
+                  ['adb','-s',serial,'shell','sha256sum',posixpath.join(stage, rel)],
+                  check=True, capture_output=True, text=True, timeout=30,
+              ).stdout.split()[0]
+              if remote != digest:
+                  raise SystemExit('staged reconstruction release bytes differ')
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          evidence['release_staged'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('complete reconstruction release staged and byte-verified before mutation')
+          PY
+
+      - name: Revalidate exact authority at mutation boundary
+        timeout-minutes: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          from pathlib import Path
+
+          deadline = int(os.environ['RECONSTRUCTION_MUTATION_DEADLINE_EPOCH'])
+          if int(time.time()) > deadline:
+              raise SystemExit('reconstruction mutation refused: rollback reserve would be violated')
+          private = Path('private-execution')
+          authority = json.loads((private / '.github/production/runtime-reconstruction-execution-authority.json').read_text(encoding='utf-8'))
+          token = os.environ.get('GH_TOKEN', '')
+          headers = {
+              'Accept':'application/vnd.github+json',
+              'Authorization':f'Bearer {token}',
+              'User-Agent':'mobile-proxy-production-reconstruction-boundary',
+              'X-GitHub-Api-Version':'2022-11-28',
+          }
+          public_headers = {k:v for k,v in headers.items() if k != 'Authorization'}
+
+          def get_json(url, *, private_request=True):
+              last = None
+              for attempt in range(3):
+                  if int(time.time()) > deadline:
+                      raise SystemExit('reconstruction authority retry exceeded mutation admission deadline')
+                  request = urllib.request.Request(url, headers=headers if private_request else public_headers)
+                  try:
+                      with urllib.request.urlopen(request, timeout=15) as response:
+                          return json.load(response)
+                  except urllib.error.HTTPError as error:
+                      if error.code not in (429,500,502,503,504):
+                          raise
+                      last = error
+                  except (urllib.error.URLError, TimeoutError) as error:
+                      last = error
+                  if attempt < 2:
+                      if int(time.time()) + attempt + 1 > deadline:
+                          raise SystemExit('reconstruction authority backoff would exceed mutation admission deadline')
+                      time.sleep(attempt + 1)
+              raise SystemExit('reconstruction authority read failed after bounded retries') from last
+
+          repository = os.environ['GITHUB_REPOSITORY']
+          private_sha = os.environ['GITHUB_SHA']
+          if get_json(f'https://api.github.com/repos/{repository}/commits/main').get('sha') != private_sha:
+              raise SystemExit('private main drifted before reconstruction mutation')
+          if get_json('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main', private_request=False).get('sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('public main drifted before reconstruction mutation')
+          quality = get_json(
+              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs/{os.environ['QUALITY_RUN_ID']}",
+              private_request=False,
+          )
+          if not (
+              quality.get('name') == 'Quality'
+              and quality.get('event') == 'push'
+              and quality.get('head_branch') == 'main'
+              and quality.get('head_sha') == os.environ['CANONICAL_SHA']
+              and quality.get('status') == 'completed'
+              and quality.get('conclusion') == 'success'
+          ):
+              raise SystemExit('Quality authority drifted before reconstruction mutation')
+
+          for key in ('phone_execution_authority','runtime_secret_access_authority','config_render_authority'):
+              if authority.get(key) is not True:
+                  raise SystemExit(f'execution authority disabled before mutation: {key}')
+          for key in ('provider_access_authority','full_serving_authority','final_release_authority'):
+              if authority.get(key) is not False:
+                  raise SystemExit(f'forbidden authority enabled before mutation: {key}')
+          readiness = authority['accepted_readiness']
+          for run_id, expected_name, expected_event in (
+              (readiness['transport_run_id'], 'Runtime reconstruction readiness transport', 'issue_comment'),
+              (readiness['readiness_run_id'], 'Runtime reconstruction readiness', 'workflow_dispatch'),
+          ):
+              run = get_json(f'https://api.github.com/repos/{repository}/actions/runs/{run_id}')
+              if not (
+                  run.get('name') == expected_name
+                  and run.get('event') == expected_event
+                  and run.get('head_sha') == readiness['private_sha']
+                  and run.get('status') == 'completed'
+                  and run.get('conclusion') == 'success'
+              ):
+                  raise SystemExit('accepted inherited readiness drifted before mutation')
+
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          if evidence.get('empty_prestate_accepted') is not True or evidence.get('release_staged') is not True:
+              raise SystemExit('mutation boundary refused without admitted empty prestate and complete staged release')
+          evidence['authority_revalidated_at_mutation_boundary'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('exact public/private/readiness authority revalidated immediately before mutation')
+          PY
+
+      - name: Back up bounded mutable prestate before managed-tree mutation
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          exec_id = os.environ['EXECUTION_ID']
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          if evidence.get('empty_prestate_accepted') is not True:
+              raise SystemExit('prestate backup refused without admitted empty canonical state')
+
+          script = r'''
+          set -eu
+          ROOT=/data/adb/mobile-proxy-node
+          BOOT=/data/adb/service.d/99-mobile-proxy-runtime.sh
+          BACKUP="/data/local/tmp/mobile-proxy-reconstruct-backup-$1"
+          rm -rf "$BACKUP"
+          mkdir -p "$BACKUP"
+          root=false; [ -d "$ROOT" ] && root=true
+          releases=false; [ -d "$ROOT/releases" ] && releases=true
+          logs=false; [ -d "$ROOT/logs" ] && logs=true
+          state=false; [ -d "$ROOT/state" ] && state=true
+          for name in releases logs state; do
+            path="$ROOT/$name"
+            if [ -e "$path" ] || [ -L "$path" ]; then
+              [ -d "$path" ] && [ ! -L "$path" ] || exit 41
+            fi
+          done
+          total_kb=0
+          for name in logs state; do
+            path="$ROOT/$name"
+            if [ -d "$path" ]; then
+              kb="$(du -sk "$path" 2>/dev/null | awk '{print $1}')"
+              case "$kb" in ''|*[!0-9]*) exit 42 ;; esac
+              total_kb=$((total_kb + kb))
+            fi
+          done
+          [ "$total_kb" -le 32768 ] || exit 43
+          [ "$logs" = false ] || cp -pR "$ROOT/logs" "$BACKUP/logs"
+          [ "$state" = false ] || cp -pR "$ROOT/state" "$BACKUP/state"
+          boot=absent
+          if [ -f "$BOOT" ] && [ ! -L "$BOOT" ]; then
+            cp -p "$BOOT" "$BACKUP/boot-hook"
+            boot=present
+          else
+            [ ! -e "$BOOT" ] && [ ! -L "$BOOT" ] || exit 44
+          fi
+          printf 'BASELINE|%s|%s|%s|%s|%s\n' "$root" "$releases" "$logs" "$state" "$boot"
+          '''
+          result = subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-s','--',exec_id],
+              input=script, text=True, capture_output=True, timeout=90,
+          )
+          if result.returncode != 0:
+              raise SystemExit('bounded mutable prestate backup failed')
+          parts = result.stdout.strip().split('|')
+          if len(parts) != 6 or parts[0] != 'BASELINE':
+              raise SystemExit('bounded mutable prestate classification is invalid')
+          bools = {'true': True, 'false': False}
+          try:
+              evidence['root_dir_preexisting'] = bools[parts[1]]
+              evidence['releases_dir_preexisting'] = bools[parts[2]]
+              evidence['logs_dir_preexisting'] = bools[parts[3]]
+              evidence['state_dir_preexisting'] = bools[parts[4]]
+          except KeyError as error:
+              raise SystemExit('bounded mutable prestate booleans are invalid') from error
+          if parts[5] != evidence.get('boot_hook_baseline'):
+              raise SystemExit('boot hook baseline changed between admission and backup')
+          evidence['bounded_prestate_backup_complete'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('bounded logs/state/boot prestate backed up outside managed root')
+          PY
+
+      - name: Materialize exactly one unpublished canonical release
+        id: mutate
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, time
+          from pathlib import Path
+
+          if int(time.time()) > int(os.environ['RECONSTRUCTION_MUTATION_DEADLINE_EPOCH']):
+              raise SystemExit('reconstruction first managed-tree mutation missed reserved rollback deadline')
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          release_id = os.environ['RECONSTRUCTION_RELEASE_ID']
+          stage = f"/data/local/tmp/mobile-proxy-reconstruct-{os.environ['EXECUTION_ID']}"
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          if not (
+              evidence.get('authority_revalidated_at_mutation_boundary') is True
+              and evidence.get('bounded_prestate_backup_complete') is True
+              and evidence.get('release_staged') is True
+          ):
+              raise SystemExit('managed-tree mutation refused without full admission/backup/staging proof')
+
+          evidence['mutation_boundary_crossed'] = True
+          evidence['rollback_required'] = True
+          evidence['config_mutation_performed'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+          script = r'''
+          set -eu
+          umask 077
+          ROOT=/data/adb/mobile-proxy-node
+          REL="$1"
+          STAGE="$2"
+          TARGET="$ROOT/releases/$REL"
+          [ ! -e "$ROOT/current" ] && [ ! -L "$ROOT/current" ]
+          count=0
+          if [ -d "$ROOT/releases" ]; then
+            for item in "$ROOT"/releases/*; do
+              [ -e "$item" ] || [ -L "$item" ] || continue
+              count=$((count + 1))
+            done
+          fi
+          [ "$count" -eq 0 ]
+          [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ]
+          mkdir -p "$ROOT/releases"
+          mkdir "$TARGET"
+          cp -R "$STAGE/." "$TARGET/"
+          find "$TARGET" -type d -exec chmod 0700 {} +
+          find "$TARGET" -type f -exec chmod 0600 {} +
+          chmod 0700 "$TARGET/service.sh" "$TARGET/bin/runtime-supervisor" "$TARGET/bin/host-daemon" "$TARGET/bin/sing-box" "$TARGET/bin/curl"
+          '''
+          result = subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-s','--',release_id,stage],
+              input=script, text=True, capture_output=True, timeout=180,
+          )
+          if result.returncode != 0:
+              raise SystemExit('bounded canonical release materialization failed; rollback required')
+          evidence['release_materialized'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('one canonical release materialized but current remains unpublished')
+          PY
+
+      - name: Byte-verify complete materialized release before current publication
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, posixpath, subprocess
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          release_id = os.environ['RECONSTRUCTION_RELEASE_ID']
+          target = f'/data/adb/mobile-proxy-node/releases/{release_id}'
+          release = Path(os.environ['RUNNER_TEMP']) / 'device-releases' / release_id
+          local = {}
+          for path in sorted(p for p in release.rglob('*') if p.is_file()):
+              rel = path.relative_to(release).as_posix()
+              local[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+          if not local:
+              raise SystemExit('materialized release verification inventory is empty')
+          for rel, digest in local.items():
+              remote = subprocess.run(
+                  ['adb','-s',serial,'shell','sha256sum',posixpath.join(target, rel)],
+                  check=True, capture_output=True, text=True, timeout=30,
+              ).stdout.split()[0]
+              if remote != digest:
+                  raise SystemExit('materialized release byte verification failed before current publication')
+          print('complete materialized release byte-verified before current publication')
+          PY
+
+      - name: Atomically publish current, install bounded boot hook, and start exact release
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          release_id = os.environ['RECONSTRUCTION_RELEASE_ID']
+          exec_id = os.environ['EXECUTION_ID']
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          if evidence.get('release_materialized') is not True:
+              raise SystemExit('current publication refused before materialized release proof')
+
+          script = r'''
+          set -eu
+          umask 077
+          ROOT=/data/adb/mobile-proxy-node
+          REL="$1"
+          EXEC="$2"
+          TARGET="$ROOT/releases/$REL"
+          CURRENT_TMP="$ROOT/.current-${EXEC}"
+          BOOT=/data/adb/service.d/99-mobile-proxy-runtime.sh
+          [ -d "$TARGET" ]
+          [ ! -e "$ROOT/current" ] && [ ! -L "$ROOT/current" ]
+          rm -f "$CURRENT_TMP"
+          ln -s "$TARGET" "$CURRENT_TMP"
+          mv -f "$CURRENT_TMP" "$ROOT/current"
+          cat > "$BOOT" <<'MOBILE_PROXY_BOOT'
+          #!/system/bin/sh
+          set -eu
+          umask 077
+          ROOT='/data/adb/mobile-proxy-node'
+          LOG_DIR='/data/local/tmp/mobile-proxy-logs'
+          BOOT_LOG="$LOG_DIR/boot-service.log"
+          mkdir -p "$LOG_DIR"
+          chmod 0700 "$LOG_DIR"
+          i=0
+          while [ "$i" -lt 30 ]; do
+            if [ -x "$ROOT/current/service.sh" ]; then
+              sh "$ROOT/current/service.sh" >> "$BOOT_LOG" 2>&1
+              exit "$?"
+            fi
+            i=$((i + 1))
+            sleep 1
+          done
           exit 1
+          MOBILE_PROXY_BOOT
+          chmod 0700 "$BOOT"
+          sh "$ROOT/current/service.sh"
+          '''
+          result = subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-s','--',release_id,exec_id],
+              input=script, text=True, capture_output=True, timeout=150,
+          )
+          evidence['current_published'] = True
+          if result.returncode != 0:
+              evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+              raise SystemExit('current publication/runtime start failed; rollback required')
+          evidence['runtime_started'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('current atomically published; boot hook installed; exact release start invoked')
+          PY
+
+      - name: Prove source-bound release bytes and local-runtime-only health
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess, time
+          from pathlib import Path
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          release_id = os.environ['RECONSTRUCTION_RELEASE_ID']
+          target = f'/data/adb/mobile-proxy-node/releases/{release_id}'
+          release = Path(os.environ['RUNNER_TEMP']) / 'device-releases' / release_id
+
+          for name in ('runtime-supervisor','host-daemon','sing-box'):
+              local = hashlib.sha256((release / 'bin' / name).read_bytes()).hexdigest()
+              remote = subprocess.run(
+                  ['adb','-s',serial,'shell','sha256sum',f'{target}/bin/{name}'],
+                  check=True, capture_output=True, text=True, timeout=30,
+              ).stdout.split()[0]
+              if remote != local:
+                  raise SystemExit('committed source-bound runtime binary digest differs')
+
+          current = subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-c','readlink /data/adb/mobile-proxy-node/current'],
+              check=True, capture_output=True, text=True, timeout=30,
+          ).stdout.strip()
+          if current != target:
+              raise SystemExit('canonical current does not point to transaction release')
+
+          def root_ok(shell):
+              result = subprocess.run(
+                  ['adb','-s',serial,'shell','su','0','sh','-c',shell],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20,
+              )
+              return result.returncode == 0
+
+          supervisor_shell = f'''
+          count=0
+          for proc in /proc/[0-9]*; do
+            [ -r "$proc/cmdline" ] || continue
+            [ -r "$proc/exe" ] || continue
+            cmd="$(tr '\000' ' ' < "$proc/cmdline")"
+            exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+            if [ "$exe" = "{target}/bin/runtime-supervisor" ]; then
+              case "$cmd" in *"--runtime-root /data/adb/mobile-proxy-node/current"*) count=$((count + 1)) ;; esac
+            fi
+          done
+          [ "$count" -eq 1 ]
+          '''
+          port_shell = '''
+          BB=""
+          for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do
+            [ -x "$candidate" ] && BB="$candidate" && break
+          done
+          [ -n "$BB" ] || exit 1
+          "$BB" nc -z -w 2 127.0.0.1 __PORT__ >/dev/null 2>&1
+          '''
+          deadline = time.monotonic() + 90
+          accepted = False
+          while time.monotonic() < deadline:
+              supervisor = root_ok(supervisor_shell)
+              egress = subprocess.run(
+                  ['adb','-s',serial,'shell','dumpsys','activity','services','com.example.mobileproxy'],
+                  capture_output=True, text=True, timeout=30,
+              )
+              egress_ok = egress.returncode == 0 and 'com.example.mobileproxy/.CellularEgressService' in egress.stdout
+              port_18080 = root_ok(port_shell.replace('__PORT__', '18080'))
+              port_1080 = root_ok(port_shell.replace('__PORT__', '1080'))
+              if supervisor and egress_ok and port_18080 and port_1080:
+                  accepted = True
+                  break
+              time.sleep(2)
+          if not accepted:
+              raise SystemExit('local-runtime-only reconstruction health did not converge')
+
+          package = subprocess.run(
+              ['adb','-s',serial,'shell','dumpsys','package','com.example.mobileproxy'],
+              check=False, capture_output=True, text=True, timeout=60,
+          )
+          codes = re.findall(r'^\s*versionCode=([0-9]+)\b', package.stdout, re.MULTILINE)
+          names = re.findall(r'^\s*versionName=([^\s]+)\s*$', package.stdout, re.MULTILINE)
+          if package.returncode != 0 or codes != ['2'] or names != ['1.1.0']:
+              raise SystemExit('installed APK baseline changed during reconstruction')
+
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          evidence['local_runtime_health_accepted'] = True
+          evidence['apk_unchanged'] = True
+          evidence['rollback_required'] = False
+          evidence['accepted'] = True
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('local-runtime-only reconstruction accepted: exact supervisor, app egress, 18080 and 1080 ready; no full-serving probe')
+          PY
+
+      - name: Roll back transaction-created canonical state on any failed acceptance
+        if: failure()
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          if not evidence_path.is_file():
+              raise SystemExit('reconstruction evidence missing; rollback state cannot be classified')
+          evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          if evidence.get('mutation_boundary_crossed') is not True:
+              print('rollback not required: mutation boundary was not crossed')
+              raise SystemExit(0)
+          for key in (
+              'root_dir_preexisting',
+              'releases_dir_preexisting',
+              'logs_dir_preexisting',
+              'state_dir_preexisting',
+          ):
+              if evidence.get(key) not in (True, False):
+                  raise SystemExit('rollback baseline directory classification is incomplete')
+
+          serial = os.environ['ANDROID_PRODUCTION_SERIAL']
+          release_id = os.environ['RECONSTRUCTION_RELEASE_ID']
+          exec_id = os.environ['EXECUTION_ID']
+          boot_baseline = evidence.get('boot_hook_baseline')
+          args = [
+              release_id,
+              exec_id,
+              str(boot_baseline),
+              'true' if evidence['root_dir_preexisting'] else 'false',
+              'true' if evidence['releases_dir_preexisting'] else 'false',
+              'true' if evidence['logs_dir_preexisting'] else 'false',
+              'true' if evidence['state_dir_preexisting'] else 'false',
+          ]
+          script = r'''
+          set -eu
+          ROOT=/data/adb/mobile-proxy-node
+          REL="$1"
+          EXEC="$2"
+          BOOT_BASE="$3"
+          ROOT_BASE="$4"
+          RELEASES_BASE="$5"
+          LOGS_BASE="$6"
+          STATE_BASE="$7"
+          TARGET="$ROOT/releases/$REL"
+          BOOT=/data/adb/service.d/99-mobile-proxy-runtime.sh
+          ROUTEFIX=/data/adb/service.d/99-mobile-proxy-routefix.sh
+          BACKUP="/data/local/tmp/mobile-proxy-reconstruct-backup-${EXEC}"
+
+          if [ -f "$ROOT/logs/runtime-watchdog.pid" ]; then
+            pid="$(cat "$ROOT/logs/runtime-watchdog.pid" 2>/dev/null || true)"
+            if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+              cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline")"
+              case "$cmd" in *"$ROOT/logs/runtime-watchdog.sh"*"$ROOT/current"*) kill -TERM "$pid" 2>/dev/null || true ;; esac
+            fi
+          fi
+          for proc in /proc/[0-9]*; do
+            [ -r "$proc/exe" ] || continue
+            exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+            case "$exe" in "$TARGET"/*) kill -TERM "${proc#/proc/}" 2>/dev/null || true ;; esac
+          done
+          sleep 1
+
+          if [ -L "$ROOT/current" ] && [ "$(readlink "$ROOT/current")" = "$TARGET" ]; then
+            rm -f "$ROOT/current"
+          elif [ -e "$ROOT/current" ] || [ -L "$ROOT/current" ]; then
+            exit 51
+          fi
+          rm -rf "$TARGET"
+
+          if [ "$BOOT_BASE" = present ]; then
+            [ -f "$BACKUP/boot-hook" ] || exit 52
+            cp -p "$BACKUP/boot-hook" "$BOOT"
+          elif [ "$BOOT_BASE" = absent ]; then
+            rm -f "$BOOT"
+          else
+            exit 53
+          fi
+
+          rm -rf "$ROOT/logs" "$ROOT/state"
+          if [ "$LOGS_BASE" = true ]; then
+            [ -d "$BACKUP/logs" ] || exit 54
+            cp -pR "$BACKUP/logs" "$ROOT/logs"
+          fi
+          if [ "$STATE_BASE" = true ]; then
+            [ -d "$BACKUP/state" ] || exit 55
+            cp -pR "$BACKUP/state" "$ROOT/state"
+          fi
+
+          count=0
+          if [ -d "$ROOT/releases" ]; then
+            for item in "$ROOT"/releases/*; do
+              [ -e "$item" ] || [ -L "$item" ] || continue
+              count=$((count + 1))
+            done
+          fi
+          [ "$count" -eq 0 ] || exit 56
+          if [ "$RELEASES_BASE" = false ] && [ -d "$ROOT/releases" ]; then
+            rmdir "$ROOT/releases"
+          fi
+          if [ "$ROOT_BASE" = false ] && [ -d "$ROOT" ]; then
+            rmdir "$ROOT"
+          fi
+
+          [ ! -e "$ROOT/current" ] && [ ! -L "$ROOT/current" ]
+          [ ! -e "$ROUTEFIX" ] && [ ! -L "$ROUTEFIX" ]
+          if [ "$ROOT_BASE" = true ]; then [ -d "$ROOT" ]; else [ ! -e "$ROOT" ]; fi
+          if [ "$RELEASES_BASE" = true ]; then [ -d "$ROOT/releases" ]; else [ ! -e "$ROOT/releases" ]; fi
+          if [ "$LOGS_BASE" = true ]; then [ -d "$ROOT/logs" ]; else [ ! -e "$ROOT/logs" ]; fi
+          if [ "$STATE_BASE" = true ]; then [ -d "$ROOT/state" ]; else [ ! -e "$ROOT/state" ]; fi
+          if [ "$BOOT_BASE" = present ]; then [ -f "$BOOT" ] && [ ! -L "$BOOT" ]; else [ ! -e "$BOOT" ] && [ ! -L "$BOOT" ]; fi
+
+          for proc in /proc/[0-9]*; do
+            [ -r "$proc/cmdline" ] || continue
+            cmd="$(tr '\000' ' ' < "$proc/cmdline")"
+            exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+            case "$exe" in "$ROOT"/*) exit 57 ;; esac
+            case "$cmd" in *"$ROOT"*|*"/data/local/tmp/mobile-proxy-logs/runtime-watchdog.sh"*) exit 58 ;; esac
+          done
+
+          rm -rf "$BACKUP" "/data/local/tmp/mobile-proxy-reconstruct-${EXEC}"
+          '''
+          evidence['rollback_attempted'] = True
+          result = subprocess.run(
+              ['adb','-s',serial,'shell','su','0','sh','-s','--',*args],
+              input=script, text=True, capture_output=True, timeout=420,
+          )
+          if result.returncode != 0:
+              evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+              raise SystemExit('reconstruction rollback could not prove exact restoration of admitted empty prestate')
+          evidence['rollback_restored_empty_prestate'] = True
+          evidence['rollback_required'] = False
+          evidence['accepted'] = False
+          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('reconstruction rollback restored admitted empty canonical prestate and bounded mutable directories')
+          PY
+
+      - name: Clean ephemeral rendered release and bounded phone staging
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set +e
+          python3 - <<'PY'
+          import json, os, shutil, subprocess
+          from pathlib import Path
+
+          shutil.rmtree(Path(os.environ['RUNNER_TEMP']) / 'device-releases', ignore_errors=True)
+          shutil.rmtree(Path(os.environ['RUNNER_TEMP']) / 'reconstruction-bundle', ignore_errors=True)
+          evidence_path = Path(os.environ['RUNNER_TEMP']) / 'runtime-reconstruction-evidence.json'
+          if not evidence_path.is_file():
+              raise SystemExit(0)
+          try:
+              evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+          except Exception:
+              raise SystemExit(0)
+          if evidence.get('phone_access_started') is not True:
+              raise SystemExit(0)
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          exec_id = os.environ.get('EXECUTION_ID', '')
+          if not serial or not exec_id:
+              raise SystemExit(0)
+          subprocess.run(
+              ['adb','-s',serial,'shell','rm','-rf',f'/data/local/tmp/mobile-proxy-reconstruct-{exec_id}'],
+              check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+          )
+          if evidence.get('accepted') is True or evidence.get('rollback_restored_empty_prestate') is True:
+              subprocess.run(
+                  ['adb','-s',serial,'shell','rm','-rf',f'/data/local/tmp/mobile-proxy-reconstruct-backup-{exec_id}'],
+                  check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+              )
+          PY
+          unset MOBILE_PROXY_ADMIN_TOKEN MOBILE_PROXY_DEVICE_TOKEN MOBILE_PROXY_UI_TOKEN
+          unset MOBILE_PROXY_RELAY_USER MOBILE_PROXY_RELAY_PASSWORD MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64
+          exit 0
+
+      - name: Upload bounded reconstruction and rollback evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-reconstruction-evidence-${{ env.EXECUTION_ID }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/runtime-reconstruction-evidence.json
+          if-no-files-found: error
+          retention-days: 30
