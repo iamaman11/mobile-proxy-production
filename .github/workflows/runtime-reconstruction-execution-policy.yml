@@ -168,6 +168,7 @@ jobs:
               'Require exact same-run bundle and armed execution authority',
               'Render and verify complete source-bound release ephemerally',
               'package-device-release', 'verify-release-integrity',
+              'integrity-manifest.json',
               '--tunnel-owner first_party_reverse_tunnel',
               'Registered-device admission and exact empty-prestate proof',
               'EMPTY_PRESTATE|', '[ "$release_count" -eq 0 ]',
@@ -207,6 +208,8 @@ jobs:
           for fragment in required_fragments:
               if fragment not in execution:
                   raise SystemExit(f'armed reconstruction workflow missing required transaction fragment: {fragment}')
+          if 'integrity.json' in execution:
+              raise SystemExit('armed reconstruction workflow uses stale integrity manifest filename')
           for forbidden in (
               'Refuse phone execution until a later tracker checkpoint',
               'phone execution remains hard-blocked',
