@@ -1,0 +1,439 @@
+name: Production Android filesystem quarantine observation
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  command-gate:
+    name: Validate quarantine observation command and prepare canonical source
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/phone-filesystem-quarantine-observe ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
+      transaction_ids_json: ${{ steps.command.outputs.transaction_ids_json }}
+    steps:
+      - name: Validate exact command, canonical main SHA, Quality, and transaction IDs
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          tokens = os.environ.get('COMMAND', '').strip().split()
+          if len(tokens) < 3 or tokens[0] != '/phone-filesystem-quarantine-observe':
+              raise SystemExit('invalid filesystem quarantine observation command')
+          requested_sha = tokens[1]
+          if re.fullmatch(r'[0-9a-f]{40}', requested_sha) is None:
+              raise SystemExit('invalid canonical SHA')
+          transaction_ids = tokens[2:]
+          transaction_pattern = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,95}')
+          if len(transaction_ids) > 8:
+              raise SystemExit('too many quarantine transaction IDs')
+          if len(set(transaction_ids)) != len(transaction_ids):
+              raise SystemExit('duplicate quarantine transaction ID')
+          if any(transaction_pattern.fullmatch(value) is None for value in transaction_ids):
+              raise SystemExit('invalid quarantine transaction ID')
+
+          def get_json(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      'Accept': 'application/vnd.github+json',
+                      'User-Agent': 'mobile-proxy-production-quarantine-observation',
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          canonical_main = get_json(
+              'https://api.github.com/repos/iamaman11/mobile-proxy/commits/main'
+          )['sha']
+          if requested_sha != canonical_main:
+              raise SystemExit('requested SHA is not current canonical main')
+
+          query = urllib.parse.urlencode(
+              {'head_sha': requested_sha, 'status': 'completed', 'per_page': 100}
+          )
+          runs = get_json(
+              'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?' + query
+          ).get('workflow_runs', [])
+          quality = [
+              run for run in runs
+              if run.get('name') == 'Quality'
+              and run.get('head_sha') == requested_sha
+              and run.get('conclusion') == 'success'
+          ]
+          if not quality:
+              raise SystemExit('exact canonical SHA has no successful Quality run')
+          quality.sort(
+              key=lambda run: (run.get('run_attempt', 0), run.get('id', 0)),
+              reverse=True,
+          )
+          transaction_ids_json = json.dumps(transaction_ids, separators=(',', ':'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={requested_sha}\n')
+              handle.write(f"quality_run_id={quality[0]['id']}\n")
+              handle.write(f'transaction_ids_json={transaction_ids_json}\n')
+          PY
+
+      - name: Checkout exact canonical source
+        uses: actions/checkout@v4
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ steps.command.outputs.canonical_sha }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Build immutable quarantine observation source bundle
+        shell: bash
+        env:
+          CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
+          TRANSACTION_IDS_JSON: ${{ steps.command.outputs.transaction_ids_json }}
+        run: |
+          set -euo pipefail
+          test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observe-source'
+          root.mkdir(parents=True, exist_ok=False)
+          scripts = (
+              'run_private_phone_preflight.py',
+              'run_android_capability_inventory.py',
+              'android_filesystem_comparator.py',
+              'run_android_filesystem_certification.py',
+              'run_android_filesystem_quarantine_recovery.py',
+          )
+          digests = {}
+          for name in scripts:
+              source = Path('canonical/scripts') / name
+              if not source.is_file():
+                  raise SystemExit(f'canonical source missing: {name}')
+              target = root / name
+              shutil.copyfile(source, target)
+              digests[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+          manifest = {
+              'format_version': 1,
+              'repository': 'iamaman11/mobile-proxy',
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
+              'transaction_ids': json.loads(os.environ['TRANSACTION_IDS_JSON']),
+              'scripts_sha256': digests,
+          }
+          (root / 'source-manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Upload immutable quarantine observation source
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observe-source-${{ steps.command.outputs.canonical_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observe-source
+          if-no-files-found: error
+          retention-days: 1
+
+  observe:
+    name: Registered production phone read-only filesystem quarantine observation
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      TRANSACTION_IDS_JSON: ${{ needs.command-gate.outputs.transaction_ids_json }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    outputs:
+      observation_validated: ${{ steps.result.outputs.observation_validated }}
+      observation_complete: ${{ steps.result.outputs.observation_complete }}
+      cleanup_admissible: ${{ steps.result.outputs.cleanup_admissible }}
+      all_transactions_absent: ${{ steps.result.outputs.all_transactions_absent }}
+      scratch_base_state: ${{ steps.result.outputs.scratch_base_state }}
+      scratch_base_writable: ${{ steps.result.outputs.scratch_base_writable }}
+      scratch_base_executable: ${{ steps.result.outputs.scratch_base_executable }}
+      managed_base_state: ${{ steps.result.outputs.managed_base_state }}
+      transaction_summary_json: ${{ steps.result.outputs.transaction_summary_json }}
+      artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
+    steps:
+      - name: Download immutable canonical quarantine observation logic
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observe-source-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observe-source
+
+      - name: Verify source bundle before device access
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observe-source'
+          manifest = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
+          if manifest.get('format_version') != 1:
+              raise SystemExit('unsupported source manifest')
+          if manifest.get('repository') != 'iamaman11/mobile-proxy':
+              raise SystemExit('source repository differs')
+          if manifest.get('canonical_sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('source canonical SHA differs')
+          if manifest.get('quality_run_id') != int(os.environ['QUALITY_RUN_ID']):
+              raise SystemExit('source Quality authority differs')
+          if manifest.get('transaction_ids') != json.loads(os.environ['TRANSACTION_IDS_JSON']):
+              raise SystemExit('source quarantine transaction set differs')
+          expected = manifest.get('scripts_sha256')
+          required = {
+              'run_private_phone_preflight.py',
+              'run_android_capability_inventory.py',
+              'android_filesystem_comparator.py',
+              'run_android_filesystem_certification.py',
+              'run_android_filesystem_quarantine_recovery.py',
+          }
+          if not isinstance(expected, dict) or set(expected) != required:
+              raise SystemExit('source script set differs')
+          for name, digest in expected.items():
+              path = root / name
+              if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f'source digest differs: {name}')
+          PY
+
+      - name: Run bounded read-only quarantine observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observe-source'
+          output = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observation.json'
+          command = [
+              'python3',
+              str(root / 'run_android_filesystem_quarantine_recovery.py'),
+              '--mode', 'observe',
+              '--canonical-sha', os.environ['CANONICAL_SHA'],
+          ]
+          for transaction_id in json.loads(os.environ['TRANSACTION_IDS_JSON']):
+              command += ['--transaction-id', transaction_id]
+          command += ['--output', str(output)]
+          subprocess.run(command, check=True)
+          PY
+
+      - name: Validate and export bounded quarantine observation
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observation.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          expected_ids = json.loads(os.environ['TRANSACTION_IDS_JSON'])
+          if evidence.get('format_version') != 1:
+              raise SystemExit('unsupported quarantine observation evidence')
+          if evidence.get('repository') != 'iamaman11/mobile-proxy':
+              raise SystemExit('quarantine observation repository differs')
+          if evidence.get('canonical_sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('quarantine observation canonical SHA differs')
+          if evidence.get('operation_id') != 'android.filesystem-quarantine-observation.v1':
+              raise SystemExit('quarantine observation operation differs')
+          if evidence.get('mode') != 'read_only_quarantine_observation':
+              raise SystemExit('quarantine observation mode differs')
+          for flag in (
+              'raw_directory_contents_recorded',
+              'raw_command_output_recorded',
+              'raw_device_identifier_recorded',
+              'phone_mutation_performed',
+          ):
+              if evidence.get(flag) is not False:
+                  raise SystemExit(f'quarantine observation unsafe flag differs: {flag}')
+
+          node_states = {'ABSENT', 'DIRECTORY', 'SYMLINK', 'OTHER', 'UNKNOWN'}
+          access_states = {'SUPPORTED', 'UNSUPPORTED', 'UNKNOWN'}
+          scratch_base = evidence.get('scratch_base')
+          managed_base = evidence.get('managed_base')
+          for label, base in (('scratch', scratch_base), ('managed', managed_base)):
+              if not isinstance(base, dict):
+                  raise SystemExit(f'{label} base observation is invalid')
+              if base.get('node_state') not in node_states:
+                  raise SystemExit(f'{label} base node state is invalid')
+              if base.get('writable') not in access_states or base.get('executable') not in access_states:
+                  raise SystemExit(f'{label} base access state is invalid')
+
+          transactions = evidence.get('transactions')
+          if not isinstance(transactions, list):
+              raise SystemExit('quarantine transaction observations are invalid')
+          if [item.get('transaction_id') for item in transactions] != expected_ids:
+              raise SystemExit('quarantine observation transaction IDs differ')
+          summary = []
+          all_absent = True
+          for item in transactions:
+              scratch = item.get('scratch')
+              managed = item.get('managed_root')
+              if not isinstance(scratch, dict) or not isinstance(managed, dict):
+                  raise SystemExit('quarantine transaction scope is invalid')
+              scratch_state = scratch.get('node_state')
+              managed_state = managed.get('node_state')
+              if scratch_state not in node_states or managed_state not in node_states:
+                  raise SystemExit('quarantine transaction node state is invalid')
+              all_absent = all_absent and scratch_state == 'ABSENT' and managed_state == 'ABSENT'
+              summary.append({
+                  'transaction_id': item['transaction_id'],
+                  'scratch': scratch_state,
+                  'managed_root': managed_state,
+              })
+
+          complete = evidence.get('observation_complete') is True
+          admissible = evidence.get('cleanup_admissible') is True
+          if admissible and not complete:
+              raise SystemExit('cleanup admissible cannot be true for incomplete observation')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write('observation_validated=true\n')
+              handle.write(f'observation_complete={str(complete).lower()}\n')
+              handle.write(f'cleanup_admissible={str(admissible).lower()}\n')
+              handle.write(f'all_transactions_absent={str(all_absent).lower()}\n')
+              handle.write(f"scratch_base_state={scratch_base['node_state']}\n")
+              handle.write(f"scratch_base_writable={scratch_base['writable']}\n")
+              handle.write(f"scratch_base_executable={scratch_base['executable']}\n")
+              handle.write(f"managed_base_state={managed_base['node_state']}\n")
+              handle.write('transaction_summary_json=' + json.dumps(summary, separators=(',', ':')) + '\n')
+          PY
+
+      - name: Upload bounded quarantine observation evidence
+        id: evidence-upload
+        if: success()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observation-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Export quarantine observation evidence persistence state
+        id: evidence-state
+        if: always()
+        shell: bash
+        env:
+          RESULT_OUTCOME: ${{ steps.result.outcome }}
+          EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+        run: |
+          set -euo pipefail
+          persisted=false
+          if [ "${RESULT_OUTCOME}" = success ] && [ "${EVIDENCE_UPLOAD_OUTCOME}" = success ]; then
+            persisted=true
+          fi
+          echo "artifact_persisted=${persisted}" >> "$GITHUB_OUTPUT"
+
+  report:
+    name: Publish bounded quarantine observation classification
+    if: always() && needs.command-gate.result != 'skipped'
+    needs: [command-gate, observe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment bounded quarantine observation result on control issue
+        uses: actions/github-script@v7
+        env:
+          CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+          OBSERVATION_JOB_RESULT: ${{ needs.observe.result }}
+          OBSERVATION_VALIDATED: ${{ needs.observe.outputs.observation_validated }}
+          OBSERVATION_COMPLETE: ${{ needs.observe.outputs.observation_complete }}
+          CLEANUP_ADMISSIBLE: ${{ needs.observe.outputs.cleanup_admissible }}
+          ALL_ABSENT: ${{ needs.observe.outputs.all_transactions_absent }}
+          SCRATCH_BASE_STATE: ${{ needs.observe.outputs.scratch_base_state }}
+          SCRATCH_BASE_WRITABLE: ${{ needs.observe.outputs.scratch_base_writable }}
+          SCRATCH_BASE_EXECUTABLE: ${{ needs.observe.outputs.scratch_base_executable }}
+          MANAGED_BASE_STATE: ${{ needs.observe.outputs.managed_base_state }}
+          TRANSACTION_SUMMARY_JSON: ${{ needs.observe.outputs.transaction_summary_json }}
+          ARTIFACT_PERSISTED: ${{ needs.observe.outputs.artifact_persisted }}
+        with:
+          script: |
+            const validated = process.env.OBSERVATION_VALIDATED === 'true';
+            const complete = process.env.OBSERVATION_COMPLETE === 'true';
+            const admissible = process.env.CLEANUP_ADMISSIBLE === 'true';
+            const allAbsent = process.env.ALL_ABSENT === 'true';
+            const persisted = process.env.ARTIFACT_PERSISTED === 'true';
+            let classification;
+            if (!validated) {
+              classification = 'FILESYSTEM_QUARANTINE_UNOBSERVED';
+            } else if (!persisted) {
+              classification = 'FILESYSTEM_QUARANTINE_OBSERVED_UNPERSISTED';
+            } else if (!complete) {
+              classification = 'FILESYSTEM_QUARANTINE_OBSERVATION_UNKNOWN';
+            } else if (allAbsent) {
+              classification = 'FILESYSTEM_QUARANTINE_ALREADY_ABSENT';
+            } else if (admissible) {
+              classification = 'FILESYSTEM_QUARANTINE_CLEANUP_ADMISSIBLE';
+            } else {
+              classification = 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED';
+            }
+            let transactionLines = ['- transaction_summary: `unobserved`'];
+            try {
+              const transactions = JSON.parse(process.env.TRANSACTION_SUMMARY_JSON || '[]');
+              transactionLines = transactions.map((item) =>
+                `- transaction \`${item.transaction_id}\`: scratch=\`${item.scratch}\`, managed_root=\`${item.managed_root}\``
+              );
+            } catch (_) {}
+            const body = [
+              '## CONTROL ANDROID FILESYSTEM QUARANTINE OBSERVATION RESULT',
+              '',
+              `- classification: **${classification}**`,
+              `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
+              `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
+              `- workflow_run_id: \`${context.runId}\``,
+              `- observation_job_result: \`${process.env.OBSERVATION_JOB_RESULT}\``,
+              `- observation_validated: \`${validated}\``,
+              `- observation_complete: \`${process.env.OBSERVATION_COMPLETE || 'unobserved'}\``,
+              `- cleanup_admissible: \`${process.env.CLEANUP_ADMISSIBLE || 'false'}\``,
+              `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
+              `- scratch_base_state: \`${process.env.SCRATCH_BASE_STATE || 'unobserved'}\``,
+              `- scratch_base_writable: \`${process.env.SCRATCH_BASE_WRITABLE || 'unobserved'}\``,
+              `- scratch_base_executable: \`${process.env.SCRATCH_BASE_EXECUTABLE || 'unobserved'}\``,
+              `- managed_base_state: \`${process.env.MANAGED_BASE_STATE || 'unobserved'}\``,
+              ...transactionLines,
+              '- raw_directory_contents_recorded: `false`',
+              '- raw_command_output_recorded: `false`',
+              '- raw_device_identifier_recorded: `false`',
+              '- phone_mutation_performed: `false`',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
