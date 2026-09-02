@@ -10,7 +10,7 @@
   "canonical_sha": "be619ebab9325e712cc6ef662689f78cc7131d5f",
   "command_issue": 1,
   "command_prefix": "/runtime-reconstruction-execute",
-  "config_render_authority": false,
+  "config_render_authority": true,
   "duplicate_rule": "first_exact_issue_comment_only",
   "empty_layout_policy": {
     "current_must_be_absent": true,
@@ -36,14 +36,14 @@
   "global_mutation_group": "production-phone-global-mutation",
   "item20_transport_authority": "deferred_to_sealed_handoff",
   "mode": "local_runtime_reconstruction_gate",
-  "phone_execution_authority": false,
+  "phone_execution_authority": true,
   "provider_access_authority": false,
   "quality_run_id": 33525893784,
   "readiness_workflow_path": ".github/workflows/runtime-reconstruction-readiness.yml",
   "reconstruction_binding_path": ".github/production/runtime-reconstruction-binding.json",
   "reconstruction_manifest_path": ".github/production/runtime-reconstruction-manifest.json",
   "recovery_health_scope": "local_runtime_only",
-  "runtime_secret_access_authority": false,
+  "runtime_secret_access_authority": true,
   "source_private_sha": "b58366e8f7695bd444540a211b30b6723a64bbfa",
-  "status": "hard_blocked"
+  "status": "armed"
 }

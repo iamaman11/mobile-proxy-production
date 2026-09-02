@@ -44,7 +44,7 @@
   "migration_tracker_issue": 162,
   "mode": "config_reconstruction_reauthorization",
   "network_target_class": "loopback_recovery_sentinel",
-  "phone_execution_authority": false,
+  "phone_execution_authority": true,
   "provider_credentials_allowed": false,
   "quality_required": true,
   "raw_device_identifier_in_binding": false,

@@ -59,18 +59,22 @@ jobs:
           command = os.environ.get('COMMAND', '').strip()
           if command != expected_command:
               raise SystemExit('reconstruction execution command differs from exact one-time authority')
-          if authority.get('status') != 'hard_blocked':
-              raise SystemExit('reconstruction execution skeleton must remain hard-blocked')
+          if authority.get('status') != 'armed':
+              raise SystemExit('reconstruction execution authority is not armed')
           for key in (
               'phone_execution_authority',
               'runtime_secret_access_authority',
               'config_render_authority',
+          ):
+              if authority.get(key) is not True:
+                  raise SystemExit(f'reconstruction execution authority not enabled: {key}')
+          for key in (
               'provider_access_authority',
               'full_serving_authority',
               'final_release_authority',
           ):
               if authority.get(key) is not False:
-                  raise SystemExit(f'reconstruction execution authority unexpectedly enabled: {key}')
+                  raise SystemExit(f'forbidden reconstruction execution authority enabled: {key}')
           if authority.get('recovery_health_scope') != 'local_runtime_only':
               raise SystemExit('reconstruction execution health scope drift')
           if authority.get('item20_transport_authority') != 'deferred_to_sealed_handoff':
@@ -205,19 +209,12 @@ jobs:
           print('first_exact_comment=true')
           print('accepted_readiness_inherited=true')
           print('source_identity_unchanged=true')
-          print('phone_execution_authority=false')
-          print('runtime_secret_access=false')
-          print('config_rendered=false')
+          print('phone_execution_authority=true')
+          print('runtime_secret_access=true')
+          print('config_render_authority=true')
           print('provider_access=false')
           print('phone_access=false')
           PY
-
-      - name: Refuse phone execution until a later tracker checkpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'reconstruction execution control plane validated; phone execution remains hard-blocked'
-          exit 1
 
   build:
     name: Build exact non-secret Android ARM reconstruction runtime
@@ -316,9 +313,9 @@ jobs:
           retention-days: 7
 
   reconstruct-phone:
-    name: Future globally serialized local-runtime reconstruction (hard-blocked)
+    name: Globally serialized local-runtime reconstruction
     needs: [command-gate, build]
-    if: ${{ false }}
+    if: ${{ needs.command-gate.result == 'success' && needs.build.result == 'success' }}
     concurrency:
       group: production-phone-global-mutation
       cancel-in-progress: false
@@ -456,7 +453,7 @@ jobs:
           name: runtime-reconstruction-${{ env.EXECUTION_ID }}-${{ github.run_id }}
           path: ${{ runner.temp }}/reconstruction-bundle
 
-      - name: Require exact same-run bundle and future execution authority
+      - name: Require exact same-run bundle and armed execution authority
         shell: bash
         run: |
           set -euo pipefail
@@ -479,7 +476,9 @@ jobs:
               raise SystemExit('execution canonical SHA differs')
           for key in ('phone_execution_authority', 'runtime_secret_access_authority', 'config_render_authority'):
               if authority.get(key) is not True:
-                  raise SystemExit(f'future reconstruction authority is not enabled: {key}')
+                  raise SystemExit(f'armed reconstruction authority is not enabled: {key}')
+          if authority.get('status') != 'armed':
+              raise SystemExit('reconstruction execution status is not armed')
           for key in ('provider_access_authority', 'full_serving_authority', 'final_release_authority'):
               if authority.get(key) is not False:
                   raise SystemExit(f'forbidden reconstruction authority enabled: {key}')
@@ -533,7 +532,7 @@ jobs:
                   raise SystemExit('required bounded runtime secret is unavailable')
           if not os.environ.get('ANDROID_PRODUCTION_SERIAL', ''):
               raise SystemExit('registered production device selector is unavailable')
-          print('same-run source bundle, enrolled manifest, and future reconstruction authority accepted')
+          print('same-run source bundle, enrolled manifest, and armed reconstruction authority accepted')
           PY
 
       - name: Render and verify complete source-bound release ephemerally
@@ -774,6 +773,8 @@ jobs:
           ):
               raise SystemExit('Quality authority drifted before reconstruction mutation')
 
+          if authority.get('status') != 'armed':
+              raise SystemExit('reconstruction authority disarmed before mutation')
           for key in ('phone_execution_authority','runtime_secret_access_authority','config_render_authority'):
               if authority.get(key) is not True:
                   raise SystemExit(f'execution authority disabled before mutation: {key}')

@@ -11,14 +11,14 @@ permissions:
 
 jobs:
   validate-runtime-reconstruction-execution-gate:
-    name: Validate hard-blocked complete local reconstruction transaction
+    name: Validate armed complete local reconstruction transaction
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check out private execution control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Enforce hard-blocked reconstruction execution contract
+      - name: Enforce armed reconstruction execution contract
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +62,7 @@ jobs:
               'format_version': 1,
               'authority_role': 'private_execution_only',
               'mode': 'local_runtime_reconstruction_gate',
-              'status': 'hard_blocked',
+              'status': 'armed',
               'canonical_repository': 'iamaman11/mobile-proxy',
               'canonical_sha': 'be619ebab9325e712cc6ef662689f78cc7131d5f',
               'quality_run_id': 33525893784,
@@ -70,9 +70,9 @@ jobs:
               'reconstruction_binding_path': '.github/production/runtime-reconstruction-binding.json',
               'reconstruction_manifest_path': '.github/production/runtime-reconstruction-manifest.json',
               'readiness_workflow_path': '.github/workflows/runtime-reconstruction-readiness.yml',
-              'phone_execution_authority': False,
-              'runtime_secret_access_authority': False,
-              'config_render_authority': False,
+              'phone_execution_authority': True,
+              'runtime_secret_access_authority': True,
+              'config_render_authority': True,
               'provider_access_authority': False,
               'full_serving_authority': False,
               'final_release_authority': False,
@@ -127,188 +127,154 @@ jobs:
               'canonical_sha': authority['canonical_sha'],
               'quality_required': True,
               'final_release_authority': False,
-              'phone_execution_authority': False,
+              'phone_execution_authority': True,
               'provider_credentials_allowed': False,
               'recovery_health_scope': 'local_runtime_only',
               'full_serving_authority': False,
               'item20_transport_authority': 'deferred_to_sealed_handoff',
           }.items():
               if binding.get(key) != value:
-                  raise SystemExit(f'reconstruction binding no longer satisfies hard-blocked execution contract: {key}')
+                  raise SystemExit(f'reconstruction binding no longer satisfies armed execution contract: {key}')
           if binding.get('enrollment_status') != 'enrolled':
               raise SystemExit('reconstruction execution requires enrolled source identity')
 
           execution = execution_path.read_text(encoding='utf-8')
-          hard_block = '    if: $' + '{{ false }}'
+          armed_if = '    if: $' + "{{ needs.command-gate.result == 'success' && needs.build.result == 'success' }}"
           required_fragments = (
               'name: Production phone local runtime reconstruction gate',
-              '  issue_comment:',
-              'types: [created]',
+              '  issue_comment:', 'types: [created]',
               'github.event.issue.number == 1',
               'github.event.comment.user.login == github.repository_owner',
               "startsWith(github.event.comment.body, '/runtime-reconstruction-execute ')",
+              "authority.get('status') != 'armed'",
               'first_exact_issue_comment_only',
               'comment_id != min(matching_comment_ids)',
               'duplicate reconstruction execution command refused before phone access',
               'accepted readiness transport run differs from exact authority',
               'accepted readiness child run differs from exact authority',
               'inherited readiness source identity changed after accepted readiness',
-              'Refuse phone execution until a later tracker checkpoint',
-              'reconstruction execution control plane validated; phone execution remains hard-blocked',
+              'phone_execution_authority=true',
+              'runtime_secret_access=true',
+              'config_render_authority=true',
               '  build:',
               'Build exact non-secret Android ARM reconstruction runtime',
-              'prepare-runtime-binaries',
-              'contains_production_secrets',
+              'prepare-runtime-binaries', 'contains_production_secrets',
               'Upload exact non-secret reconstruction bundle',
-              '  reconstruct-phone:',
-              hard_block,
+              '  reconstruct-phone:', armed_if,
               '      group: production-phone-global-mutation',
-              '      cancel-in-progress: false',
-              '      queue: max',
+              '      cancel-in-progress: false', '      queue: max',
               '    runs-on: [self-hosted, Linux, X64, android-production]',
               '    timeout-minutes: 45',
-              'Require exact same-run bundle and future execution authority',
-              "authority.get(key) is not True",
+              'Require exact same-run bundle and armed execution authority',
               'Render and verify complete source-bound release ephemerally',
-              'package-device-release',
-              'verify-release-integrity',
+              'package-device-release', 'verify-release-integrity',
               '--tunnel-owner first_party_reverse_tunnel',
               'Registered-device admission and exact empty-prestate proof',
-              'EMPTY_PRESTATE|',
-              '[ "$release_count" -eq 0 ]',
-              'releases|logs|state',
-              '99-mobile-proxy-runtime.sh',
+              'EMPTY_PRESTATE|', '[ "$release_count" -eq 0 ]',
+              'releases|logs|state', '99-mobile-proxy-runtime.sh',
               '99-mobile-proxy-routefix.sh',
               'Stage and byte-verify complete release before mutation',
               'Revalidate exact authority at mutation boundary',
+              'reconstruction authority disarmed before mutation',
               'private main drifted before reconstruction mutation',
               'public main drifted before reconstruction mutation',
               'accepted inherited readiness drifted before mutation',
               'Back up bounded mutable prestate before managed-tree mutation',
-              'total_kb',
-              '[ "$total_kb" -le 32768 ]',
-              'bounded_prestate_backup_complete',
+              '[ "$total_kb" -le 32768 ]', 'bounded_prestate_backup_complete',
               'Materialize exactly one unpublished canonical release',
               'first managed-tree mutation missed reserved rollback deadline',
               'Byte-verify complete materialized release before current publication',
               'Atomically publish current, install bounded boot hook, and start exact release',
               'mv -f "$CURRENT_TMP" "$ROOT/current"',
-              'config_reconstruction_performed',
-              'config_mutation_performed',
+              'config_reconstruction_performed', 'config_mutation_performed',
               'Prove source-bound release bytes and local-runtime-only health',
               'com.example.mobileproxy/.CellularEgressService',
-              "__PORT__', '18080'",
-              "__PORT__', '1080'",
-              'no full-serving probe',
+              "__PORT__', '18080'", "__PORT__', '1080'", 'no full-serving probe',
               'Roll back transaction-created canonical state on any failed acceptance',
-              'if: failure()',
-              'rollback_restored_empty_prestate',
-              'rm -rf "$TARGET"',
+              'if: failure()', 'rollback_restored_empty_prestate', 'rm -rf "$TARGET"',
               'mobile-proxy-reconstruct-backup-',
               'Clean ephemeral rendered release and bounded phone staging',
               'Upload bounded reconstruction and rollback evidence',
-              'timeout-minutes: 2',
               'runtime-reconstruction-evidence.json',
               "'raw_device_identifier_recorded': False",
-              "'raw_manifest_recorded': False",
-              "'rendered_config_recorded': False",
-              "'runtime_secret_values_recorded': False",
-              "'config_digest_recorded': False",
+              "'raw_manifest_recorded': False", "'rendered_config_recorded': False",
+              "'runtime_secret_values_recorded': False", "'config_digest_recorded': False",
               "'credential_derived_identifiers_recorded': False",
               "'raw_process_identifier_recorded': False",
-              "'provider_access_performed': False",
-              "'phone_reboot_performed': False",
+              "'provider_access_performed': False", "'phone_reboot_performed': False",
               "'full_serving_probe_performed': False",
           )
           for fragment in required_fragments:
               if fragment not in execution:
-                  raise SystemExit(f'reconstruction execution workflow missing required transaction fragment: {fragment}')
-
+                  raise SystemExit(f'armed reconstruction workflow missing required transaction fragment: {fragment}')
+          for forbidden in (
+              'Refuse phone execution until a later tracker checkpoint',
+              'phone execution remains hard-blocked',
+          ):
+              if forbidden in execution:
+                  raise SystemExit('armed reconstruction workflow still contains the prior hard-block refusal')
           if execution.count('group: production-phone-global-mutation') != 1:
-              raise SystemExit('reconstruction execution global mutation lock must appear exactly once')
+              raise SystemExit('armed reconstruction global mutation lock must appear exactly once')
           if execution.count('runs-on: [self-hosted, Linux, X64, android-production]') != 1:
-              raise SystemExit('reconstruction execution must contain exactly one phone mutation job')
-          if execution.count(hard_block) != 1:
-              raise SystemExit('reconstruction phone job hard block must appear exactly once')
+              raise SystemExit('armed reconstruction must contain exactly one phone mutation job')
+          if execution.count(armed_if) != 1:
+              raise SystemExit('armed phone job dependency gate must appear exactly once')
           phone_marker = '\n  reconstruct-phone:\n'
           if phone_marker not in execution:
-              raise SystemExit('reconstruction phone job boundary missing')
+              raise SystemExit('armed reconstruction phone job boundary missing')
           hosted, phone_job = execution.split(phone_marker, 1)
           for fragment in (
-              'secrets.',
-              'ANDROID_PRODUCTION_SERIAL',
-              'MOBILE_PROXY_ADMIN_TOKEN',
-              'MOBILE_PROXY_DEVICE_TOKEN',
-              'MOBILE_PROXY_UI_TOKEN',
-              'MOBILE_PROXY_RELAY_USER',
-              'MOBILE_PROXY_RELAY_PASSWORD',
-              'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64',
-              "['adb'",
-              ' adb ',
+              'secrets.', 'ANDROID_PRODUCTION_SERIAL', 'MOBILE_PROXY_ADMIN_TOKEN',
+              'MOBILE_PROXY_DEVICE_TOKEN', 'MOBILE_PROXY_UI_TOKEN',
+              'MOBILE_PROXY_RELAY_USER', 'MOBILE_PROXY_RELAY_PASSWORD',
+              'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64', "['adb'", ' adb ',
           ):
               if fragment in hosted:
-                  raise SystemExit(f'hosted reconstruction path contains protected phone/runtime behavior: {fragment}')
-
+                  raise SystemExit(f'hosted armed reconstruction path contains protected phone/runtime behavior: {fragment}')
           expected_secret_names = {
-              'ANDROID_PRODUCTION_SERIAL',
-              'MOBILE_PROXY_ADMIN_TOKEN',
-              'MOBILE_PROXY_DEVICE_TOKEN',
-              'MOBILE_PROXY_UI_TOKEN',
-              'MOBILE_PROXY_RELAY_USER',
-              'MOBILE_PROXY_RELAY_PASSWORD',
+              'ANDROID_PRODUCTION_SERIAL', 'MOBILE_PROXY_ADMIN_TOKEN',
+              'MOBILE_PROXY_DEVICE_TOKEN', 'MOBILE_PROXY_UI_TOKEN',
+              'MOBILE_PROXY_RELAY_USER', 'MOBILE_PROXY_RELAY_PASSWORD',
               'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64',
           }
           found_secret_names = set(re.findall(r'\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}', phone_job))
           if found_secret_names != expected_secret_names:
-              raise SystemExit('reconstruction phone job secret reference set drift')
+              raise SystemExit('armed reconstruction phone job secret reference set drift')
           for name in expected_secret_names:
               expected_ref = '$' + '{{ secrets.' + name + ' }}'
               if phone_job.count(expected_ref) != 1:
-                  raise SystemExit(f'reconstruction protected input must be injected exactly once: {name}')
-
+                  raise SystemExit(f'armed reconstruction protected input must be injected exactly once: {name}')
           for forbidden in (
-              'VULTR_',
-              'GOOGLE_APPLICATION_CREDENTIALS',
-              'gcloud ',
-              'terraform ',
-              'verify-device',
-              'proxy_smoke',
-              'pm install',
-              'pm uninstall',
-              "'install'",
-              "'uninstall'",
-              ' reboot',
-              "'reboot'",
-              '"reboot"',
-              'adb reboot',
+              'VULTR_', 'GOOGLE_APPLICATION_CREDENTIALS', 'gcloud ', 'terraform ',
+              'verify-device', 'proxy_smoke', 'pm install', 'pm uninstall',
+              "'install'", "'uninstall'", ' reboot', "'reboot'", '"reboot"', 'adb reboot',
           ):
               if forbidden in execution:
-                  raise SystemExit(f'reconstruction transaction contains forbidden provider/APK/reboot/full-serving behavior: {forbidden}')
-
+                  raise SystemExit(f'armed reconstruction contains forbidden provider/APK/reboot/full-serving behavior: {forbidden}')
           upload_paths = re.findall(
               r'(?ms)uses: actions/upload-artifact@[^\n]+\n\s+with:\n(?P<body>.*?)(?=\n\s+- name:|\Z)',
               execution,
           )
           if len(upload_paths) != 2:
-              raise SystemExit('reconstruction workflow must have exactly two bounded artifact uploads')
+              raise SystemExit('armed reconstruction must have exactly two bounded artifact uploads')
           if 'path: reconstruction-bundle' not in upload_paths[0]:
-              raise SystemExit('hosted build upload is not the exact non-secret bundle')
+              raise SystemExit('armed hosted build upload is not the exact non-secret bundle')
           expected_evidence_path = 'path: $' + '{{ runner.temp }}/runtime-reconstruction-evidence.json'
           if expected_evidence_path not in upload_paths[1]:
-              raise SystemExit('phone publication is not bounded evidence only')
+              raise SystemExit('armed phone publication is not bounded evidence only')
           if 'device-releases' in upload_paths[1] or 'config/' in upload_paths[1]:
               raise SystemExit('rendered release/config must never be published')
 
           print('runtime reconstruction execution gate policy: accepted')
-          print('status=hard_blocked')
+          print('status=armed')
           print('complete_transaction_materialized=true')
           print('accepted_readiness=first_authorized_pair')
           print('duplicate_rule=first_exact_issue_comment_only')
-          print('phone_execution_authority=false')
-          print('runtime_secret_access_authority=false')
-          print('config_render_authority=false')
+          print('phone_execution_authority=true')
+          print('runtime_secret_access_authority=true')
+          print('config_render_authority=true')
           print('provider_access=false')
           print('full_serving_authority=false')
           print('local_runtime_only=true')
-          print('phone_job_hard_blocked=true')
+          print('phone_job_armed=true')
           PY

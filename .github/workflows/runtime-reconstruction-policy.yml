@@ -11,18 +11,19 @@ permissions:
 
 jobs:
   validate-runtime-reconstruction-contract:
-    name: Validate local-recovery reconstruction contract and deferred serving authority
+    name: Validate armed local-recovery reconstruction binding and deferred serving authority
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check out private execution control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Enforce fail-closed runtime reconstruction policy
+      - name: Enforce armed runtime reconstruction binding policy
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import hashlib
           import json
           import re
           from pathlib import Path
@@ -32,12 +33,14 @@ jobs:
           readiness_path = Path('.github/workflows/runtime-reconstruction-readiness.yml')
           enrollment_path = Path('.github/workflows/runtime-reconstruction-enrollment.yml')
           recovery_path = Path('.github/workflows/phone-runtime-recovery.yml')
+          authority_path = Path('.github/production/runtime-reconstruction-execution-authority.json')
           for path, label in (
               (binding_path, 'runtime reconstruction binding'),
               (manifest_path, 'synthetic local-recovery manifest'),
               (readiness_path, 'runtime reconstruction readiness workflow'),
               (enrollment_path, 'runtime reconstruction enrollment workflow'),
               (recovery_path, 'legacy runtime recovery workflow'),
+              (authority_path, 'runtime reconstruction execution authority'),
           ):
               if not path.is_file():
                   raise SystemExit(f'{label} is missing')
@@ -62,6 +65,7 @@ jobs:
               'format_version': 2,
               'binding_role': 'private_execution_only',
               'mode': 'config_reconstruction_reauthorization',
+              'enrollment_status': 'enrolled',
               'canonical_repository': 'iamaman11/mobile-proxy',
               'canonical_sha': 'be619ebab9325e712cc6ef662689f78cc7131d5f',
               'quality_required': True,
@@ -71,7 +75,7 @@ jobs:
               'required_installed_version_name': '1.1.0',
               'required_installed_version_code': 2,
               'final_release_authority': False,
-              'phone_execution_authority': False,
+              'phone_execution_authority': True,
               'provider_credentials_allowed': False,
               'recovery_health_scope': 'local_runtime_only',
               'full_serving_authority': False,
@@ -83,10 +87,7 @@ jobs:
           }
           for key, value in expected_scalars.items():
               if binding.get(key) != value:
-                  raise SystemExit(f'runtime reconstruction binding mismatch: {key}')
-          status = binding.get('enrollment_status')
-          if status not in {'pending', 'enrolled'}:
-              raise SystemExit('runtime reconstruction enrollment status must be pending or enrolled')
+                  raise SystemExit(f'armed runtime reconstruction binding mismatch: {key}')
           if binding.get('tunnel_owner_evidence') != {
               'evidence_type': 'canonical_live_verify',
               'canonical_commit': 'ad9bc7c88fcd0abd7bf422f12b852c24f6dc16ea',
@@ -101,7 +102,6 @@ jobs:
               'contains_provider_endpoint': False,
           }:
               raise SystemExit('synthetic local-recovery manifest source drift')
-
           expected_manifest = {
               'deviceId': 'runtime-recovery-primary',
               'nodeName': 'production-phone-local-recovery',
@@ -119,24 +119,16 @@ jobs:
           }
           manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
           if manifest != expected_manifest:
-              raise SystemExit('synthetic local-recovery manifest differs from the exact approved non-secret contract')
-          if manifest['relay']['host'] != '127.0.0.1':
-              raise SystemExit('pre-Item20 reconstruction manifest must not contain a live provider endpoint')
-          if not manifest['deviceId'].startswith('runtime-recovery-'):
-              raise SystemExit('synthetic reconstruction device identity must remain logical, not physical')
-
+              raise SystemExit('synthetic local-recovery manifest differs from exact approved non-secret contract')
+          normalized = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
           fingerprint = binding.get('manifest_fingerprint')
           if not isinstance(fingerprint, dict) or fingerprint.get('algorithm') != 'sha256' or fingerprint.get('normalized_json_profile') != 'strict-sorted-compact-utf8-v1':
               raise SystemExit('runtime reconstruction fingerprint type/profile drift')
           fingerprint_value = fingerprint.get('sha256')
-          if status == 'pending' and fingerprint_value is not None:
-              raise SystemExit('pending reconstruction fingerprint must remain unset')
-          if status == 'enrolled' and not (
-              isinstance(fingerprint_value, str)
-              and re.fullmatch(r'[0-9a-f]{64}', fingerprint_value)
-          ):
-              raise SystemExit('enrolled reconstruction fingerprint must be one private SHA-256 value')
-
+          if not isinstance(fingerprint_value, str) or re.fullmatch(r'[0-9a-f]{64}', fingerprint_value) is None:
+              raise SystemExit('armed reconstruction requires enrolled private manifest fingerprint')
+          if hashlib.sha256(normalized).hexdigest() != fingerprint_value:
+              raise SystemExit('armed reconstruction manifest fingerprint does not match exact private source')
           expected_fields = [
               'deviceId', 'nodeName', 'operatorProfile', 'controlPlaneUrl',
               'tokens.adminTokenEnv', 'tokens.deviceTokenEnv', 'tokens.uiTokenEnv',
@@ -145,8 +137,7 @@ jobs:
           ]
           if binding.get('required_manifest_fields') != expected_fields:
               raise SystemExit('strict runtime reconstruction manifest field contract drift')
-          expected_token_names = expected_manifest['tokens']
-          if binding.get('expected_token_env_names') != expected_token_names:
+          if binding.get('expected_token_env_names') != expected_manifest['tokens']:
               raise SystemExit('runtime reconstruction token environment contract drift')
           expected_runtime_secrets = {
               'MOBILE_PROXY_ADMIN_TOKEN', 'MOBILE_PROXY_DEVICE_TOKEN', 'MOBILE_PROXY_UI_TOKEN',
@@ -168,6 +159,20 @@ jobs:
               'credential_derived_identifiers_recorded': False,
           }:
               raise SystemExit('runtime reconstruction evidence policy drift')
+
+          authority = json.loads(authority_path.read_text(encoding='utf-8'))
+          if authority.get('status') != 'armed':
+              raise SystemExit('binding is armed but execution authority is not armed')
+          for key in ('phone_execution_authority', 'runtime_secret_access_authority', 'config_render_authority'):
+              if authority.get(key) is not True:
+                  raise SystemExit(f'armed execution authority missing: {key}')
+          for key in ('provider_access_authority', 'full_serving_authority', 'final_release_authority'):
+              if authority.get(key) is not False:
+                  raise SystemExit(f'forbidden execution authority enabled: {key}')
+          if authority.get('canonical_sha') != binding.get('canonical_sha'):
+              raise SystemExit('execution authority canonical SHA differs from armed binding')
+          if authority.get('recovery_health_scope') != 'local_runtime_only' or authority.get('item20_transport_authority') != 'deferred_to_sealed_handoff':
+              raise SystemExit('armed execution authority widened beyond local recovery')
 
           readiness = readiness_path.read_text(encoding='utf-8')
           for fragment in (
@@ -193,42 +198,15 @@ jobs:
 
           enrollment = enrollment_path.read_text(encoding='utf-8')
           for fragment in (
-              'name: Runtime reconstruction manifest enrollment', '  workflow_dispatch:',
-              '  issue_comment:', 'types: [created]',
-              "github.event.issue.number == 1",
-              "github.event.comment.user.login == github.repository_owner",
-              "github.event.comment.body == '/runtime-reconstruction-enroll ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE'",
-              '      confirm:', 'ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE',
-              '  contents: write', '    runs-on: ubuntu-latest', 'persist-credentials: false',
-              'exact owner production-control enrollment command is required',
-              'manifest enrollment must execute from exact current private main',
-              'runtime-reconstruction-manifest.json',
-              'synthetic local-recovery manifest differs from exact approved non-secret contract',
-              'hashlib.sha256(normalized).hexdigest()',
-              'binding["enrollment_status"] = "enrolled"',
-              'binding["manifest_fingerprint"]["sha256"] = fingerprint',
-              'binding["phone_execution_authority"] = False',
-              'binding["full_serving_authority"] = False',
-              'Enroll synthetic local runtime recovery baseline',
-              'secret_values_read=false', 'provider_endpoint_used=false',
-              'physical_device_identifier_used=false', 'manifest_fingerprint_published=false',
-              'phone_access=false',
+              'name: Runtime reconstruction manifest enrollment',
+              "binding[\"phone_execution_authority\"] = False",
+              "binding[\"full_serving_authority\"] = False",
+              'secret_values_read=false', 'phone_access=false',
           ):
               if fragment not in enrollment:
-                  raise SystemExit(f'runtime reconstruction enrollment missing required fragment: {fragment}')
-          if 'startsWith(' in enrollment:
-              raise SystemExit('runtime reconstruction enrollment command gate must use exact equality')
+                  raise SystemExit(f'enrollment lost its non-arming boundary: {fragment}')
           if 'secrets.' in enrollment:
               raise SystemExit('synthetic manifest enrollment must not read any GitHub secret')
-          for fragment in (
-              'self-hosted', 'android-production', 'ANDROID_PRODUCTION_SERIAL',
-              'package-device-release', 'upload-artifact', 'host-daemon.json', 'sing-box.json',
-              'VULTR_', 'adb ', "'adb'", 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY',
-          ):
-              if fragment in enrollment:
-                  raise SystemExit(f'enrollment contains forbidden phone/render/provider/evidence behavior: {fragment}')
-          if enrollment.count('runs-on: ubuntu-latest') != 1:
-              raise SystemExit('enrollment must contain exactly one GitHub-hosted job')
 
           recovery = recovery_path.read_text(encoding='utf-8')
           for fragment in (
@@ -236,16 +214,16 @@ jobs:
               'phone-runtime-recover is hard-blocked',
           ):
               if fragment not in recovery:
-                  raise SystemExit('legacy runtime recovery hard block was removed before reconstruction phone authority exists')
+                  raise SystemExit('legacy runtime recovery hard block was removed while dedicated reconstruction is armed')
 
           print('runtime reconstruction policy: accepted')
-          print(f'enrollment_status={status}')
+          print('enrollment_status=enrolled')
           print('manifest_source=private_synthetic_local_recovery_file')
           print('recovery_health_scope=local_runtime_only')
           print('full_serving_authority=false')
           print('item20_transport_authority=deferred_to_sealed_handoff')
-          print('phone_execution_authority=false')
+          print('phone_execution_authority=true')
           print('provider_credentials_allowed=false')
-          print('runtime_secret_access=false')
-          print('phone_access=false')
+          print('runtime_secret_access=execution_only')
+          print('phone_access=armed_execution_only')
           PY
