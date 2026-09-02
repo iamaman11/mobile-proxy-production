@@ -178,11 +178,73 @@ jobs:
       transaction_summary_json: ${{ steps.result.outputs.transaction_summary_json }}
       artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
     steps:
-      - name: Download immutable canonical quarantine observation logic
+      - name: Download immutable canonical quarantine observation logic (attempt 1)
+        id: source-download-1
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: phone-filesystem-quarantine-observe-source-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/phone-filesystem-quarantine-observe-source
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observe-source-attempt-1
+
+      - name: Back off before quarantine observation source retry 2
+        if: steps.source-download-1.outcome == 'failure'
+        shell: bash
+        run: sleep 2
+
+      - name: Download immutable canonical quarantine observation logic (attempt 2)
+        id: source-download-2
+        if: steps.source-download-1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observe-source-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observe-source-attempt-2
+
+      - name: Back off before quarantine observation source retry 3
+        if: steps.source-download-1.outcome == 'failure' && steps.source-download-2.outcome == 'failure'
+        shell: bash
+        run: sleep 5
+
+      - name: Download immutable canonical quarantine observation logic (attempt 3)
+        id: source-download-3
+        if: steps.source-download-1.outcome == 'failure' && steps.source-download-2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observe-source-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observe-source-attempt-3
+
+      - name: Promote one successfully downloaded immutable quarantine observation source bundle
+        id: source-transport
+        shell: bash
+        env:
+          SOURCE_DOWNLOAD_1_OUTCOME: ${{ steps.source-download-1.outcome }}
+          SOURCE_DOWNLOAD_2_OUTCOME: ${{ steps.source-download-2.outcome }}
+          SOURCE_DOWNLOAD_3_OUTCOME: ${{ steps.source-download-3.outcome }}
+        run: |
+          set -euo pipefail
+          selected=""
+          selected_attempt=""
+          if [ "${SOURCE_DOWNLOAD_1_OUTCOME}" = success ]; then
+            selected="${RUNNER_TEMP}/phone-filesystem-quarantine-observe-source-attempt-1"
+            selected_attempt=1
+          elif [ "${SOURCE_DOWNLOAD_2_OUTCOME}" = success ]; then
+            selected="${RUNNER_TEMP}/phone-filesystem-quarantine-observe-source-attempt-2"
+            selected_attempt=2
+          elif [ "${SOURCE_DOWNLOAD_3_OUTCOME}" = success ]; then
+            selected="${RUNNER_TEMP}/phone-filesystem-quarantine-observe-source-attempt-3"
+            selected_attempt=3
+          else
+            echo "no immutable quarantine observation source download attempt succeeded" >&2
+            exit 1
+          fi
+          destination="${RUNNER_TEMP}/phone-filesystem-quarantine-observe-source"
+          if [ -e "${destination}" ]; then
+            echo "immutable quarantine observation source destination already exists" >&2
+            exit 1
+          fi
+          mv "${selected}" "${destination}"
+          echo "download_attempt=${selected_attempt}" >> "$GITHUB_OUTPUT"
 
       - name: Verify source bundle before device access
         shell: bash
