@@ -599,7 +599,7 @@ jobs:
           from pathlib import Path
           release = Path(os.environ['RUNNER_TEMP']) / 'device-releases' / os.environ['RECONSTRUCTION_RELEASE_ID']
           for rel in (
-              'service.sh', 'module.prop', 'integrity.json', 'release-metadata.json',
+              'service.sh', 'module.prop', 'integrity-manifest.json', 'release-metadata.json',
               'bin/runtime-supervisor', 'bin/host-daemon', 'bin/sing-box', 'bin/curl',
               'config/host-daemon.json', 'config/sing-box.json',
           ):
