@@ -168,7 +168,7 @@ jobs:
               'Refuse phone execution until a later tracker checkpoint',
               'reconstruction execution control plane validated; phone execution remains hard-blocked',
               '  reconstruct-phone:',
-              '    if: ${{ false }}',
+              '    if: $' + '{{ false }}',
               '    concurrency:',
               '      group: production-phone-global-mutation',
               '      cancel-in-progress: false',
