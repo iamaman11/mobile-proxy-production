@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   command-gate:
-    name: Validate canonical preflight command and prepare source
+    name: Validate command and prepare immutable canonical source
     if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-preflight ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -60,11 +60,7 @@ jobs:
               raise SystemExit("requested SHA is not current canonical main")
 
           query = urllib.parse.urlencode(
-              {
-                  "head_sha": requested_sha,
-                  "status": "completed",
-                  "per_page": 100,
-              }
+              {"head_sha": requested_sha, "status": "completed", "per_page": 100}
           )
           runs = get_json(
               "https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?" + query
@@ -79,12 +75,10 @@ jobs:
           if not quality:
               raise SystemExit("exact canonical SHA has no successful Quality run")
           quality.sort(key=lambda run: (run.get("run_attempt", 0), run.get("id", 0)), reverse=True)
-          quality_run_id = quality[0]["id"]
 
-          output = os.environ["GITHUB_OUTPUT"]
-          with open(output, "a", encoding="utf-8") as handle:
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"canonical_sha={requested_sha}\n")
-              handle.write(f"quality_run_id={quality_run_id}\n")
+              handle.write(f"quality_run_id={quality[0]['id']}\n")
           PY
 
       - name: Checkout exact canonical source on hosted runner
@@ -95,7 +89,7 @@ jobs:
           path: canonical
           persist-credentials: false
 
-      - name: Build immutable preflight source bundle
+      - name: Build immutable source bundle
         shell: bash
         env:
           CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
@@ -104,23 +98,24 @@ jobs:
           set -euo pipefail
           test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
           test -f canonical/scripts/run_private_phone_preflight.py
-          bundle="${RUNNER_TEMP}/phone-preflight-source"
-          mkdir -p "${bundle}"
-          cp canonical/scripts/run_private_phone_preflight.py "${bundle}/run_private_phone_preflight.py"
-          BUNDLE="${bundle}" python3 - <<'PY'
+          python3 - <<'PY'
           import hashlib
           import json
           import os
+          import shutil
           from pathlib import Path
 
-          root = Path(os.environ["BUNDLE"])
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-preflight-source"
+          root.mkdir(parents=True, exist_ok=False)
+          source = Path("canonical/scripts/run_private_phone_preflight.py")
           script = root / "run_private_phone_preflight.py"
+          shutil.copyfile(source, script)
           manifest = {
               "format_version": 1,
               "repository": "iamaman11/mobile-proxy",
               "canonical_sha": os.environ["CANONICAL_SHA"],
               "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
-              "script_path": "run_private_phone_preflight.py",
+              "script_path": script.name,
               "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
           }
           (root / "source-manifest.json").write_text(
@@ -181,72 +176,11 @@ jobs:
           script = root / manifest.get("script_path", "")
           if script.name != "run_private_phone_preflight.py" or script.parent != root:
               raise SystemExit("source script path differs")
-          digest = hashlib.sha256(script.read_bytes()).hexdigest()
-          if digest != manifest.get("script_sha256"):
+          if hashlib.sha256(script.read_bytes()).hexdigest() != manifest.get("script_sha256"):
               raise SystemExit("source script digest differs")
           PY
 
-      - name: Record bounded ADB inventory shape
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import os
-          import subprocess
-
-          inventory_valid = False
-          device_count = 0
-          online_count = 0
-          registered_present = False
-          registered_online = False
-          probe_ok = False
-
-          try:
-              probe = subprocess.run(
-                  ["adb", "devices"],
-                  check=False,
-                  capture_output=True,
-                  text=True,
-                  timeout=10,
-              )
-              probe_ok = probe.returncode == 0
-              if probe_ok:
-                  lines = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
-                  if lines and lines[0] == "List of devices attached":
-                      rows = []
-                      inventory_valid = True
-                      for line in lines[1:]:
-                          parts = line.split()
-                          if len(parts) != 2:
-                              inventory_valid = False
-                              rows = []
-                              break
-                          rows.append((parts[0], parts[1]))
-                      if inventory_valid:
-                          device_count = len(rows)
-                          online_count = sum(state == "device" for _, state in rows)
-                          expected = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
-                          registered_present = any(serial == expected for serial, _ in rows)
-                          registered_online = any(
-                              serial == expected and state == "device" for serial, state in rows
-                          )
-          except (OSError, subprocess.TimeoutExpired):
-              pass
-
-          bounded_count = str(device_count) if inventory_valid else "unavailable"
-          bounded_online = str(online_count) if inventory_valid else "unavailable"
-          print(
-              "bounded adb diagnostic: "
-              f"probe_ok={str(probe_ok).lower()} "
-              f"inventory_valid={str(inventory_valid).lower()} "
-              f"device_count={bounded_count} "
-              f"online_count={bounded_online} "
-              f"registered_present={str(registered_present).lower()} "
-              f"registered_online={str(registered_online).lower()} "
-              "raw_device_identifiers_recorded=false phone_mutation_performed=false"
-          )
-
-      - name: Run read-only phone preflight
+      - name: Run exact registered-device CONTROL preflight
         id: preflight
         shell: bash
         run: |
@@ -254,100 +188,6 @@ jobs:
           python3 "${RUNNER_TEMP}/phone-preflight-source/run_private_phone_preflight.py" \
             --canonical-sha "${CANONICAL_SHA}" \
             --output "${RUNNER_TEMP}/phone-preflight.json"
-
-      - name: Record bounded installed app and local health
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          from pathlib import Path
-
-          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
-          package = "com.example.mobileproxy"
-          service = "com.example.mobileproxy/.CellularEgressService"
-          supervisor = "/data/adb/mobile-proxy-node/current/bin/runtime-supervisor"
-          runtime_root = "/data/adb/mobile-proxy-node/current"
-
-          def adb(*args, timeout=30):
-              try:
-                  return subprocess.run(
-                      ["adb", "-s", serial, *args],
-                      check=False,
-                      capture_output=True,
-                      text=True,
-                      timeout=timeout,
-                  )
-              except (OSError, subprocess.TimeoutExpired):
-                  return None
-
-          def root_ok(shell):
-              result = adb("shell", "su", "0", "sh", "-c", shell, timeout=20)
-              return result is not None and result.returncode == 0
-
-          pm = adb("shell", "pm", "path", package)
-          package_present = bool(
-              pm is not None
-              and pm.returncode == 0
-              and any(line.startswith("package:/") for line in pm.stdout.splitlines())
-          )
-
-          version_name = "unavailable"
-          version_code = "unavailable"
-          if package_present:
-              dump = adb("shell", "dumpsys", "package", package, timeout=60)
-              if dump is not None and dump.returncode == 0:
-                  codes = re.findall(r"^\s*versionCode=([0-9]+)\b", dump.stdout, re.MULTILINE)
-                  names = re.findall(r"^\s*versionName=([^\s]+)\s*$", dump.stdout, re.MULTILINE)
-                  if len(codes) == 1:
-                      version_code = codes[0]
-                  if len(names) == 1:
-                      version_name = names[0]
-
-          supervisor_running = root_ok(f'''for proc in /proc/[0-9]*; do
-            [ -r "$proc/cmdline" ] || continue
-            cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
-            case "$cmd" in
-              "{supervisor} --runtime-root {runtime_root} "*) exit 0 ;;
-            esac
-          done
-          exit 1
-          ''')
-
-          services = adb("shell", "dumpsys", "activity", "services", package)
-          egress_service_running = bool(
-              services is not None and services.returncode == 0 and service in services.stdout
-          )
-
-          local_proxy_ports_ready = root_ok('''BB=""
-          for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do
-            [ -x "$candidate" ] && BB="$candidate" && break
-          done
-          [ -n "$BB" ] || exit 1
-          "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1
-          "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1
-          ''')
-          local_healthy = supervisor_running and egress_service_running and local_proxy_ports_ready
-
-          state = {
-              "installed_package_present": package_present,
-              "installed_version_name": version_name,
-              "installed_version_code": version_code,
-              "runtime_supervisor_running": supervisor_running,
-              "cellular_egress_service_running": egress_service_running,
-              "local_proxy_ports_ready": local_proxy_ports_ready,
-              "local_healthy": local_healthy,
-          }
-
-          evidence_path = Path(os.environ["RUNNER_TEMP"]) / "phone-preflight.json"
-          evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-          evidence["installed_app_state"] = state
-          evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          PY
 
       - name: Export bounded CONTROL result
         id: bounded-result
