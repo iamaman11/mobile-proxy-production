@@ -53,7 +53,7 @@ jobs:
               "test \"$(command -v rustc)\" = \"$CARGO_HOME/bin/rustc\"",
               "\"$CARGO_HOME/bin/cargo\" --version | grep -Eq '^cargo 1\\.95\\.0([[:space:]]|$)'",
               "\"$CARGO_HOME/bin/rustc\" --version | grep -Eq '^rustc 1\\.95\\.0([[:space:]]|$)'",
-              "cargo\" metadata --format-version 1 --locked --no-deps",
+              "\"$CARGO_HOME/bin/cargo\" metadata --format-version 1 --locked --no-deps",
               "runner_tooling_mutation=true",
               "user_local_tooling=true",
               "system_path_mutation=false",
