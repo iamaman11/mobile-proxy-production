@@ -332,8 +332,8 @@ jobs:
               handle.write('transaction_summary_json=' + json.dumps(summary, separators=(',', ':')) + '\n')
           PY
 
-      - name: Upload bounded quarantine observation evidence
-        id: evidence-upload
+      - name: Upload bounded quarantine observation evidence (attempt 1)
+        id: evidence-upload-1
         if: success()
         continue-on-error: true
         uses: actions/upload-artifact@v4
@@ -343,18 +343,59 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Back off before quarantine observation evidence retry 2
+        if: always() && steps.result.outcome == 'success' && steps.evidence-upload-1.outcome == 'failure'
+        shell: bash
+        run: sleep 3
+
+      - name: Upload bounded quarantine observation evidence (attempt 2)
+        id: evidence-upload-2
+        if: always() && steps.result.outcome == 'success' && steps.evidence-upload-1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observation-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observation.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Back off before quarantine observation evidence retry 3
+        if: always() && steps.result.outcome == 'success' && steps.evidence-upload-1.outcome == 'failure' && steps.evidence-upload-2.outcome == 'failure'
+        shell: bash
+        run: sleep 6
+
+      - name: Upload bounded quarantine observation evidence (attempt 3)
+        id: evidence-upload-3
+        if: always() && steps.result.outcome == 'success' && steps.evidence-upload-1.outcome == 'failure' && steps.evidence-upload-2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observation-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-observation.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
       - name: Export quarantine observation evidence persistence state
         id: evidence-state
         if: always()
         shell: bash
         env:
           RESULT_OUTCOME: ${{ steps.result.outcome }}
-          EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+          EVIDENCE_UPLOAD_1_OUTCOME: ${{ steps.evidence-upload-1.outcome }}
+          EVIDENCE_UPLOAD_2_OUTCOME: ${{ steps.evidence-upload-2.outcome }}
+          EVIDENCE_UPLOAD_3_OUTCOME: ${{ steps.evidence-upload-3.outcome }}
         run: |
           set -euo pipefail
           persisted=false
-          if [ "${RESULT_OUTCOME}" = success ] && [ "${EVIDENCE_UPLOAD_OUTCOME}" = success ]; then
-            persisted=true
+          if [ "${RESULT_OUTCOME}" = success ]; then
+            for outcome in "${EVIDENCE_UPLOAD_1_OUTCOME}" "${EVIDENCE_UPLOAD_2_OUTCOME}" "${EVIDENCE_UPLOAD_3_OUTCOME}"; do
+              if [ "${outcome}" = success ]; then
+                persisted=true
+                break
+              fi
+            done
           fi
           echo "artifact_persisted=${persisted}" >> "$GITHUB_OUTPUT"
 

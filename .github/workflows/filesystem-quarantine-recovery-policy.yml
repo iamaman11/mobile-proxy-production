@@ -35,6 +35,41 @@ jobs:
           cleanup = cleanup_path.read_text(encoding='utf-8')
           required_group = 'production-phone-global-mutation'
 
+          def upload_attempt_blocks(text, step_prefix):
+              lines = text.splitlines()
+              blocks = []
+              for index, line in enumerate(lines):
+                  if line.strip().startswith(f'- name: {step_prefix} (attempt '):
+                      end = index + 1
+                      while end < len(lines) and not lines[end].startswith('      - name: '):
+                          end += 1
+                      blocks.append(lines[index:end])
+              return blocks
+
+          def assert_same_bounded_artifact(text, step_prefix, artifact_prefix, error_prefix):
+              blocks = upload_attempt_blocks(text, step_prefix)
+              if len(blocks) != 3:
+                  raise SystemExit(f'{error_prefix} must have exactly three bounded upload steps')
+              names = []
+              paths = []
+              for block in blocks:
+                  name_lines = [
+                      line.strip()
+                      for line in block
+                      if line.strip().startswith(f'name: {artifact_prefix}')
+                  ]
+                  path_lines = [
+                      line.strip()
+                      for line in block
+                      if line.strip().startswith('path: ') and 'phone-filesystem-quarantine-' in line
+                  ]
+                  if len(name_lines) != 1 or len(path_lines) != 1:
+                      raise SystemExit(f'{error_prefix} upload step has ambiguous artifact identity')
+                  names.append(name_lines[0])
+                  paths.append(path_lines[0])
+              if len(set(names)) != 1 or len(set(paths)) != 1:
+                  raise SystemExit(f'{error_prefix} retries must preserve one exact artifact name and path')
+
           observation_contract = (
               "github.event.comment.user.login == github.repository_owner",
               "startsWith(github.event.comment.body, '/phone-filesystem-quarantine-observe ')",
@@ -51,7 +86,13 @@ jobs:
               "if evidence.get(flag) is not False",
               "observation_validated: ${{ steps.result.outputs.observation_validated }}",
               "artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}",
-              "id: evidence-upload",
+              "id: evidence-upload-1",
+              "id: evidence-upload-2",
+              "id: evidence-upload-3",
+              "Back off before quarantine observation evidence retry 2",
+              "Back off before quarantine observation evidence retry 3",
+              "steps.evidence-upload-1.outcome == 'failure'",
+              "steps.evidence-upload-2.outcome == 'failure'",
               "continue-on-error: true",
               "id: evidence-state",
               "classification = 'FILESYSTEM_QUARANTINE_UNOBSERVED';",
@@ -73,6 +114,22 @@ jobs:
               raise SystemExit(
                   'quarantine observation canonical recovery script must be copied and manifest-required'
               )
+          if observe.count("'--mode', 'observe'") != 1:
+              raise SystemExit('quarantine observation device operation must execute exactly once')
+          if observe.count('subprocess.run(command, check=True)') != 1:
+              raise SystemExit('quarantine observation device subprocess must execute exactly once')
+          if observe.count('id: evidence-upload-') != 3:
+              raise SystemExit('quarantine observation must have exactly three evidence upload attempts')
+          assert_same_bounded_artifact(
+              observe,
+              'Upload bounded quarantine observation evidence',
+              'phone-filesystem-quarantine-observation-',
+              'quarantine observation',
+          )
+          if observe.count('overwrite: true') != 2:
+              raise SystemExit('quarantine observation retries must overwrite only after failed prior attempts')
+          if observe.count('run: sleep 3') != 1 or observe.count('run: sleep 6') != 1:
+              raise SystemExit('quarantine observation retry backoff must stay bounded at two retries')
           if "process.env.OBSERVATION_JOB_RESULT === 'success'" in observe:
               raise SystemExit('quarantine observation state must be independent from job conclusion')
 
@@ -95,7 +152,14 @@ jobs:
               "if state == 'REFUSED' and mutation:",
               "result_validated: ${{ steps.result.outputs.result_validated }}",
               "artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}",
-              "id: evidence-upload",
+              "id: evidence-upload-1",
+              "id: evidence-upload-2",
+              "id: evidence-upload-3",
+              "Back off before quarantine cleanup evidence retry 2",
+              "Back off before quarantine cleanup evidence retry 3",
+              "steps.result.outputs.result_validated == 'true'",
+              "steps.evidence-upload-1.outcome == 'failure'",
+              "steps.evidence-upload-2.outcome == 'failure'",
               "continue-on-error: true",
               "id: evidence-state",
               "Require durable accepted cleanup",
@@ -119,6 +183,39 @@ jobs:
               raise SystemExit(
                   'quarantine cleanup canonical recovery script must be copied and manifest-required'
               )
+          if cleanup.count("'--mode', 'cleanup'") != 1:
+              raise SystemExit('quarantine cleanup device operation must execute exactly once')
+          if cleanup.count('subprocess.run(command, check=True)') != 1:
+              raise SystemExit('quarantine cleanup device subprocess must execute exactly once')
+          if cleanup.count('id: evidence-upload-') != 3:
+              raise SystemExit('quarantine cleanup must have exactly three evidence upload attempts')
+          assert_same_bounded_artifact(
+              cleanup,
+              'Upload bounded quarantine cleanup evidence',
+              'phone-filesystem-quarantine-cleanup-',
+              'quarantine cleanup',
+          )
+          if cleanup.count('overwrite: true') != 2:
+              raise SystemExit('quarantine cleanup retries must overwrite only after failed prior attempts')
+          if cleanup.count('run: sleep 3') != 1 or cleanup.count('run: sleep 6') != 1:
+              raise SystemExit('quarantine cleanup retry backoff must stay bounded at two retries')
+
+          def persistence_accepted(result_ready, upload_outcomes):
+              return result_ready and any(outcome == 'success' for outcome in upload_outcomes)
+
+          persistence_truth_table = (
+              ((True, ('success', 'skipped', 'skipped')), True),
+              ((True, ('failure', 'success', 'skipped')), True),
+              ((True, ('failure', 'failure', 'success')), True),
+              ((True, ('failure', 'failure', 'failure')), False),
+              ((False, ('success', 'skipped', 'skipped')), False),
+          )
+          for inputs, expected in persistence_truth_table:
+              actual = persistence_accepted(*inputs)
+              if actual != expected:
+                  raise SystemExit(
+                      f'quarantine evidence persistence truth table differs: inputs={inputs} expected={expected} actual={actual}'
+                  )
 
           def classify_observation(validated, persisted, complete, all_absent, admissible):
               if not validated:
@@ -183,6 +280,7 @@ jobs:
           print('observation_surface=read-only-exact-transactions')
           print('cleanup_surface=prior-durable-admission+same-job-reobservation')
           print('cleanup_global_lock=accepted')
+          print('persistence_retry_surface=bounded-three-attempts-operation-once')
           print('observation_reducer_truth_table=accepted')
           print('cleanup_reducer_truth_table=accepted')
           PY
