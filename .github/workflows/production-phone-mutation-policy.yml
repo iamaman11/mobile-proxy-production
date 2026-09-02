@@ -196,6 +196,85 @@ jobs:
                       f'phone-preflight reducer truth table differs: inputs={inputs} expected={expected} actual={actual}'
                   )
 
+          filesystem_tooling = contents['phone-filesystem-tooling-diagnostic.yml']
+          required_tooling_persistence_contract = (
+              'observation_validated: ${{ steps.result.outputs.observation_validated }}',
+              'artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}',
+              'id: evidence-upload',
+              'continue-on-error: true',
+              'id: evidence-state',
+              'observation_validated=true',
+              'filesystem tooling evidence is contradictory: compatible but incomplete',
+              'OBSERVATION_VALIDATED: ${{ needs.diagnostic.outputs.observation_validated }}',
+              'ARTIFACT_PERSISTED: ${{ needs.diagnostic.outputs.artifact_persisted }}',
+              "const observationValidated = process.env.OBSERVATION_VALIDATED === 'true';",
+              "const complete = process.env.DIAGNOSTIC_COMPLETE === 'true';",
+              "const compatible = process.env.COMPARATOR_COMPATIBLE === 'true';",
+              "const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';",
+              "classification = 'FILESYSTEM_TOOLING_UNOBSERVED';",
+              "classification = 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED';",
+              "classification = 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN';",
+              "classification = 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED';",
+              "classification = 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED';",
+              '`- diagnostic_job_result: \\`${process.env.DIAGNOSTIC_JOB_RESULT}\\``',
+              '`- observation_validated: \\`${observationValidated}\\``',
+              '`- artifact_persisted: \\`${process.env.ARTIFACT_PERSISTED || \'false\'}\\``',
+              '- Raw device identifier recorded: false',
+              '- Raw command output recorded: false',
+              '- Phone mutation performed: false',
+          )
+          missing_tooling_contract = [
+              snippet for snippet in required_tooling_persistence_contract
+              if snippet not in filesystem_tooling
+          ]
+          if missing_tooling_contract:
+              raise SystemExit(
+                  'phone-filesystem-tooling-diagnostic.yml: observation/persistence contract missing: '
+                  + ', '.join(missing_tooling_contract)
+              )
+          if filesystem_tooling.count('uses: actions/upload-artifact@v4') < 2:
+              raise SystemExit(
+                  'phone-filesystem-tooling-diagnostic.yml: immutable source and bounded evidence persistence must remain explicit'
+              )
+          if "process.env.DIAGNOSTIC_JOB_RESULT === 'success'" in filesystem_tooling:
+              raise SystemExit(
+                  'phone-filesystem-tooling-diagnostic.yml: observation classification must be independent from overall diagnostic job conclusion'
+              )
+
+          def classify_filesystem_tooling(validated, complete, compatible, persisted):
+              if compatible and not complete:
+                  raise ValueError('contradictory filesystem tooling observation')
+              if not validated:
+                  return 'FILESYSTEM_TOOLING_UNOBSERVED'
+              if not persisted:
+                  return 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED'
+              if not complete:
+                  return 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN'
+              if compatible:
+                  return 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED'
+              return 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED'
+
+          tooling_truth_table = (
+              ((True, True, True, True), 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED'),
+              ((True, True, False, True), 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED'),
+              ((True, False, False, True), 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN'),
+              ((True, True, True, False), 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED'),
+              ((True, False, False, False), 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED'),
+              ((False, False, False, False), 'FILESYSTEM_TOOLING_UNOBSERVED'),
+          )
+          for inputs, expected in tooling_truth_table:
+              actual = classify_filesystem_tooling(*inputs)
+              if actual != expected:
+                  raise SystemExit(
+                      f'filesystem tooling reducer truth table differs: inputs={inputs} expected={expected} actual={actual}'
+                  )
+          try:
+              classify_filesystem_tooling(True, False, True, True)
+          except ValueError:
+              pass
+          else:
+              raise SystemExit('filesystem tooling reducer accepted contradictory complete/compatible evidence')
+
           diagnostic = contents['phone-runtime-diagnostic.yml']
           required_prestate_classifier = (
               'current_absent=true',
@@ -251,5 +330,9 @@ jobs:
           print('phone_preflight_evidence_persistence_state=explicit')
           print('phone_preflight_probe_state_independent_of_job_result=accepted')
           print('phone_preflight_reducer_truth_table=accepted')
+          print('filesystem_tooling_evidence_persistence_state=explicit')
+          print('filesystem_tooling_observation_state_independent_of_job_result=accepted')
+          print('filesystem_tooling_unknown_distinct_from_unsupported=accepted')
+          print('filesystem_tooling_reducer_truth_table=accepted')
           print('reconstruction_prestate_classifier=bounded-read-only')
           PY

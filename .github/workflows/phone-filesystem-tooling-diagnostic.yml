@@ -148,12 +148,14 @@ jobs:
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     outputs:
+      observation_validated: ${{ steps.result.outputs.observation_validated }}
       diagnostic_complete: ${{ steps.result.outputs.diagnostic_complete }}
       comparator_compatible: ${{ steps.result.outputs.comparator_compatible }}
       scratch_selected: ${{ steps.result.outputs.scratch_selected }}
       scratch_state: ${{ steps.result.outputs.scratch_state }}
       managed_selected: ${{ steps.result.outputs.managed_selected }}
       managed_state: ${{ steps.result.outputs.managed_state }}
+      artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
     steps:
       - name: Download immutable canonical filesystem tooling logic
         uses: actions/download-artifact@v4
@@ -204,7 +206,7 @@ jobs:
             --canonical-sha "${CANONICAL_SHA}" \
             --output "${RUNNER_TEMP}/phone-filesystem-tooling.json"
 
-      - name: Export bounded filesystem tooling result
+      - name: Validate and export bounded filesystem tooling observation
         id: result
         shell: bash
         run: |
@@ -250,7 +252,11 @@ jobs:
 
           complete = evidence.get("diagnostic_complete") is True
           compatible = evidence.get("comparator_compatibility_proven") is True
+          if compatible and not complete:
+              raise SystemExit("filesystem tooling evidence is contradictory: compatible but incomplete")
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("observation_validated=true\n")
               handle.write(f"diagnostic_complete={str(complete).lower()}\n")
               handle.write(f"comparator_compatible={str(compatible).lower()}\n")
               handle.write(f"scratch_selected={scratch['selected_comparator']}\n")
@@ -260,12 +266,45 @@ jobs:
           PY
 
       - name: Upload bounded filesystem tooling evidence
+        id: evidence-upload
+        if: success()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: phone-filesystem-tooling-${{ env.CANONICAL_SHA }}
           path: ${{ runner.temp }}/phone-filesystem-tooling.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Export filesystem tooling evidence persistence state
+        id: evidence-state
+        if: always()
+        shell: bash
+        env:
+          RESULT_OUTCOME: ${{ steps.result.outcome }}
+          EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+        run: |
+          set -euo pipefail
+          persisted=false
+          if [ "${RESULT_OUTCOME}" = success ] && [ "${EVIDENCE_UPLOAD_OUTCOME}" = success ]; then
+            persisted=true
+          fi
+          echo "artifact_persisted=${persisted}" >> "$GITHUB_OUTPUT"
+
+      - name: Record safe diagnostic transport result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Production Android filesystem tooling diagnostic
+          - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Quality run: ${{ env.QUALITY_RUN_ID }}
+          - Diagnostic step outcome: ${{ steps.result.outcome }}
+          - Evidence artifact persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
+          - Raw device identifier recorded: false
+          - Raw command output recorded: false
+          - Phone mutation performed: false
+          EOF
 
   report:
     name: Publish bounded filesystem tooling classification
@@ -279,23 +318,33 @@ jobs:
         env:
           CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
           QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
-          DIAGNOSTIC_RESULT: ${{ needs.diagnostic.result }}
+          DIAGNOSTIC_JOB_RESULT: ${{ needs.diagnostic.result }}
+          OBSERVATION_VALIDATED: ${{ needs.diagnostic.outputs.observation_validated }}
           DIAGNOSTIC_COMPLETE: ${{ needs.diagnostic.outputs.diagnostic_complete }}
           COMPARATOR_COMPATIBLE: ${{ needs.diagnostic.outputs.comparator_compatible }}
           SCRATCH_SELECTED: ${{ needs.diagnostic.outputs.scratch_selected }}
           SCRATCH_STATE: ${{ needs.diagnostic.outputs.scratch_state }}
           MANAGED_SELECTED: ${{ needs.diagnostic.outputs.managed_selected }}
           MANAGED_STATE: ${{ needs.diagnostic.outputs.managed_state }}
+          ARTIFACT_PERSISTED: ${{ needs.diagnostic.outputs.artifact_persisted }}
         with:
           script: |
-            const observed = process.env.DIAGNOSTIC_RESULT === 'success';
-            const complete = observed && process.env.DIAGNOSTIC_COMPLETE === 'true';
-            const compatible = complete && process.env.COMPARATOR_COMPATIBLE === 'true';
-            const classification = !observed
-              ? 'FILESYSTEM_TOOLING_UNOBSERVED'
-              : compatible
-                ? 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED'
-                : 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED';
+            const observationValidated = process.env.OBSERVATION_VALIDATED === 'true';
+            const complete = process.env.DIAGNOSTIC_COMPLETE === 'true';
+            const compatible = process.env.COMPARATOR_COMPATIBLE === 'true';
+            const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';
+            let classification;
+            if (!observationValidated) {
+              classification = 'FILESYSTEM_TOOLING_UNOBSERVED';
+            } else if (!artifactPersisted) {
+              classification = 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED';
+            } else if (!complete) {
+              classification = 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN';
+            } else if (compatible) {
+              classification = 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED';
+            } else {
+              classification = 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED';
+            }
             const body = [
               '## CONTROL ANDROID FILESYSTEM TOOLING RESULT',
               '',
@@ -303,9 +352,11 @@ jobs:
               `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
               `- workflow_run_id: \`${context.runId}\``,
-              `- diagnostic_job_result: \`${process.env.DIAGNOSTIC_RESULT}\``,
+              `- diagnostic_job_result: \`${process.env.DIAGNOSTIC_JOB_RESULT}\``,
+              `- observation_validated: \`${observationValidated}\``,
               `- diagnostic_complete: \`${process.env.DIAGNOSTIC_COMPLETE || 'unobserved'}\``,
               `- comparator_compatibility_proven: \`${process.env.COMPARATOR_COMPATIBLE || 'unobserved'}\``,
+              `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
               `- scratch_selected_comparator: \`${process.env.SCRATCH_SELECTED || 'unobserved'}\``,
               `- scratch_comparator_path_state: \`${process.env.SCRATCH_STATE || 'unobserved'}\``,
               `- managed_selected_comparator: \`${process.env.MANAGED_SELECTED || 'unobserved'}\``,
