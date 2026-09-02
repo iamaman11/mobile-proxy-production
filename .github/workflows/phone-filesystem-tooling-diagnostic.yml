@@ -1,0 +1,324 @@
+name: Production Android filesystem tooling diagnostic
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  command-gate:
+    name: Validate filesystem tooling command and prepare canonical source
+    if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-filesystem-tooling ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
+    steps:
+      - name: Validate exact command, canonical main SHA, and Quality
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-filesystem-tooling ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid filesystem tooling command")
+          requested_sha = match.group(1)
+
+          def get_json(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "mobile-proxy-production-filesystem-tooling",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          canonical_main = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main"
+          )["sha"]
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+
+          query = urllib.parse.urlencode(
+              {"head_sha": requested_sha, "status": "completed", "per_page": 100}
+          )
+          runs = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?" + query
+          ).get("workflow_runs", [])
+          quality = [
+              run for run in runs
+              if run.get("name") == "Quality"
+              and run.get("head_sha") == requested_sha
+              and run.get("conclusion") == "success"
+          ]
+          if not quality:
+              raise SystemExit("exact canonical SHA has no successful Quality run")
+          quality.sort(
+              key=lambda run: (run.get("run_attempt", 0), run.get("id", 0)),
+              reverse=True,
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+              handle.write(f"quality_run_id={quality[0]['id']}\n")
+          PY
+
+      - name: Checkout exact canonical source
+        uses: actions/checkout@v4
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ steps.command.outputs.canonical_sha }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Build immutable filesystem tooling source bundle
+        shell: bash
+        env:
+          CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
+        run: |
+          set -euo pipefail
+          test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-filesystem-tooling-source"
+          root.mkdir(parents=True, exist_ok=False)
+          scripts = (
+              "run_private_phone_preflight.py",
+              "run_android_filesystem_tooling_diagnostic.py",
+          )
+          digests = {}
+          for name in scripts:
+              source = Path("canonical/scripts") / name
+              if not source.is_file():
+                  raise SystemExit(f"canonical source missing: {name}")
+              target = root / name
+              shutil.copyfile(source, target)
+              digests[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+
+          manifest = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": os.environ["CANONICAL_SHA"],
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "scripts_sha256": digests,
+          }
+          (root / "source-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload immutable filesystem tooling source
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-tooling-source-${{ steps.command.outputs.canonical_sha }}
+          path: ${{ runner.temp }}/phone-filesystem-tooling-source
+          if-no-files-found: error
+          retention-days: 1
+
+  diagnostic:
+    name: Registered production phone filesystem tooling diagnostic
+    needs: command-gate
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    outputs:
+      diagnostic_complete: ${{ steps.result.outputs.diagnostic_complete }}
+      comparator_compatible: ${{ steps.result.outputs.comparator_compatible }}
+      scratch_selected: ${{ steps.result.outputs.scratch_selected }}
+      scratch_state: ${{ steps.result.outputs.scratch_state }}
+      managed_selected: ${{ steps.result.outputs.managed_selected }}
+      managed_state: ${{ steps.result.outputs.managed_state }}
+    steps:
+      - name: Download immutable canonical filesystem tooling logic
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-filesystem-tooling-source-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-filesystem-tooling-source
+
+      - name: Verify source bundle before device access
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-filesystem-tooling-source"
+          manifest = json.loads(
+              (root / "source-manifest.json").read_text(encoding="utf-8")
+          )
+          if manifest.get("format_version") != 1:
+              raise SystemExit("unsupported source manifest")
+          if manifest.get("repository") != "iamaman11/mobile-proxy":
+              raise SystemExit("source repository differs")
+          if manifest.get("canonical_sha") != os.environ["CANONICAL_SHA"]:
+              raise SystemExit("source canonical SHA differs")
+          if manifest.get("quality_run_id") != int(os.environ["QUALITY_RUN_ID"]):
+              raise SystemExit("source Quality authority differs")
+          expected = manifest.get("scripts_sha256")
+          required = {
+              "run_private_phone_preflight.py",
+              "run_android_filesystem_tooling_diagnostic.py",
+          }
+          if not isinstance(expected, dict) or set(expected) != required:
+              raise SystemExit("source script set differs")
+          for name, digest in expected.items():
+              path = root / name
+              if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f"source digest differs: {name}")
+          PY
+
+      - name: Run bounded read-only filesystem tooling diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${RUNNER_TEMP}/phone-filesystem-tooling-source/run_android_filesystem_tooling_diagnostic.py" \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --output "${RUNNER_TEMP}/phone-filesystem-tooling.json"
+
+      - name: Export bounded filesystem tooling result
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "phone-filesystem-tooling.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          if evidence.get("format_version") != 1:
+              raise SystemExit("unsupported filesystem tooling evidence")
+          if evidence.get("repository") != "iamaman11/mobile-proxy":
+              raise SystemExit("filesystem tooling repository differs")
+          if evidence.get("canonical_sha") != os.environ["CANONICAL_SHA"]:
+              raise SystemExit("filesystem tooling canonical SHA differs")
+          if evidence.get("operation_id") != "android.filesystem-tooling-compatibility.v1":
+              raise SystemExit("filesystem tooling operation differs")
+          if evidence.get("phone_mutation_performed") is not False:
+              raise SystemExit("filesystem tooling diagnostic reported phone mutation")
+          if evidence.get("raw_device_identifier_recorded") is not False:
+              raise SystemExit("filesystem tooling diagnostic recorded device identifier")
+          if evidence.get("raw_command_output_recorded") is not False:
+              raise SystemExit("filesystem tooling diagnostic recorded raw command output")
+
+          selected_values = {"cmp", "toybox_cmp", "busybox_cmp", "NONE", "UNKNOWN"}
+          state_values = {"SUPPORTED", "UNSUPPORTED", "UNKNOWN"}
+          scratch = evidence.get("scratch_scope")
+          managed = evidence.get("managed_root_scope")
+          if not isinstance(scratch, dict) or not isinstance(managed, dict):
+              raise SystemExit("filesystem tooling scopes are invalid")
+          for label, scope in (("scratch", scratch), ("managed", managed)):
+              if scope.get("selected_comparator") not in selected_values:
+                  raise SystemExit(f"{label} selected comparator is invalid")
+              if scope.get("canonical_comparator_path_state") not in state_values:
+                  raise SystemExit(f"{label} comparator state is invalid")
+              if not isinstance(scope.get("probe_complete"), bool):
+                  raise SystemExit(f"{label} probe completeness is invalid")
+
+          complete = evidence.get("diagnostic_complete") is True
+          compatible = evidence.get("comparator_compatibility_proven") is True
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"diagnostic_complete={str(complete).lower()}\n")
+              handle.write(f"comparator_compatible={str(compatible).lower()}\n")
+              handle.write(f"scratch_selected={scratch['selected_comparator']}\n")
+              handle.write(f"scratch_state={scratch['canonical_comparator_path_state']}\n")
+              handle.write(f"managed_selected={managed['selected_comparator']}\n")
+              handle.write(f"managed_state={managed['canonical_comparator_path_state']}\n")
+          PY
+
+      - name: Upload bounded filesystem tooling evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-tooling-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-filesystem-tooling.json
+          if-no-files-found: error
+          retention-days: 30
+
+  report:
+    name: Publish bounded filesystem tooling classification
+    if: always() && needs.command-gate.result != 'skipped'
+    needs: [command-gate, diagnostic]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment bounded result on control issue
+        uses: actions/github-script@v7
+        env:
+          CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+          DIAGNOSTIC_RESULT: ${{ needs.diagnostic.result }}
+          DIAGNOSTIC_COMPLETE: ${{ needs.diagnostic.outputs.diagnostic_complete }}
+          COMPARATOR_COMPATIBLE: ${{ needs.diagnostic.outputs.comparator_compatible }}
+          SCRATCH_SELECTED: ${{ needs.diagnostic.outputs.scratch_selected }}
+          SCRATCH_STATE: ${{ needs.diagnostic.outputs.scratch_state }}
+          MANAGED_SELECTED: ${{ needs.diagnostic.outputs.managed_selected }}
+          MANAGED_STATE: ${{ needs.diagnostic.outputs.managed_state }}
+        with:
+          script: |
+            const observed = process.env.DIAGNOSTIC_RESULT === 'success';
+            const complete = observed && process.env.DIAGNOSTIC_COMPLETE === 'true';
+            const compatible = complete && process.env.COMPARATOR_COMPATIBLE === 'true';
+            const classification = !observed
+              ? 'FILESYSTEM_TOOLING_UNOBSERVED'
+              : compatible
+                ? 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED'
+                : 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED';
+            const body = [
+              '## CONTROL ANDROID FILESYSTEM TOOLING RESULT',
+              '',
+              `- classification: **${classification}**`,
+              `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
+              `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
+              `- workflow_run_id: \`${context.runId}\``,
+              `- diagnostic_job_result: \`${process.env.DIAGNOSTIC_RESULT}\``,
+              `- diagnostic_complete: \`${process.env.DIAGNOSTIC_COMPLETE || 'unobserved'}\``,
+              `- comparator_compatibility_proven: \`${process.env.COMPARATOR_COMPATIBLE || 'unobserved'}\``,
+              `- scratch_selected_comparator: \`${process.env.SCRATCH_SELECTED || 'unobserved'}\``,
+              `- scratch_comparator_path_state: \`${process.env.SCRATCH_STATE || 'unobserved'}\``,
+              `- managed_selected_comparator: \`${process.env.MANAGED_SELECTED || 'unobserved'}\``,
+              `- managed_comparator_path_state: \`${process.env.MANAGED_STATE || 'unobserved'}\``,
+              '- comparator_test_targets: `/dev/null` only',
+              '- persistent_test_files_created: `false`',
+              '- raw_device_identifier_recorded: `false`',
+              '- raw_command_output_recorded: `false`',
+              '- phone_mutation_performed: `false`',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
