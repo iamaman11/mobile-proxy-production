@@ -90,6 +90,15 @@ jobs:
               )
               return result.returncode == 0
 
+          def root_capture(expr):
+              result = subprocess.run(
+                  ["adb","-s",serial,"shell","su","0","sh","-c",expr],
+                  check=False, capture_output=True, text=True, timeout=30,
+              )
+              if result.returncode != 0:
+                  raise RuntimeError("read-only reconstruction prestate classification probe failed")
+              return result.stdout.strip()
+
           root = "/data/adb/mobile-proxy-node"
           state = {
               "runtime_root_exists": root_test(f'test -d "{root}"'),
@@ -105,9 +114,139 @@ jobs:
               "any_release_service_exists": root_test(f'find "{root}/releases" -mindepth 2 -maxdepth 2 -type f -name service.sh -print -quit 2>/dev/null | grep -q .'),
               "any_release_supervisor_exists": root_test(f'find "{root}/releases" -mindepth 3 -maxdepth 3 -type f -name runtime-supervisor -print -quit 2>/dev/null | grep -q .'),
               "any_release_config_exists": root_test(f'find "{root}/releases" -mindepth 3 -maxdepth 3 -type f -name host-daemon.json -print -quit 2>/dev/null | grep -q .'),
-              "raw_paths_or_identifiers_recorded": False,
-              "phone_mutation_performed": False,
           }
+
+          raw_prestate = root_capture(r'''
+          ROOT=/data/adb/mobile-proxy-node
+          BOOT=/data/adb/service.d/99-mobile-proxy-runtime.sh
+          ROUTEFIX=/data/adb/service.d/99-mobile-proxy-routefix.sh
+
+          current_absent=true
+          if [ -e "$ROOT/current" ] || [ -L "$ROOT/current" ]; then current_absent=false; fi
+
+          release_count_zero=true
+          if [ -d "$ROOT/releases" ]; then
+            for item in "$ROOT"/releases/*; do
+              [ -e "$item" ] || [ -L "$item" ] || continue
+              release_count_zero=false
+              break
+            done
+          fi
+
+          managed_root_entries_allowed_only=true
+          if [ -d "$ROOT" ]; then
+            for item in "$ROOT"/*; do
+              [ -e "$item" ] || [ -L "$item" ] || continue
+              name="${item##*/}"
+              case "$name" in
+                releases|logs|state) ;;
+                *) managed_root_entries_allowed_only=false; break ;;
+              esac
+            done
+          fi
+
+          routefix_absent=true
+          if [ -e "$ROUTEFIX" ] || [ -L "$ROUTEFIX" ]; then routefix_absent=false; fi
+
+          boot_hook_shape=absent
+          if [ -f "$BOOT" ] && [ ! -L "$BOOT" ]; then
+            boot_hook_shape=regular_file
+          elif [ -e "$BOOT" ] || [ -L "$BOOT" ]; then
+            boot_hook_shape=invalid
+          fi
+
+          managed_executable_process_absent=true
+          managed_root_cmdline_process_absent=true
+          watchdog_cmdline_process_absent=true
+          for proc in /proc/[0-9]*; do
+            [ -r "$proc/cmdline" ] || continue
+            cmd="$(tr '\000' ' ' < "$proc/cmdline")"
+            exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+            case "$exe" in "$ROOT"/*) managed_executable_process_absent=false ;; esac
+            case "$cmd" in *"$ROOT"*) managed_root_cmdline_process_absent=false ;; esac
+            case "$cmd" in *"/data/local/tmp/mobile-proxy-logs/runtime-watchdog.sh"*) watchdog_cmdline_process_absent=false ;; esac
+          done
+
+          failure_code=none
+          if [ "$current_absent" != true ]; then
+            failure_code=current_present
+          elif [ "$release_count_zero" != true ]; then
+            failure_code=release_count_nonzero
+          elif [ "$managed_root_entries_allowed_only" != true ]; then
+            failure_code=unexpected_managed_entry
+          elif [ "$routefix_absent" != true ]; then
+            failure_code=routefix_present
+          elif [ "$boot_hook_shape" = invalid ]; then
+            failure_code=boot_hook_invalid_shape
+          elif [ "$managed_executable_process_absent" != true ]; then
+            failure_code=managed_executable_running
+          elif [ "$managed_root_cmdline_process_absent" != true ]; then
+            failure_code=managed_cmdline_running
+          elif [ "$watchdog_cmdline_process_absent" != true ]; then
+            failure_code=watchdog_running
+          fi
+          empty_prestate_admissible=false
+          [ "$failure_code" = none ] && empty_prestate_admissible=true
+
+          printf 'PRESTATE|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+            "$current_absent" "$release_count_zero" "$managed_root_entries_allowed_only" \
+            "$routefix_absent" "$boot_hook_shape" "$managed_executable_process_absent" \
+            "$managed_root_cmdline_process_absent" "$watchdog_cmdline_process_absent" \
+            "$failure_code" "$empty_prestate_admissible"
+          ''')
+
+          parts = raw_prestate.split("|")
+          if len(parts) != 11 or parts[0] != "PRESTATE":
+              raise SystemExit("bounded reconstruction prestate classification output is invalid")
+          bool_values = {"true": True, "false": False}
+          try:
+              current_absent = bool_values[parts[1]]
+              release_count_zero = bool_values[parts[2]]
+              managed_root_entries_allowed_only = bool_values[parts[3]]
+              routefix_absent = bool_values[parts[4]]
+              managed_executable_process_absent = bool_values[parts[6]]
+              managed_root_cmdline_process_absent = bool_values[parts[7]]
+              watchdog_cmdline_process_absent = bool_values[parts[8]]
+              empty_prestate_admissible = bool_values[parts[10]]
+          except KeyError as error:
+              raise SystemExit("bounded reconstruction prestate boolean is invalid") from error
+          boot_hook_shape = parts[5]
+          if boot_hook_shape not in {"absent", "regular_file", "invalid"}:
+              raise SystemExit("bounded reconstruction boot-hook shape is invalid")
+          failure_code = parts[9]
+          allowed_failures = {
+              "none",
+              "current_present",
+              "release_count_nonzero",
+              "unexpected_managed_entry",
+              "routefix_present",
+              "boot_hook_invalid_shape",
+              "managed_executable_running",
+              "managed_cmdline_running",
+              "watchdog_running",
+          }
+          if failure_code not in allowed_failures:
+              raise SystemExit("bounded reconstruction prestate failure code is invalid")
+
+          state.update({
+              "current_absent": current_absent,
+              "release_count_zero": release_count_zero,
+              "managed_root_entries_allowed_only": managed_root_entries_allowed_only,
+              "routefix_absent": routefix_absent,
+              "boot_hook_shape": boot_hook_shape,
+              "managed_executable_process_absent": managed_executable_process_absent,
+              "managed_root_cmdline_process_absent": managed_root_cmdline_process_absent,
+              "watchdog_cmdline_process_absent": watchdog_cmdline_process_absent,
+              "empty_prestate_failure_code": failure_code,
+              "empty_prestate_admissible": empty_prestate_admissible,
+              "raw_paths_or_identifiers_recorded": False,
+              "raw_process_identifier_recorded": False,
+              "raw_device_identifier_recorded": False,
+              "raw_config_recorded": False,
+              "runtime_secret_values_recorded": False,
+              "provider_access_performed": False,
+              "phone_mutation_performed": False,
+          })
           output = Path(os.environ["RUNNER_TEMP"]) / "phone-runtime-layout.json"
           output.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           print("bounded runtime layout: " + " ".join(f"{k}={str(v).lower()}" for k,v in state.items()))
