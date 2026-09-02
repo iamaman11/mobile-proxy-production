@@ -48,6 +48,8 @@ jobs:
               'SOURCE_DOWNLOAD_3_OUTCOME:',
               'no immutable preflight source download attempt succeeded',
               'destination="${RUNNER_TEMP}/phone-preflight-source"',
+              'if [ -e "${destination}" ] || [ -L "${destination}" ]; then',
+              'immutable preflight source destination already exists',
               'mv "${selected}" "${destination}"',
               'Verify canonical source bundle before phone access',
               'Run exact registered-device CONTROL preflight',
@@ -121,11 +123,17 @@ jobs:
               'SOURCE_DOWNLOAD_3_OUTCOME',
               '= success',
               'exit 1',
-              'rm -rf "${destination}"',
+              'if [ -e "${destination}" ] || [ -L "${destination}" ]; then',
+              'immutable preflight source destination already exists',
               'mv "${selected}" "${destination}"',
           ):
               if token not in promote_text:
                   raise SystemExit(f'preflight source promotion contract missing: {token}')
+          for destructive in ('rm -rf', 'mv -f', 'cp -p', 'install -m 0755', 'mkdir -p'):
+              if destructive in promote_text:
+                  raise SystemExit(
+                      'preflight source promotion must not delete or force-replace runner state: ' + destructive
+                  )
 
           verify = named_step_blocks('Verify canonical source bundle before phone access')
           operation = named_step_blocks('Run exact registered-device CONTROL preflight')
@@ -167,6 +175,7 @@ jobs:
           print('source_download_attempts=3')
           print('isolated_download_state=accepted')
           print('immutable_artifact_identity=accepted')
+          print('promotion_destination_preexistence=fail-closed')
           print('device_operation_invocations=1')
           print('transport_failure_state=PHONE_ACCESS_UNOBSERVED')
           PY
