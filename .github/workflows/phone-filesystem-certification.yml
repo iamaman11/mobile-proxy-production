@@ -108,6 +108,7 @@ jobs:
           scripts = (
               'run_private_phone_preflight.py',
               'run_android_capability_inventory.py',
+              'android_filesystem_comparator.py',
               'run_android_filesystem_certification.py',
           )
           digests = {}
@@ -159,6 +160,11 @@ jobs:
       state: ${{ steps.result.outputs.state }}
       accepted: ${{ steps.result.outputs.accepted }}
       cleanup_verified: ${{ steps.result.outputs.cleanup_verified }}
+      selection_before_mutation: ${{ steps.result.outputs.selection_before_mutation }}
+      scratch_selected: ${{ steps.result.outputs.scratch_selected }}
+      scratch_state: ${{ steps.result.outputs.scratch_state }}
+      managed_selected: ${{ steps.result.outputs.managed_selected }}
+      managed_state: ${{ steps.result.outputs.managed_state }}
     steps:
       - name: Download immutable canonical filesystem logic
         uses: actions/download-artifact@v4
@@ -190,6 +196,7 @@ jobs:
           required = {
               'run_private_phone_preflight.py',
               'run_android_capability_inventory.py',
+              'android_filesystem_comparator.py',
               'run_android_filesystem_certification.py',
           }
           if not isinstance(expected, dict) or set(expected) != required:
@@ -223,19 +230,72 @@ jobs:
           from pathlib import Path
 
           path = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-certification.json'
-          if not path.is_file():
-              values = {'state': 'UNOBSERVED', 'accepted': False, 'cleanup_verified': False}
-          else:
+          values = {
+              'state': 'UNOBSERVED',
+              'accepted': False,
+              'cleanup_verified': False,
+              'selection_before_mutation': False,
+              'scratch_selected': 'unobserved',
+              'scratch_state': 'unobserved',
+              'managed_selected': 'unobserved',
+              'managed_state': 'unobserved',
+          }
+          if path.is_file():
               evidence = json.loads(path.read_text(encoding='utf-8'))
-              values = {
-                  'state': str(evidence.get('state', 'UNOBSERVED')),
-                  'accepted': evidence.get('accepted') is True,
-                  'cleanup_verified': evidence.get('cleanup_verified') is True,
-              }
+              admission = evidence.get('comparator_admission')
+              if isinstance(admission, dict):
+                  scratch = admission.get('scratch')
+                  managed = admission.get('managed_root')
+                  values['selection_before_mutation'] = (
+                      admission.get('selection_before_mutation') is True
+                  )
+                  if isinstance(scratch, dict):
+                      values['scratch_selected'] = str(
+                          scratch.get('selected_comparator', 'unobserved')
+                      )
+                      values['scratch_state'] = str(
+                          scratch.get('canonical_comparator_path_state', 'unobserved')
+                      )
+                  if isinstance(managed, dict):
+                      values['managed_selected'] = str(
+                          managed.get('selected_comparator', 'unobserved')
+                      )
+                      values['managed_state'] = str(
+                          managed.get('canonical_comparator_path_state', 'unobserved')
+                      )
+              values['state'] = str(evidence.get('state', 'UNOBSERVED'))
+              values['accepted'] = evidence.get('accepted') is True
+              values['cleanup_verified'] = evidence.get('cleanup_verified') is True
+
+          selected_values = {'cmp', 'toybox_cmp', 'busybox_cmp', 'NONE', 'UNKNOWN', 'unobserved'}
+          state_values = {'SUPPORTED', 'UNSUPPORTED', 'UNKNOWN', 'unobserved'}
+          if values['scratch_selected'] not in selected_values:
+              raise SystemExit('filesystem certification scratch comparator enum is invalid')
+          if values['managed_selected'] not in selected_values:
+              raise SystemExit('filesystem certification managed comparator enum is invalid')
+          if values['scratch_state'] not in state_values:
+              raise SystemExit('filesystem certification scratch comparator state is invalid')
+          if values['managed_state'] not in state_values:
+              raise SystemExit('filesystem certification managed comparator state is invalid')
+          if values['accepted']:
+              if values['state'] != 'ACCEPTED':
+                  raise SystemExit('accepted filesystem certification has non-ACCEPTED state')
+              if not values['selection_before_mutation']:
+                  raise SystemExit('accepted filesystem certification lacks pre-mutation comparator admission')
+              if values['scratch_state'] != 'SUPPORTED' or values['managed_state'] != 'SUPPORTED':
+                  raise SystemExit('accepted filesystem certification lacks supported comparator paths')
+
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
               handle.write(f"state={values['state']}\n")
               handle.write(f"accepted={str(values['accepted']).lower()}\n")
               handle.write(f"cleanup_verified={str(values['cleanup_verified']).lower()}\n")
+              handle.write(
+                  f"selection_before_mutation={str(values['selection_before_mutation']).lower()}\n"
+              )
+              handle.write(f"scratch_selected={values['scratch_selected']}\n")
+              handle.write(f"scratch_state={values['scratch_state']}\n")
+              handle.write(f"managed_selected={values['managed_selected']}\n")
+              handle.write(f"managed_state={values['managed_state']}\n")
           if values['state'] == 'QUARANTINED':
               raise SystemExit('filesystem certification cleanup is not proven')
           PY
@@ -278,6 +338,11 @@ jobs:
           STATE: ${{ needs.certify-filesystem.outputs.state }}
           ACCEPTED: ${{ needs.certify-filesystem.outputs.accepted }}
           CLEANUP_VERIFIED: ${{ needs.certify-filesystem.outputs.cleanup_verified }}
+          SELECTION_BEFORE_MUTATION: ${{ needs.certify-filesystem.outputs.selection_before_mutation }}
+          SCRATCH_SELECTED: ${{ needs.certify-filesystem.outputs.scratch_selected }}
+          SCRATCH_STATE: ${{ needs.certify-filesystem.outputs.scratch_state }}
+          MANAGED_SELECTED: ${{ needs.certify-filesystem.outputs.managed_selected }}
+          MANAGED_STATE: ${{ needs.certify-filesystem.outputs.managed_state }}
         with:
           script: |
             const state = process.env.STATE || 'UNOBSERVED';
@@ -302,6 +367,11 @@ jobs:
               `- transaction_state: \`${state}\``,
               `- accepted: \`${process.env.ACCEPTED || 'false'}\``,
               `- cleanup_verified: \`${process.env.CLEANUP_VERIFIED || 'false'}\``,
+              `- comparator_selection_before_mutation: \`${process.env.SELECTION_BEFORE_MUTATION || 'false'}\``,
+              `- scratch_selected_comparator: \`${process.env.SCRATCH_SELECTED || 'unobserved'}\``,
+              `- scratch_comparator_path_state: \`${process.env.SCRATCH_STATE || 'unobserved'}\``,
+              `- managed_selected_comparator: \`${process.env.MANAGED_SELECTED || 'unobserved'}\``,
+              `- managed_comparator_path_state: \`${process.env.MANAGED_STATE || 'unobserved'}\``,
               '- mutation_scope: `transaction-scoped adapter test namespaces only`',
               '- package_mutation_performed: `false`',
               '- runtime_lifecycle_mutation_performed: `false`',
