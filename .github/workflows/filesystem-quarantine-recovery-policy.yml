@@ -1,0 +1,181 @@
+name: Filesystem quarantine recovery policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-quarantine-recovery-contract:
+    name: Validate filesystem quarantine observation and cleanup reducers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce quarantine recovery state-machine contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflows = Path('.github/workflows')
+          observe_path = workflows / 'phone-filesystem-quarantine-observation.yml'
+          cleanup_path = workflows / 'phone-filesystem-quarantine-cleanup.yml'
+          if not observe_path.is_file() or not cleanup_path.is_file():
+              raise SystemExit('filesystem quarantine recovery workflows are missing')
+
+          observe = observe_path.read_text(encoding='utf-8')
+          cleanup = cleanup_path.read_text(encoding='utf-8')
+          required_group = 'production-phone-global-mutation'
+
+          observation_contract = (
+              "github.event.comment.user.login == github.repository_owner",
+              "startsWith(github.event.comment.body, '/phone-filesystem-quarantine-observe ')",
+              "'run_android_filesystem_quarantine_recovery.py'",
+              "'run_android_filesystem_certification.py'",
+              "'run_private_phone_preflight.py'",
+              "'transaction_ids': json.loads(os.environ['TRANSACTION_IDS_JSON'])",
+              "'--mode', 'observe'",
+              "'android.filesystem-quarantine-observation.v1'",
+              "evidence.get('phone_mutation_performed') is not False",
+              "evidence.get('raw_directory_contents_recorded')",
+              "observation_validated: ${{ steps.result.outputs.observation_validated }}",
+              "artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}",
+              "id: evidence-upload",
+              "continue-on-error: true",
+              "id: evidence-state",
+              "classification = 'FILESYSTEM_QUARANTINE_UNOBSERVED';",
+              "classification = 'FILESYSTEM_QUARANTINE_OBSERVED_UNPERSISTED';",
+              "classification = 'FILESYSTEM_QUARANTINE_OBSERVATION_UNKNOWN';",
+              "classification = 'FILESYSTEM_QUARANTINE_ALREADY_ABSENT';",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_ADMISSIBLE';",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED';",
+              "- phone_mutation_performed: `false`",
+          )
+          missing_observation = [item for item in observation_contract if item not in observe]
+          if missing_observation:
+              raise SystemExit(
+                  'quarantine observation contract missing: ' + ', '.join(missing_observation)
+              )
+          if required_group in observe:
+              raise SystemExit('read-only quarantine observation must stay outside global mutation lock')
+          if observe.count("'run_android_filesystem_quarantine_recovery.py'") < 2:
+              raise SystemExit('quarantine observation canonical recovery script must be copied and manifest-required')
+          if "process.env.OBSERVATION_JOB_RESULT === 'success'" in observe:
+              raise SystemExit('quarantine observation state must be independent from job conclusion')
+
+          cleanup_contract = (
+              "github.event.comment.user.login == github.repository_owner",
+              "startsWith(github.event.comment.body, '/phone-filesystem-quarantine-clean ')",
+              "observation_run_id = int(tokens[2])",
+              "observation.get('name') != 'Production Android filesystem quarantine observation'",
+              "observation.get('head_sha') != private_sha",
+              "artifact.get('expired') is False",
+              "run-id: ${{ steps.command.outputs.observation_run_id }}",
+              "evidence.get('observation_complete') is not True",
+              "evidence.get('cleanup_admissible') is not True",
+              "observation_sha256",
+              "admission-observation.json",
+              "'run_android_filesystem_quarantine_recovery.py'",
+              "'--mode', 'cleanup'",
+              "operation_id') != 'android.filesystem-quarantine-cleanup.v1'",
+              "state not in {'CLEANED', 'ALREADY_CLEAN', 'REFUSED', 'QUARANTINED'}",
+              "if state == 'REFUSED' and mutation:",
+              "result_validated: ${{ steps.result.outputs.result_validated }}",
+              "artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}",
+              "id: evidence-upload",
+              "continue-on-error: true",
+              "id: evidence-state",
+              "Require durable accepted cleanup",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_UNOBSERVED';",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_OBSERVED_UNPERSISTED';",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_PROVEN';",
+              "classification = 'FILESYSTEM_QUARANTINE_ALREADY_CLEAN';",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED';",
+              "classification = 'FILESYSTEM_QUARANTINE_CLEANUP_QUARANTINED';",
+          )
+          missing_cleanup = [item for item in cleanup_contract if item not in cleanup]
+          if missing_cleanup:
+              raise SystemExit(
+                  'quarantine cleanup contract missing: ' + ', '.join(missing_cleanup)
+              )
+          if cleanup.count(f'group: {required_group}') != 1:
+              raise SystemExit('quarantine cleanup must have exactly one global mutation lock')
+          if "process.env.CLEANUP_JOB_RESULT === 'success'" in cleanup:
+              raise SystemExit('quarantine cleanup state must be independent from job conclusion')
+          if cleanup.count("'run_android_filesystem_quarantine_recovery.py'") < 2:
+              raise SystemExit('quarantine cleanup canonical recovery script must be copied and manifest-required')
+
+          def classify_observation(validated, persisted, complete, all_absent, admissible):
+              if not validated:
+                  return 'FILESYSTEM_QUARANTINE_UNOBSERVED'
+              if not persisted:
+                  return 'FILESYSTEM_QUARANTINE_OBSERVED_UNPERSISTED'
+              if not complete:
+                  return 'FILESYSTEM_QUARANTINE_OBSERVATION_UNKNOWN'
+              if all_absent:
+                  return 'FILESYSTEM_QUARANTINE_ALREADY_ABSENT'
+              if admissible:
+                  return 'FILESYSTEM_QUARANTINE_CLEANUP_ADMISSIBLE'
+              return 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED'
+
+          observation_truth_table = (
+              ((False, False, False, False, False), 'FILESYSTEM_QUARANTINE_UNOBSERVED'),
+              ((True, False, True, False, True), 'FILESYSTEM_QUARANTINE_OBSERVED_UNPERSISTED'),
+              ((True, True, False, False, False), 'FILESYSTEM_QUARANTINE_OBSERVATION_UNKNOWN'),
+              ((True, True, True, True, True), 'FILESYSTEM_QUARANTINE_ALREADY_ABSENT'),
+              ((True, True, True, False, True), 'FILESYSTEM_QUARANTINE_CLEANUP_ADMISSIBLE'),
+              ((True, True, True, False, False), 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED'),
+          )
+          for inputs, expected in observation_truth_table:
+              actual = classify_observation(*inputs)
+              if actual != expected:
+                  raise SystemExit(
+                      f'quarantine observation reducer truth table differs: inputs={inputs} expected={expected} actual={actual}'
+                  )
+
+          def classify_cleanup(validated, persisted, state, accepted, verified):
+              if not validated:
+                  return 'FILESYSTEM_QUARANTINE_CLEANUP_UNOBSERVED'
+              if not persisted:
+                  return 'FILESYSTEM_QUARANTINE_CLEANUP_OBSERVED_UNPERSISTED'
+              if state == 'CLEANED' and accepted and verified:
+                  return 'FILESYSTEM_QUARANTINE_CLEANUP_PROVEN'
+              if state == 'ALREADY_CLEAN' and accepted and verified:
+                  return 'FILESYSTEM_QUARANTINE_ALREADY_CLEAN'
+              if state == 'REFUSED' and not accepted:
+                  return 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED'
+              if state == 'QUARANTINED' and not accepted:
+                  return 'FILESYSTEM_QUARANTINE_CLEANUP_QUARANTINED'
+              return 'FILESYSTEM_QUARANTINE_CLEANUP_INVALID'
+
+          cleanup_truth_table = (
+              ((False, False, 'UNOBSERVED', False, False), 'FILESYSTEM_QUARANTINE_CLEANUP_UNOBSERVED'),
+              ((True, False, 'CLEANED', True, True), 'FILESYSTEM_QUARANTINE_CLEANUP_OBSERVED_UNPERSISTED'),
+              ((True, True, 'CLEANED', True, True), 'FILESYSTEM_QUARANTINE_CLEANUP_PROVEN'),
+              ((True, True, 'ALREADY_CLEAN', True, True), 'FILESYSTEM_QUARANTINE_ALREADY_CLEAN'),
+              ((True, True, 'REFUSED', False, False), 'FILESYSTEM_QUARANTINE_CLEANUP_REFUSED'),
+              ((True, True, 'QUARANTINED', False, False), 'FILESYSTEM_QUARANTINE_CLEANUP_QUARANTINED'),
+              ((True, True, 'CLEANED', False, True), 'FILESYSTEM_QUARANTINE_CLEANUP_INVALID'),
+          )
+          for inputs, expected in cleanup_truth_table:
+              actual = classify_cleanup(*inputs)
+              if actual != expected:
+                  raise SystemExit(
+                      f'quarantine cleanup reducer truth table differs: inputs={inputs} expected={expected} actual={actual}'
+                  )
+
+          print('filesystem quarantine recovery policy: accepted')
+          print('observation_surface=read-only-exact-transactions')
+          print('cleanup_surface=prior-durable-admission+same-job-reobservation')
+          print('cleanup_global_lock=accepted')
+          print('observation_reducer_truth_table=accepted')
+          print('cleanup_reducer_truth_table=accepted')
+          PY
