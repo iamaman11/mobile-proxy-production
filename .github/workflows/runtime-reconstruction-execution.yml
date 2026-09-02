@@ -185,8 +185,27 @@ jobs:
           ):
               raise SystemExit('accepted readiness child run differs from exact authority')
 
+          binding = json.loads(
+              Path('private-execution', authority['reconstruction_binding_path']).read_text(encoding='utf-8')
+          )
+          for key, value in {
+              'binding_role': 'private_execution_only',
+              'canonical_repository': authority['canonical_repository'],
+              'canonical_sha': authority['canonical_sha'],
+              'quality_required': True,
+              'final_release_authority': False,
+              'phone_execution_authority': True,
+              'provider_credentials_allowed': False,
+              'recovery_health_scope': 'local_runtime_only',
+              'full_serving_authority': False,
+              'item20_transport_authority': 'deferred_to_sealed_handoff',
+          }.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f'current reconstruction binding differs from armed execution authority: {key}')
+          if binding.get('enrollment_status') != 'enrolled':
+              raise SystemExit('current reconstruction binding is not enrolled')
+
           for path in (
-              authority['reconstruction_binding_path'],
               authority['reconstruction_manifest_path'],
               authority['readiness_workflow_path'],
           ):
