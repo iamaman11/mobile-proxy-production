@@ -209,7 +209,10 @@ jobs:
             exit 1
           fi
           destination="${RUNNER_TEMP}/phone-preflight-source"
-          rm -rf "${destination}"
+          if [ -e "${destination}" ] || [ -L "${destination}" ]; then
+            echo "immutable preflight source destination already exists" >&2
+            exit 1
+          fi
           mv "${selected}" "${destination}"
           echo "download_attempt=${selected_attempt}" >> "$GITHUB_OUTPUT"
 
