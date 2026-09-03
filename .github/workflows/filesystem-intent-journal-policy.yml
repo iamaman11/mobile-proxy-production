@@ -1,0 +1,134 @@
+name: Filesystem mutation intent journal policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-journal-ordering:
+    name: Validate retention-independent pre-dispatch journal
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce durable CONTROL journal before filesystem adapter invocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          workflows = Path('.github/workflows')
+          contracts = {
+              'phone-filesystem-certification.yml': {
+                  'operation_id': 'android.filesystem-certification.v1',
+                  'adapter': '- name: Run bounded filesystem mutation transaction',
+                  'transaction_env': 'process.env.TRANSACTION_ID',
+              },
+              'phone-filesystem-quarantine-cleanup.yml': {
+                  'operation_id': 'android.filesystem-quarantine-cleanup.v1',
+                  'adapter': '- name: Run exact bounded quarantine cleanup',
+                  'transaction_env': 'process.env.OPERATION_TRANSACTION_ID',
+              },
+          }
+
+          marker_anchor = '- name: Persist CONTROL mutation dispatch intent before adapter invocation'
+          journal_anchor = '- name: Journal durable CONTROL mutation intent before adapter invocation'
+
+          common_required = (
+              'uses: actions/github-script@v7',
+              "const fs = require('fs');",
+              "JSON.parse(fs.readFileSync(process.env.INTENT_PATH, 'utf8'))",
+              "marker.evidence_type !== 'MUTATION_DISPATCH_INTENT'",
+              "marker.authority !== 'CONTROL'",
+              "marker.lifecycle !== 'CURRENT'",
+              "marker.private_sha !== process.env.GITHUB_SHA",
+              "marker.workflow_run_id !== context.runId",
+              "marker.workflow_run_attempt !== Number(process.env.GITHUB_RUN_ATTEMPT)",
+              "marker.target !== 'android-production'",
+              "marker.target_binding_id.startsWith('tb-hmac-sha256:')",
+              "marker.affected_domain_generations?.['domain/filesystem'] !== expectedGeneration",
+              'marker.dispatch_may_reach_target !== true',
+              'marker.adapter_invocation_allowed_only_after_persistence !== true',
+              'marker.blind_retry_allowed !== false',
+              'marker.raw_device_identifier_recorded !== false',
+              "journal_type: 'FILESYSTEM_MUTATION_INTENT'",
+              'dispatch_intent_artifact_persisted: true',
+              'journaled_before_adapter_invocation: true',
+              'dispatch_may_reach_target: true',
+              'blind_retry_allowed: false',
+              'raw_device_identifier_recorded: false',
+              "'## CONTROL FILESYSTEM MUTATION INTENT'",
+              "JSON.stringify(journal)",
+              'issue_number: 1',
+              "if (!response?.data?.id)",
+              "core.setOutput('journal_comment_id', String(response.data.id))",
+          )
+
+          for name, contract in contracts.items():
+              path = workflows / name
+              if not path.is_file():
+                  raise SystemExit(f'missing filesystem mutator workflow: {name}')
+              text = path.read_text(encoding='utf-8')
+              marker_index = text.find(marker_anchor)
+              journal_index = text.find(journal_anchor)
+              adapter_index = text.find(contract['adapter'])
+              if min(marker_index, journal_index, adapter_index) < 0:
+                  raise SystemExit(f'{name}: marker/journal/adapter anchor missing')
+              if not marker_index < journal_index < adapter_index:
+                  raise SystemExit(
+                      f'{name}: required order is persisted marker -> durable journal -> adapter'
+                  )
+
+              journal_section = text[journal_index:adapter_index]
+              missing = [snippet for snippet in common_required if snippet not in journal_section]
+              if missing:
+                  raise SystemExit(
+                      f'{name}: durable journal contract missing: ' + ', '.join(missing)
+                  )
+              operation_check = f"marker.operation_id !== '{contract['operation_id']}'"
+              if operation_check not in journal_section:
+                  raise SystemExit(f'{name}: journal does not bind exact operation ID')
+              if contract['transaction_env'] not in journal_section:
+                  raise SystemExit(f'{name}: journal does not bind exact operation transaction')
+              if re.search(r'(?m)^\s+continue-on-error:\s*true\s*$', journal_section):
+                  raise SystemExit(f'{name}: journal must fail closed before adapter invocation')
+              if re.search(r'(?m)^\s+if:\s*always\(\)\s*$', journal_section):
+                  raise SystemExit(f'{name}: journal must not be an always-run non-gating step')
+
+              marker_section = text[marker_index:journal_index]
+              if 'retention-days: 90' not in marker_section:
+                  raise SystemExit(f'{name}: bounded marker artifact retention contract changed')
+              if 'if-no-files-found: error' not in marker_section:
+                  raise SystemExit(f'{name}: marker artifact persistence is not fail closed')
+
+          def adapter_allowed(marker_persisted: bool, journal_persisted: bool) -> bool:
+              return marker_persisted and journal_persisted
+
+          truth_table = (
+              ((False, False), False),
+              ((True, False), False),
+              ((False, True), False),
+              ((True, True), True),
+          )
+          for inputs, expected in truth_table:
+              actual = adapter_allowed(*inputs)
+              if actual != expected:
+                  raise SystemExit(
+                      f'journal gate truth table differs: inputs={inputs} expected={expected} actual={actual}'
+                  )
+
+          print('filesystem_mutation_intent_journal=retention-independent')
+          print('journal_authority=CONTROL')
+          print('journal_order=persisted-marker->issue1-journal->adapter')
+          print('journal_failure=adapter-blocked')
+          print('raw_device_identifier_recorded=false')
+          PY
