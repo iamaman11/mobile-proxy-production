@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   command-gate:
-    name: Validate current clean-install authority and stable transaction
+    name: Validate cursor-bound clean-install authority
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
@@ -24,95 +24,28 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      cursor_id: ${{ steps.command.outputs.cursor_id }}
       quality_run_id: ${{ steps.command.outputs.quality_run_id }}
       transaction_id: ${{ steps.command.outputs.transaction_id }}
+      semantic_request_key: ${{ steps.command.outputs.semantic_request_key }}
     steps:
-      - name: Validate owner command, exact mains, Quality, and no prior destructive intent
+      - name: Checkout exact private control code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-execution
+          persist-credentials: false
+
+      - name: Admit exactly one tracker-cursor transaction
         id: command
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import urllib.parse
-          import urllib.request
-
-          match = re.fullmatch(
-              r'/phone-clean-install ([0-9a-f]{40})',
-              os.environ.get('COMMAND', '').strip(),
-          )
-          if match is None:
-              raise SystemExit('invalid destructive clean-install command')
-          requested_sha = match.group(1)
-          transaction_id = f"clean-install-comment-{os.environ['COMMENT_ID']}"
-          headers = {
-              'Accept': 'application/vnd.github+json',
-              'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
-              'User-Agent': 'mobile-proxy-production-clean-install-gate',
-              'X-GitHub-Api-Version': '2022-11-28',
-          }
-
-          def get_json(url):
-              request = urllib.request.Request(url, headers=headers)
-              with urllib.request.urlopen(request, timeout=20) as response:
-                  return json.load(response)
-
-          if get_json('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main').get('sha') != requested_sha:
-              raise SystemExit('requested SHA is not current canonical public main')
-          if get_json('https://api.github.com/repos/iamaman11/mobile-proxy-production/commits/main').get('sha') != os.environ['GITHUB_SHA']:
-              raise SystemExit('workflow execution SHA is not current private main')
-
-          query = urllib.parse.urlencode(
-              {'head_sha': requested_sha, 'event': 'push', 'status': 'completed', 'per_page': 100}
-          )
-          runs = get_json(
-              'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?' + query
-          ).get('workflow_runs', [])
-          quality = [
-              run for run in runs
-              if run.get('name') == 'Quality'
-              and run.get('head_branch') == 'main'
-              and run.get('head_sha') == requested_sha
-              and run.get('conclusion') == 'success'
-          ]
-          if not quality:
-              raise SystemExit('current canonical SHA has no exact successful main Quality run')
-          quality.sort(key=lambda run: (run.get('run_attempt', 0), run.get('id', 0)), reverse=True)
-
-          headings = (
-              '## CONTROL APK CLEAN INSTALL INTENT',
-              '## CONTROL APK CLEAN INSTALL TERMINAL',
-          )
-          for page in range(1, 51):
-              comments = get_json(
-                  f'https://api.github.com/repos/iamaman11/mobile-proxy-production/issues/1/comments?per_page=100&page={page}'
-              )
-              for comment in comments:
-                  if (comment.get('user') or {}).get('login') != 'github-actions[bot]':
-                      continue
-                  body = comment.get('body') or ''
-                  for heading in headings:
-                      prefix = heading + '\n\n```json\n'
-                      if not body.startswith(prefix) or not body.endswith('\n```'):
-                          continue
-                      try:
-                          payload = json.loads(body[len(prefix):-4])
-                      except json.JSONDecodeError:
-                          continue
-                      if payload.get('transaction_id') == transaction_id:
-                          raise SystemExit('transaction already has durable CONTROL evidence; blind retry forbidden')
-              if len(comments) < 100:
-                  break
-          else:
-              raise SystemExit('CONTROL evidence pagination exceeded bound')
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
-              handle.write(f'canonical_sha={requested_sha}\n')
-              handle.write(f"quality_run_id={quality[0]['id']}\n")
-              handle.write(f'transaction_id={transaction_id}\n')
-          PY
+          python3 private-execution/.github/scripts/clean_install_control.py admit \
+            --command-body "${COMMAND}" \
+            --command-comment-id "${COMMENT_ID}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --github-output "${GITHUB_OUTPUT}"
 
   build-candidate:
     name: Build exact current-source signed replacement candidate off-phone
@@ -121,8 +54,10 @@ jobs:
     timeout-minutes: 60
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      CONTROL_CURSOR_ID: ${{ needs.command-gate.outputs.cursor_id }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       TRANSACTION_ID: ${{ needs.command-gate.outputs.transaction_id }}
+      SEMANTIC_REQUEST_KEY: ${{ needs.command-gate.outputs.semantic_request_key }}
       EXPECTED_VERSION_NAME: '0.1.4'
       EXPECTED_VERSION_CODE: '1004'
       ANDROID_BASELINE_REF: v0.1.3
@@ -211,7 +146,7 @@ jobs:
           test -x canonical/target/release/android-artifact-digest
           echo "path=canonical/target/release/android-artifact-digest" >> "$GITHUB_OUTPUT"
 
-      - name: Assemble immutable same-run clean-install bundle
+      - name: Assemble immutable cursor-bound clean-install bundle
         shell: bash
         env:
           RELEASE_OUTPUT: ${{ steps.build.outputs.output }}
@@ -234,7 +169,9 @@ jobs:
               'clean_install_android_production.py': Path('canonical/scripts/clean_install_android_production.py'),
               'run_private_phone_preflight.py': Path('canonical/scripts/run_private_phone_preflight.py'),
               'verify_android_installed_signer.py': Path('canonical/scripts/verify_android_installed_signer.py'),
+              'clean_install_control.py': Path('private-execution/.github/scripts/clean_install_control.py'),
               'run_destructive_clean_install.py': Path('private-execution/.github/scripts/run_destructive_clean_install.py'),
+              'run_destructive_clean_install_v2.py': Path('private-execution/.github/scripts/run_destructive_clean_install_v2.py'),
           }
           digests = {}
           for name, source in files.items():
@@ -242,17 +179,19 @@ jobs:
                   raise SystemExit(f'clean-install bundle input missing: {name}')
               destination = root / name
               shutil.copyfile(source, destination)
-              if name in {'android-artifact-digest', 'run_destructive_clean_install.py'}:
+              if name in {'android-artifact-digest', 'run_destructive_clean_install_v2.py'}:
                   destination.chmod(0o755)
               digests[name] = hashlib.sha256(destination.read_bytes()).hexdigest()
           manifest = {
-              'format_version': 1,
+              'format_version': 2,
               'canonical_repository': 'iamaman11/mobile-proxy',
               'canonical_sha': os.environ['CANONICAL_SHA'],
+              'control_cursor_id': int(os.environ['CONTROL_CURSOR_ID']),
               'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
               'private_repository': 'iamaman11/mobile-proxy-production',
               'private_execution_sha': os.environ['GITHUB_SHA'],
               'transaction_id': os.environ['TRANSACTION_ID'],
+              'semantic_request_key': os.environ['SEMANTIC_REQUEST_KEY'],
               'expected_version_name': os.environ['EXPECTED_VERSION_NAME'],
               'expected_version_code': int(os.environ['EXPECTED_VERSION_CODE']),
               'files_sha256': digests,
@@ -281,9 +220,13 @@ jobs:
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 20
     env:
+      COMMAND: ${{ github.event.comment.body }}
+      COMMENT_ID: ${{ github.event.comment.id }}
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      CONTROL_CURSOR_ID: ${{ needs.command-gate.outputs.cursor_id }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       TRANSACTION_ID: ${{ needs.command-gate.outputs.transaction_id }}
+      SEMANTIC_REQUEST_KEY: ${{ needs.command-gate.outputs.semantic_request_key }}
       PRIVATE_SHA: ${{ github.sha }}
       REQUEST_REF: issue-comment:${{ github.event.comment.id }}
       EXPECTED_VERSION_NAME: '0.1.4'
@@ -314,13 +257,15 @@ jobs:
           root = Path(os.environ['RUNNER_TEMP']) / 'phone-clean-install-bundle'
           manifest = json.loads((root / 'bundle-manifest.json').read_text(encoding='utf-8'))
           expected = {
-              'format_version': 1,
+              'format_version': 2,
               'canonical_repository': 'iamaman11/mobile-proxy',
               'canonical_sha': os.environ['CANONICAL_SHA'],
+              'control_cursor_id': int(os.environ['CONTROL_CURSOR_ID']),
               'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
               'private_repository': 'iamaman11/mobile-proxy-production',
               'private_execution_sha': os.environ['PRIVATE_SHA'],
               'transaction_id': os.environ['TRANSACTION_ID'],
+              'semantic_request_key': os.environ['SEMANTIC_REQUEST_KEY'],
               'expected_version_name': os.environ['EXPECTED_VERSION_NAME'],
               'expected_version_code': int(os.environ['EXPECTED_VERSION_CODE']),
           }
@@ -334,7 +279,9 @@ jobs:
               'clean_install_android_production.py',
               'run_private_phone_preflight.py',
               'verify_android_installed_signer.py',
+              'clean_install_control.py',
               'run_destructive_clean_install.py',
+              'run_destructive_clean_install_v2.py',
           }
           digests = manifest.get('files_sha256')
           if not isinstance(digests, dict) or set(digests) != expected_files:
@@ -344,8 +291,21 @@ jobs:
               if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digests[name]:
                   raise SystemExit(f'clean-install bundle digest differs: {name}')
           PY
-          chmod 700 "${RUNNER_TEMP}/phone-clean-install-bundle/run_destructive_clean_install.py"
+          chmod 700 "${RUNNER_TEMP}/phone-clean-install-bundle/run_destructive_clean_install_v2.py"
           chmod 700 "${RUNNER_TEMP}/phone-clean-install-bundle/android-artifact-digest"
+
+      - name: Revalidate semantic admission inside global mutation lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/phone-clean-install-bundle"
+          python3 "${root}/clean_install_control.py" admit \
+            --command-body "${COMMAND}" \
+            --command-comment-id "${COMMENT_ID}" \
+            --workflow-sha "${PRIVATE_SHA}" \
+            --expected-quality-run-id "${QUALITY_RUN_ID}" \
+            --expected-transaction-id "${TRANSACTION_ID}" \
+            --expected-semantic-request-key "${SEMANTIC_REQUEST_KEY}"
 
       - name: Execute one durable destructive clean-install transaction
         id: execute
@@ -360,12 +320,14 @@ jobs:
           cp "${root}/run_private_phone_preflight.py" "${canonical}/scripts/"
           cp "${root}/verify_android_installed_signer.py" "${canonical}/scripts/"
           touch "${canonical}/scripts/__init__.py"
-          python3 "${root}/run_destructive_clean_install.py" \
+          python3 "${root}/run_destructive_clean_install_v2.py" \
             --canonical-root "${canonical}" \
             --canonical-sha "${CANONICAL_SHA}" \
             --quality-run-id "${QUALITY_RUN_ID}" \
             --private-sha "${PRIVATE_SHA}" \
             --transaction-id "${TRANSACTION_ID}" \
+            --semantic-request-key "${SEMANTIC_REQUEST_KEY}" \
+            --control-cursor-id "${CONTROL_CURSOR_ID}" \
             --request-ref "${REQUEST_REF}" \
             --apk "${root}/mobile-proxy-android-v0.1.4.apk" \
             --release-evidence "${root}/android-release-evidence.json" \
@@ -428,6 +390,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Destructive Android clean install
           - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Control cursor: ${{ env.CONTROL_CURSOR_ID }}
           - Quality run: ${{ env.QUALITY_RUN_ID }}
           - Transaction: ${{ env.TRANSACTION_ID }}
           - State: ${{ steps.result.outputs.state || 'NO_DURABLE_TERMINAL_OUTPUT' }}
