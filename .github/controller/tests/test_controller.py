@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO = ROOT.parents[1]
+GITHUB_DIR = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
 from deployment_request import RequestProvenance, build_deployment_request
@@ -198,7 +198,7 @@ def test_recovered_never_projects_success() -> None:
 
 
 def test_exactly_one_destructive_adapter_callsite() -> None:
-    path = REPO / "scripts" / "run_phone_release_deployment.py"
+    path = GITHUB_DIR / "scripts" / "run_phone_release_deployment.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     calls = [
         node for node in ast.walk(tree)
