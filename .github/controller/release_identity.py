@@ -43,6 +43,8 @@ def validate_product_release(value: Mapping[str, object], *, target: str) -> Pro
         raise ReleaseIdentityError("release tag/id/source SHA is invalid")
     if any(_SHA256.fullmatch(item) is None for item in (artifact_digest, manifest_digest, provenance_digest)):
         raise ReleaseIdentityError("release digest is invalid")
+    if value.get("immutable") is not True:
+        raise ReleaseIdentityError("deployment requires a GitHub immutable Release")
     expected_suffix = ".apk" if target == "phone-production" else ".tar.gz"
     if not artifact_name.startswith("mobile-proxy-") or not artifact_name.endswith(expected_suffix):
         raise ReleaseIdentityError("release artifact type does not match target")
@@ -56,5 +58,5 @@ def validate_product_release(value: Mapping[str, object], *, target: str) -> Pro
         artifact_digest=artifact_digest,
         manifest_digest=manifest_digest,
         provenance_digest=provenance_digest,
-        immutable=bool(value.get("immutable", False)),
+        immutable=True,
     )
