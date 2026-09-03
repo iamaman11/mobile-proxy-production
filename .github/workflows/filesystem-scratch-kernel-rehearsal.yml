@@ -1,0 +1,182 @@
+name: First Universal Kernel filesystem scratch rehearsal
+
+on:
+  workflow_call:
+    inputs:
+      operation:
+        required: true
+        type: string
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      ANDROID_TARGET_BINDING_KEY:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  execute-scratch-transaction:
+    name: Execute exactly one canonical filesystem scratch transaction
+    if: >-
+      inputs.operation == 'phone-filesystem-certification' &&
+      inputs.source_event_name == 'issue_comment' &&
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      inputs.command == format('/phone-filesystem-cert {0}', '374073b4e666d71981d5ccf9169c30e0979845e6')
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    env:
+      CANONICAL_SHA: 374073b4e666d71981d5ccf9169c30e0979845e6
+      CANONICAL_QUALITY_RUN_ID: '33802912939'
+      AUTHORITY_CURSOR: issue179-comment-5531491187
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out exact private execution plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact accepted public canonical source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: 374073b4e666d71981d5ccf9169c30e0979845e6
+          path: canonical-public
+          persist-credentials: false
+
+      - name: Verify immutable execution authority before phone boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C canonical-public rev-parse HEAD)" = "${CANONICAL_SHA}"
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          run_id = os.environ['CANONICAL_QUALITY_RUN_ID']
+          url = f'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs/{run_id}'
+          request = urllib.request.Request(
+              url,
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'mobile-proxy-production-scratch-kernel-rehearsal',
+              },
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              run = json.load(response)
+          if (
+              run.get('name') != 'Quality'
+              or run.get('event') != 'push'
+              or run.get('head_branch') != 'main'
+              or run.get('head_sha') != os.environ['CANONICAL_SHA']
+              or run.get('status') != 'completed'
+              or run.get('conclusion') != 'success'
+          ):
+              raise SystemExit('exact canonical Quality authority is not accepted')
+          PY
+
+      - name: Execute Universal Kernel scratch transaction
+        id: transaction
+        continue-on-error: true
+        shell: bash
+        env:
+          CONTROL_REQUEST_ID: ${{ inputs.control_request_id }}
+          CONTROL_REQUEST_JSON: ${{ inputs.control_request_json }}
+          REQUEST_REF: ${{ inputs.source_comment_url }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/run_filesystem_scratch_transaction.py \
+            --canonical-root canonical-public \
+            --canonical-sha "${CANONICAL_SHA}" \
+            --quality-run-id "${CANONICAL_QUALITY_RUN_ID}" \
+            --private-sha "${GITHUB_SHA}" \
+            --authority-cursor "${AUTHORITY_CURSOR}" \
+            --request-ref "${REQUEST_REF}" \
+            --control-request-id "${CONTROL_REQUEST_ID}" \
+            --control-request-json "${CONTROL_REQUEST_JSON}" \
+            --output "${RUNNER_TEMP}/filesystem-scratch-kernel-result.json"
+
+      - name: Persist bounded secondary result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: filesystem-scratch-kernel-result-${{ github.run_id }}
+          path: ${{ runner.temp }}/filesystem-scratch-kernel-result.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Enforce exact terminal acceptance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'filesystem-scratch-kernel-result.json'
+          if not path.is_file():
+              raise SystemExit('scratch Kernel result is unavailable; durable CONTROL intent, if present, forbids blind retry')
+          result = json.loads(path.read_text(encoding='utf-8'))
+          if result.get('schema') != 'filesystem-scratch-kernel-result.v1':
+              raise SystemExit('scratch Kernel result schema differs')
+          if result.get('operation_id') != 'android.filesystem-scratch-roundtrip.v1':
+              raise SystemExit('scratch Kernel physical operation differs')
+          if result.get('semantic_operation') != 'phone-filesystem-certification':
+              raise SystemExit('scratch Kernel semantic operation differs')
+          if result.get('canonical_sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('scratch Kernel canonical SHA differs')
+          if result.get('canonical_quality_run_id') != int(os.environ['CANONICAL_QUALITY_RUN_ID']):
+              raise SystemExit('scratch Kernel Quality authority differs')
+          if result.get('private_sha') != os.environ['GITHUB_SHA']:
+              raise SystemExit('scratch Kernel private SHA differs')
+          if result.get('authority_cursor') != os.environ['AUTHORITY_CURSOR']:
+              raise SystemExit('scratch Kernel authority cursor differs')
+          if result.get('blind_retry_allowed') is not False:
+              raise SystemExit('scratch Kernel result permits blind retry')
+          if result.get('raw_device_identifier_recorded') is not False:
+              raise SystemExit('scratch Kernel result records raw device identity')
+          if result.get('state') != 'ACCEPTED' or result.get('lifecycle_state') != 'ACCEPTED':
+              raise SystemExit(
+                  'scratch Kernel transaction did not reach ACCEPTED; do not retry and do not continue to another physical step'
+              )
+          if not result.get('terminal_ref'):
+              raise SystemExit('scratch Kernel ACCEPTED result lacks durable terminal reference')
+          print('FILESYSTEM_SCRATCH_KERNEL_ACCEPTED')
+          PY
