@@ -65,6 +65,16 @@ def reduce_state(current: DeploymentState, event: str, *, reason: str | None = N
     if event == "observation_refused":
         _only(current, OBSERVE)
         return replace(current, state=REFUSED, current_step=OBSERVE, blocking_predicates=((reason or "precondition_refused"),))
+    if event == "already_desired":
+        _only(current, OBSERVE)
+        return replace(
+            current,
+            state=ACCEPTED,
+            current_step=OBSERVE,
+            mutation_performed=False,
+            postcondition_verified=True,
+            blocking_predicates=(),
+        )
     if event == "observed":
         _only(current, OBSERVE)
         return replace(current, state=INTENT, current_step=INTENT)
