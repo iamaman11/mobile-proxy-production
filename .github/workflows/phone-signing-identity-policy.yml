@@ -42,7 +42,7 @@ jobs:
               return '$' + '{{ ' + expression + ' }}'
 
           required = (
-              "github.event.comment.user.login == github.repository_owner",
+              "inputs.source_actor == github.repository_owner",
               r"/phone-signing-identity ([0-9a-f]{40})",
               "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
               'run.get("name") == "Quality"',

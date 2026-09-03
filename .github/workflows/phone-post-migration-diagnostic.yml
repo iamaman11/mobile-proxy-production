@@ -1,8 +1,32 @@
 name: Production phone post-migration diagnostic
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,9 +41,9 @@ jobs:
   command-gate:
     name: Validate authority and prepare immutable observer source
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/phone-post-migration-diagnostic ')
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/phone-post-migration-diagnostic ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -30,7 +54,7 @@ jobs:
         id: command
         shell: bash
         env:
-          COMMAND: ${{ github.event.comment.body }}
+          COMMAND: ${{ inputs.command }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -447,7 +471,7 @@ jobs:
           PHYSICAL_OBSERVATION_PERFORMED: ${{ steps.observer-outcome.outputs.physical_observation_performed }}
           RUN_ID: ${{ github.run_id }}
           REPOSITORY: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ inputs.source_issue_number }}
           CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
           QUALITY_RUN_ID_SAFE: ${{ env.QUALITY_RUN_ID }}
         run: |

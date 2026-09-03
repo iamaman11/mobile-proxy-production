@@ -1,0 +1,156 @@
+{
+  "authority_cursor": "issue179-comment-5529299637",
+  "routes": [
+    {
+      "command": "/android-release-build",
+      "mutating": false,
+      "operation": "android-release-build",
+      "workflow": "android-release-build.yml"
+    },
+    {
+      "command": "/android-release-migrate",
+      "mutating": true,
+      "operation": "android-signing-migration",
+      "workflow": "android-signing-migration.yml"
+    },
+    {
+      "command": "/android-signing-proof",
+      "mutating": false,
+      "operation": "android-signing-proof",
+      "workflow": "android-signing-proof.yml"
+    },
+    {
+      "command": "/phone-capabilities",
+      "mutating": false,
+      "operation": "phone-capability-inventory",
+      "workflow": "phone-capability-inventory.yml"
+    },
+    {
+      "command": "/phone-clean-install",
+      "mutating": true,
+      "operation": "phone-clean-install",
+      "workflow": "phone-clean-install.yml"
+    },
+    {
+      "command": "/phone-filesystem-cert",
+      "mutating": true,
+      "operation": "phone-filesystem-certification",
+      "workflow": "phone-filesystem-certification.yml"
+    },
+    {
+      "command": "/phone-filesystem-quarantine-clean",
+      "mutating": true,
+      "operation": "phone-filesystem-quarantine-cleanup",
+      "workflow": "phone-filesystem-quarantine-cleanup.yml"
+    },
+    {
+      "command": "/phone-filesystem-quarantine-observe",
+      "mutating": false,
+      "operation": "phone-filesystem-quarantine-observation",
+      "workflow": "phone-filesystem-quarantine-observation.yml"
+    },
+    {
+      "command": "/phone-filesystem-tooling",
+      "mutating": false,
+      "operation": "phone-filesystem-tooling-diagnostic",
+      "workflow": "phone-filesystem-tooling-diagnostic.yml"
+    },
+    {
+      "command": "/phone-post-migration-diagnostic",
+      "mutating": false,
+      "operation": "phone-post-migration-diagnostic",
+      "workflow": "phone-post-migration-diagnostic.yml"
+    },
+    {
+      "command": "/phone-preflight",
+      "mutating": false,
+      "operation": "phone-preflight",
+      "workflow": "phone-preflight.yml"
+    },
+    {
+      "command": "/phone-runtime-build",
+      "mutating": false,
+      "operation": "phone-runtime-binary-build",
+      "workflow": "phone-runtime-binary-build.yml"
+    },
+    {
+      "command": "/phone-runtime-cutover-preflight",
+      "mutating": false,
+      "operation": "phone-runtime-cutover-preflight",
+      "workflow": "phone-runtime-cutover-preflight.yml"
+    },
+    {
+      "command": "/phone-runtime-diagnostic",
+      "mutating": false,
+      "operation": "phone-runtime-diagnostic",
+      "workflow": "phone-runtime-diagnostic.yml"
+    },
+    {
+      "command": "/phone-runtime-error-context",
+      "mutating": false,
+      "operation": "phone-runtime-error-context",
+      "workflow": "phone-runtime-error-context.yml"
+    },
+    {
+      "command": "/phone-runtime-failure-diagnostic",
+      "mutating": false,
+      "operation": "phone-runtime-failure-diagnostic",
+      "workflow": "phone-runtime-failure-diagnostic.yml"
+    },
+    {
+      "command": "/phone-runtime-recover",
+      "mutating": true,
+      "operation": "phone-runtime-recovery",
+      "workflow": "phone-runtime-recovery.yml"
+    },
+    {
+      "command": "/phone-runtime-release-inventory",
+      "mutating": false,
+      "operation": "phone-runtime-release-inventory",
+      "workflow": "phone-runtime-release-inventory.yml"
+    },
+    {
+      "command": "/phone-runtime-repair-binaries",
+      "mutating": true,
+      "operation": "phone-runtime-binary-repair",
+      "workflow": "phone-runtime-binary-repair.yml"
+    },
+    {
+      "command": "/phone-runtime-tooling-diagnostic",
+      "mutating": false,
+      "operation": "phone-runtime-tooling-diagnostic",
+      "workflow": "phone-runtime-tooling-diagnostic.yml"
+    },
+    {
+      "command": "/phone-signing-identity",
+      "mutating": false,
+      "operation": "phone-signing-identity",
+      "workflow": "phone-signing-identity.yml"
+    },
+    {
+      "command": "/runner-rust-bootstrap",
+      "mutating": false,
+      "operation": "production-runner-rust-bootstrap",
+      "workflow": "production-runner-rust-bootstrap.yml"
+    },
+    {
+      "command": "/runtime-reconstruction-enroll",
+      "mutating": false,
+      "operation": "runtime-reconstruction-enrollment",
+      "workflow": "runtime-reconstruction-enrollment.yml"
+    },
+    {
+      "command": "/runtime-reconstruction-execute",
+      "mutating": true,
+      "operation": "runtime-reconstruction-execution",
+      "workflow": "runtime-reconstruction-execution.yml"
+    },
+    {
+      "command": "/runtime-reconstruction-readiness",
+      "mutating": false,
+      "operation": "runtime-reconstruction-readiness-transport",
+      "workflow": "runtime-reconstruction-readiness-transport.yml"
+    }
+  ],
+  "schema": "production-command-routes.v1"
+}

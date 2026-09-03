@@ -1,14 +1,32 @@
 name: Runtime reconstruction manifest enrollment
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      confirm:
-        description: "Type ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE exactly"
+      command:
         required: true
         type: string
-  issue_comment:
-    types: [created]
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,11 +36,11 @@ jobs:
   enroll-manifest:
     name: Enroll one explicit synthetic local-recovery manifest identity
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.number == 1 &&
-       github.event.comment.user.login == github.repository_owner &&
-       github.event.comment.body == '/runtime-reconstruction-enroll ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE')
+      inputs.source_event_name == 'workflow_dispatch' ||
+      (inputs.source_event_name == 'issue_comment' &&
+       inputs.source_issue_number == 1 &&
+       inputs.source_actor == github.repository_owner &&
+       inputs.command == '/runtime-reconstruction-enroll ENROLL_NEW_RUNTIME_RECONSTRUCTION_BASELINE')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -36,11 +54,11 @@ jobs:
       - name: Validate authority and explicit enrollment confirmation
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          EVENT_NAME: ${{ inputs.source_event_name }}
           DISPATCH_CONFIRM: ${{ inputs.confirm }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          COMMENT_USER: ${{ github.event.comment.user.login }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ inputs.source_issue_number }}
+          COMMENT_USER: ${{ inputs.source_actor }}
+          COMMENT_BODY: ${{ inputs.command }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           PRIVATE_REPOSITORY: ${{ github.repository }}
           PRIVATE_SHA: ${{ github.sha }}

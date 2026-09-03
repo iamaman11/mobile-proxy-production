@@ -1,8 +1,32 @@
 name: Production Android filesystem quarantine cleanup
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -13,9 +37,9 @@ jobs:
   command-gate:
     name: Validate quarantine cleanup authority and prepare exact admission bundle
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/phone-filesystem-quarantine-clean ')
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/phone-filesystem-quarantine-clean ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -32,7 +56,7 @@ jobs:
         id: command
         shell: bash
         env:
-          COMMAND: ${{ github.event.comment.body }}
+          COMMAND: ${{ inputs.command }}
           GH_TOKEN: ${{ github.token }}
           PRIVATE_REPOSITORY: ${{ github.repository }}
         run: |

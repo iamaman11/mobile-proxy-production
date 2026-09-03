@@ -46,8 +46,8 @@ jobs:
           wrapper = Path('.github/scripts/run_destructive_clean_install_v2.py').read_text(encoding='utf-8')
 
           required_workflow = (
-              "startsWith(github.event.comment.body, '/phone-clean-install ')",
-              'github.event.comment.user.login == github.repository_owner',
+              "startsWith(inputs.command, '/phone-clean-install ')",
+              'inputs.source_actor == github.repository_owner',
               'clean_install_control.py admit',
               '--command-comment-id "${COMMENT_ID}"',
               '--expected-transaction-id "${TRANSACTION_ID}"',

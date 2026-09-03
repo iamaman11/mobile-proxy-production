@@ -1,8 +1,32 @@
 name: Runtime reconstruction readiness transport
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,9 +36,9 @@ jobs:
   dispatch-readiness:
     name: Dispatch enrolled local-recovery readiness
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      github.event.comment.body == '/runtime-reconstruction-readiness RUN_ENROLLED_LOCAL_RECOVERY_READINESS'
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      inputs.command == '/runtime-reconstruction-readiness RUN_ENROLLED_LOCAL_RECOVERY_READINESS'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -31,9 +55,9 @@ jobs:
           PRIVATE_REPOSITORY: ${{ github.repository }}
           PRIVATE_SHA: ${{ github.sha }}
           PRIVATE_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          COMMENT_USER: ${{ github.event.comment.user.login }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ inputs.source_issue_number }}
+          COMMENT_USER: ${{ inputs.source_actor }}
+          COMMENT_BODY: ${{ inputs.command }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail

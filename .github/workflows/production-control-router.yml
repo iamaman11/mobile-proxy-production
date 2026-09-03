@@ -1,0 +1,445 @@
+name: Production control — strict Issue #1 router
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+jobs:
+  route:
+    name: Classify one owner command exactly once
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      operation: ${{ steps.route.outputs.operation }}
+      request_id: ${{ steps.route.outputs.request_id }}
+      request_json: ${{ steps.route.outputs.request_json }}
+    steps:
+      - name: Check out exact private execution revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Strictly classify command and build semantic request envelope
+        id: route
+        shell: bash
+        env:
+          COMMAND: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/production_command_router.py \
+            --registry .github/production/command-routes.json \
+            --command "$COMMAND" \
+            --repository "${{ github.repository }}" \
+            --issue-number "${{ github.event.issue.number }}" \
+            --comment-id "${{ github.event.comment.id }}" \
+            --actor "${{ github.event.comment.user.login }}" \
+            --owner "${{ github.repository_owner }}"
+
+  op_android_release_build:
+    name: Route android-release-build
+    needs: route
+    if: needs.route.outputs.operation == 'android-release-build'
+    uses: ./.github/workflows/android-release-build.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_android_signing_migration:
+    name: Route android-signing-migration
+    needs: route
+    if: needs.route.outputs.operation == 'android-signing-migration'
+    uses: ./.github/workflows/android-signing-migration.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_android_signing_proof:
+    name: Route android-signing-proof
+    needs: route
+    if: needs.route.outputs.operation == 'android-signing-proof'
+    uses: ./.github/workflows/android-signing-proof.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_capability_inventory:
+    name: Route phone-capability-inventory
+    needs: route
+    if: needs.route.outputs.operation == 'phone-capability-inventory'
+    uses: ./.github/workflows/phone-capability-inventory.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_clean_install:
+    name: Route phone-clean-install
+    needs: route
+    if: needs.route.outputs.operation == 'phone-clean-install'
+    uses: ./.github/workflows/phone-clean-install.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_filesystem_certification:
+    name: Route phone-filesystem-certification
+    needs: route
+    if: needs.route.outputs.operation == 'phone-filesystem-certification'
+    uses: ./.github/workflows/phone-filesystem-certification.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_filesystem_quarantine_cleanup:
+    name: Route phone-filesystem-quarantine-cleanup
+    needs: route
+    if: needs.route.outputs.operation == 'phone-filesystem-quarantine-cleanup'
+    uses: ./.github/workflows/phone-filesystem-quarantine-cleanup.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_filesystem_quarantine_observation:
+    name: Route phone-filesystem-quarantine-observation
+    needs: route
+    if: needs.route.outputs.operation == 'phone-filesystem-quarantine-observation'
+    uses: ./.github/workflows/phone-filesystem-quarantine-observation.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_filesystem_tooling_diagnostic:
+    name: Route phone-filesystem-tooling-diagnostic
+    needs: route
+    if: needs.route.outputs.operation == 'phone-filesystem-tooling-diagnostic'
+    uses: ./.github/workflows/phone-filesystem-tooling-diagnostic.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_post_migration_diagnostic:
+    name: Route phone-post-migration-diagnostic
+    needs: route
+    if: needs.route.outputs.operation == 'phone-post-migration-diagnostic'
+    uses: ./.github/workflows/phone-post-migration-diagnostic.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_preflight:
+    name: Route phone-preflight
+    needs: route
+    if: needs.route.outputs.operation == 'phone-preflight'
+    uses: ./.github/workflows/phone-preflight.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_binary_build:
+    name: Route phone-runtime-binary-build
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-binary-build'
+    uses: ./.github/workflows/phone-runtime-binary-build.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_cutover_preflight:
+    name: Route phone-runtime-cutover-preflight
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-cutover-preflight'
+    uses: ./.github/workflows/phone-runtime-cutover-preflight.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_diagnostic:
+    name: Route phone-runtime-diagnostic
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-diagnostic'
+    uses: ./.github/workflows/phone-runtime-diagnostic.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_error_context:
+    name: Route phone-runtime-error-context
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-error-context'
+    uses: ./.github/workflows/phone-runtime-error-context.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_failure_diagnostic:
+    name: Route phone-runtime-failure-diagnostic
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-failure-diagnostic'
+    uses: ./.github/workflows/phone-runtime-failure-diagnostic.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_recovery:
+    name: Route phone-runtime-recovery
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-recovery'
+    uses: ./.github/workflows/phone-runtime-recovery.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_release_inventory:
+    name: Route phone-runtime-release-inventory
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-release-inventory'
+    uses: ./.github/workflows/phone-runtime-release-inventory.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_binary_repair:
+    name: Route phone-runtime-binary-repair
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-binary-repair'
+    uses: ./.github/workflows/phone-runtime-binary-repair.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_runtime_tooling_diagnostic:
+    name: Route phone-runtime-tooling-diagnostic
+    needs: route
+    if: needs.route.outputs.operation == 'phone-runtime-tooling-diagnostic'
+    uses: ./.github/workflows/phone-runtime-tooling-diagnostic.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_phone_signing_identity:
+    name: Route phone-signing-identity
+    needs: route
+    if: needs.route.outputs.operation == 'phone-signing-identity'
+    uses: ./.github/workflows/phone-signing-identity.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_production_runner_rust_bootstrap:
+    name: Route production-runner-rust-bootstrap
+    needs: route
+    if: needs.route.outputs.operation == 'production-runner-rust-bootstrap'
+    uses: ./.github/workflows/production-runner-rust-bootstrap.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_runtime_reconstruction_enrollment:
+    name: Route runtime-reconstruction-enrollment
+    needs: route
+    if: needs.route.outputs.operation == 'runtime-reconstruction-enrollment'
+    uses: ./.github/workflows/runtime-reconstruction-enrollment.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_runtime_reconstruction_execution:
+    name: Route runtime-reconstruction-execution
+    needs: route
+    if: needs.route.outputs.operation == 'runtime-reconstruction-execution'
+    uses: ./.github/workflows/runtime-reconstruction-execution.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_runtime_reconstruction_readiness_transport:
+    name: Route runtime-reconstruction-readiness-transport
+    needs: route
+    if: needs.route.outputs.operation == 'runtime-reconstruction-readiness-transport'
+    uses: ./.github/workflows/runtime-reconstruction-readiness-transport.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit

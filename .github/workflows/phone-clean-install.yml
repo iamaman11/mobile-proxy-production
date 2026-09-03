@@ -1,8 +1,32 @@
 name: Production Android destructive clean install
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,14 +37,14 @@ jobs:
   command-gate:
     name: Validate cursor-bound clean-install authority
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/phone-clean-install ')
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/phone-clean-install ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      COMMAND: ${{ github.event.comment.body }}
-      COMMENT_ID: ${{ github.event.comment.id }}
+      COMMAND: ${{ inputs.command }}
+      COMMENT_ID: ${{ inputs.source_comment_id }}
       GH_TOKEN: ${{ github.token }}
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
@@ -220,15 +244,15 @@ jobs:
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 20
     env:
-      COMMAND: ${{ github.event.comment.body }}
-      COMMENT_ID: ${{ github.event.comment.id }}
+      COMMAND: ${{ inputs.command }}
+      COMMENT_ID: ${{ inputs.source_comment_id }}
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       CONTROL_CURSOR_ID: ${{ needs.command-gate.outputs.cursor_id }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       TRANSACTION_ID: ${{ needs.command-gate.outputs.transaction_id }}
       SEMANTIC_REQUEST_KEY: ${{ needs.command-gate.outputs.semantic_request_key }}
       PRIVATE_SHA: ${{ github.sha }}
-      REQUEST_REF: issue-comment:${{ github.event.comment.id }}
+      REQUEST_REF: issue-comment:${{ inputs.source_comment_id }}
       EXPECTED_VERSION_NAME: '0.1.4'
       EXPECTED_VERSION_CODE: '1004'
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}

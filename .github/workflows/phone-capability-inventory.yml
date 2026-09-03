@@ -1,8 +1,32 @@
 name: Production Android capability inventory
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -11,7 +35,7 @@ permissions:
 jobs:
   command-gate:
     name: Validate capability command and prepare canonical source
-    if: github.event.issue.number == 1 && startsWith(github.event.comment.body, '/phone-capabilities ')
+    if: inputs.source_issue_number == 1 && startsWith(inputs.command, '/phone-capabilities ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -22,7 +46,7 @@ jobs:
         id: command
         shell: bash
         env:
-          COMMAND: ${{ github.event.comment.body }}
+          COMMAND: ${{ inputs.command }}
         run: |
           set -euo pipefail
           python3 - <<'PY'

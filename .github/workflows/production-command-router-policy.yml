@@ -1,0 +1,151 @@
+name: Production command router policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-command-plane:
+    name: Validate single ingress and semantic request contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Compile and run pure router tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/control_request.py \
+            .github/scripts/production_command_router.py \
+            .github/scripts/c0o_migrate_issue_comment_workflows.py \
+            .github/scripts/test_production_command_router.py
+          python3 .github/scripts/test_production_command_router.py
+
+      - name: Enforce one Issue #1 ingress and complete route inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          workflows = Path('.github/workflows')
+          router_path = workflows / 'production-control-router.yml'
+          registry_path = Path('.github/production/command-routes.json')
+          if not router_path.is_file() or not registry_path.is_file():
+              raise SystemExit('router/route registry missing')
+
+          contents = {
+              path.name: path.read_text(encoding='utf-8')
+              for path in workflows.glob('*.yml')
+          }
+          direct_ingress = sorted(
+              name for name, text in contents.items()
+              if re.search(r'(?m)^  issue_comment:\s*$', text)
+          )
+          if direct_ingress != ['production-control-router.yml']:
+              raise SystemExit(
+                  'exactly one issue_comment ingress is required; found: ' + ', '.join(direct_ingress)
+              )
+
+          router = contents['production-control-router.yml']
+          required_router_contract = (
+              "github.event.issue.number == 1",
+              "github.event.comment.user.login == github.repository_owner",
+              "startsWith(github.event.comment.body, '/')",
+              '.github/scripts/production_command_router.py',
+              '--comment-id',
+              'github.event.comment.id',
+              'control_request_id:',
+              'control_request_json:',
+              'secrets: inherit',
+          )
+          missing_router = [value for value in required_router_contract if value not in router]
+          if missing_router:
+              raise SystemExit('router contract incomplete: ' + ', '.join(missing_router))
+
+          registry = json.loads(registry_path.read_text(encoding='utf-8'))
+          if registry.get('schema') != 'production-command-routes.v1':
+              raise SystemExit('route registry schema differs')
+          if registry.get('authority_cursor') != 'issue179-comment-5529299637':
+              raise SystemExit('route registry authority cursor differs from accepted checkpoint')
+          routes = registry.get('routes')
+          if not isinstance(routes, list) or not routes:
+              raise SystemExit('route registry empty')
+
+          commands = [route.get('command') for route in routes]
+          operations = [route.get('operation') for route in routes]
+          route_files = [route.get('workflow') for route in routes]
+          if len(commands) != len(set(commands)):
+              raise SystemExit('duplicate command in route registry')
+          if len(operations) != len(set(operations)):
+              raise SystemExit('duplicate operation in route registry')
+          if len(route_files) != len(set(route_files)):
+              raise SystemExit('duplicate workflow in route registry')
+
+          for route in routes:
+              name = route['workflow']
+              path = workflows / name
+              if not path.is_file():
+                  raise SystemExit(f'routed workflow missing: {name}')
+              text = contents[name]
+              if re.search(r'(?m)^  workflow_call:\s*$', text) is None:
+                  raise SystemExit(f'{name}: routed operation must be reusable workflow_call')
+              if re.search(r'(?m)^  issue_comment:\s*$', text):
+                  raise SystemExit(f'{name}: routed operation retained direct issue_comment ingress')
+              if 'github.event.comment.' in text or 'github.event.issue.' in text:
+                  raise SystemExit(f'{name}: direct source event dependency survived router migration')
+              for required_input in (
+                  '      control_request_id:',
+                  '      control_request_json:',
+                  '      source_comment_id:',
+                  '      source_actor:',
+              ):
+                  if required_input not in text:
+                      raise SystemExit(f'{name}: shared routed request input missing: {required_input.strip()}')
+              op = str(route['operation'])
+              job_id = 'op_' + re.sub(r'[^A-Za-z0-9_]', '_', op)
+              if f'  {job_id}:' not in router:
+                  raise SystemExit(f'router call job missing for {op}')
+              if f'uses: ./.github/workflows/{name}' not in router:
+                  raise SystemExit(f'router does not statically call {name}')
+
+          # The semantic mutator classification must be identical to the existing
+          # physical mutation policy inventory; neither policy can silently drift.
+          mutation_policy = contents['production-phone-mutation-policy.yml']
+          block = re.search(
+              r'(?ms)^          mutation_jobs = \{\n(?P<body>.*?)^          \}\n          mutators = set\(mutation_jobs\)',
+              mutation_policy,
+          )
+          if block is None:
+              raise SystemExit('unable to read mutation inventory from existing policy')
+          classified_mutators = set(re.findall(r"'([^']+\.yml)'\s*:", block.group('body')))
+          routed_mutators = {str(route['workflow']) for route in routes if route.get('mutating') is True}
+          if routed_mutators != classified_mutators:
+              raise SystemExit(
+                  'router mutation classification differs: router=' + str(sorted(routed_mutators))
+                  + ' policy=' + str(sorted(classified_mutators))
+              )
+
+          # There may be many historical comments, but no routed workflow may
+          # make full Issue #1 history its implicit request identity.
+          for route in routes:
+              text = contents[str(route['workflow'])]
+              if "transaction_id = f\"" in text and 'GITHUB_RUN_ID' in text:
+                  # Legacy operation-local transaction IDs are permitted during
+                  # this convergence stage only if the shared semantic request
+                  # envelope is also supplied. Stage C.0p consumes it in the
+                  # universal transaction kernel.
+                  if 'control_request_id:' not in text:
+                      raise SystemExit(f"{route['workflow']}: run-derived identity without shared request envelope")
+
+          print(f'COMMAND_ROUTER_POLICY_OK routes={len(routes)} mutators={len(routed_mutators)}')
+          PY
