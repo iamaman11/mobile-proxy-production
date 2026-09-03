@@ -1,0 +1,77 @@
+name: C.0o branch-only routed policy compatibility fixer
+
+on:
+  push:
+    branches: [agent/c0o-command-plane-convergence]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: c0o-policy-compat-fix
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out C.0o branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: agent/c0o-command-plane-convergence
+
+      - name: Update only legacy ingress assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              '.github/workflows/phone-clean-install-policy.yml': (
+                  ("startsWith(github.event.comment.body, '/phone-clean-install ')", "startsWith(inputs.command, '/phone-clean-install ')", 1),
+                  ('github.event.comment.user.login == github.repository_owner', 'inputs.source_actor == github.repository_owner', 1),
+              ),
+              '.github/scripts/control_plane_policy.py': (
+                  ('"github.event.comment.user.login == github.repository_owner"', '"inputs.source_actor == github.repository_owner"', 2),
+                  ('"startsWith(github.event.comment.body, \'/phone-filesystem-quarantine-observe \')"', '"startsWith(inputs.command, \'/phone-filesystem-quarantine-observe \')"', 1),
+                  ('"startsWith(github.event.comment.body, \'/phone-filesystem-quarantine-clean \')"', '"startsWith(inputs.command, \'/phone-filesystem-quarantine-clean \')"', 1),
+              ),
+              '.github/workflows/production-runner-tooling-policy.yml': (
+                  ('"github.event.issue.number == 1"', '"inputs.source_issue_number == 1"', 1),
+                  ('"github.event.comment.user.login == github.repository_owner"', '"inputs.source_actor == github.repository_owner"', 1),
+                  ('"startsWith(github.event.comment.body, \'/runner-rust-bootstrap \')"', '"startsWith(inputs.command, \'/runner-rust-bootstrap \')"', 1),
+              ),
+              '.github/workflows/phone-signing-identity-policy.yml': (
+                  ('"github.event.comment.user.login == github.repository_owner"', '"inputs.source_actor == github.repository_owner"', 1),
+              ),
+          }
+
+          for filename, rules in replacements.items():
+              path = Path(filename)
+              text = path.read_text(encoding='utf-8')
+              for old, new, expected_count in rules:
+                  count = text.count(old)
+                  if count != expected_count:
+                      raise SystemExit(f'{filename}: expected {expected_count} occurrences of {old!r}, found {count}')
+                  text = text.replace(old, new)
+              path.write_text(text, encoding='utf-8')
+
+          print('C0O_POLICY_COMPAT_EXACT_REPLACEMENTS_OK')
+          PY
+
+      - name: Commit exact compatibility diff and attempt branch ref update
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .github/workflows/phone-clean-install-policy.yml \
+            .github/scripts/control_plane_policy.py \
+            .github/workflows/production-runner-tooling-policy.yml \
+            .github/workflows/phone-signing-identity-policy.yml
+          git commit -m 'control: align policies with routed command inputs'
+          git push origin HEAD:agent/c0o-command-plane-convergence
