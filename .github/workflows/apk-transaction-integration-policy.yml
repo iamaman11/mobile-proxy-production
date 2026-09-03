@@ -1,0 +1,36 @@
+name: APK transaction integration policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-apk-transaction-integration:
+    name: Validate Stage C.0g APK transaction seam
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: private-control
+      - name: Check out exact accepted canonical APK executor source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: dba341bed382a8cbfbdb66e45a14ec37a4257741
+          path: canonical
+          persist-credentials: false
+      - name: Run hosted APK transaction integration tests
+        working-directory: private-control
+        env:
+          CANONICAL_ROOT: ${{ github.workspace }}/canonical
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_apk_transaction_control.py' -v
+      - name: Run centralized APK transaction policy
+        working-directory: private-control
+        run: python3 .github/scripts/control_plane_policy.py --policy apk-transaction-integration --canonical-root ../canonical
