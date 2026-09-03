@@ -381,6 +381,23 @@ jobs:
       control_request_json: ${{ needs.route.outputs.request_json }}
     secrets: inherit
 
+  op_phone_filesystem_scratch_recovery_observation:
+    name: Route read-only filesystem scratch UNKNOWN recovery observation
+    needs: route
+    if: needs.route.outputs.operation == 'phone-filesystem-scratch-recovery-observation'
+    uses: ./.github/workflows/filesystem-scratch-kernel-rehearsal.yml
+    with:
+      operation: ${{ needs.route.outputs.operation }}
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
   op_canonical_physical_transaction:
     name: Route remaining mutators through canonical physical transaction readiness
     needs: route
