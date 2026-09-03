@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   issues: write
 
 concurrency:
@@ -14,17 +15,18 @@ concurrency:
 
 jobs:
   command-gate:
-    name: Validate exact owner post-migration diagnostic command
+    name: Validate authority and prepare immutable observer source
     if: >-
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
       startsWith(github.event.comment.body, '/phone-post-migration-diagnostic ')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
     steps:
-      - name: Validate exact command and current canonical main SHA
+      - name: Validate exact command, current canonical main, and Quality
         id: command
         shell: bash
         env:
@@ -35,6 +37,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.parse
           import urllib.request
 
           command = os.environ.get("COMMAND", "").strip()
@@ -42,37 +45,212 @@ jobs:
           if match is None:
               raise SystemExit("invalid post-migration diagnostic command")
           requested = match.group(1)
-          request = urllib.request.Request(
-              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "mobile-proxy-production-post-migration-diagnostic",
-              },
-          )
-          with urllib.request.urlopen(request, timeout=10) as response:
-              current = json.load(response)["sha"]
+
+          def get_json(url: str):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "mobile-proxy-production-post-migration-diagnostic",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.load(response)
+
+          current = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main"
+          )["sha"]
           if requested != current:
               raise SystemExit("requested SHA is not current canonical main")
+
+          query = urllib.parse.urlencode(
+              {"head_sha": requested, "event": "push", "status": "completed", "per_page": 100}
+          )
+          runs = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?" + query
+          ).get("workflow_runs", [])
+          quality = [
+              run
+              for run in runs
+              if run.get("name") == "Quality"
+              and run.get("head_branch") == "main"
+              and run.get("head_sha") == requested
+              and run.get("conclusion") == "success"
+          ]
+          if not quality:
+              raise SystemExit("current canonical SHA has no exact successful main Quality run")
+          quality.sort(
+              key=lambda run: (run.get("run_attempt", 0), run.get("id", 0)),
+              reverse=True,
+          )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"canonical_sha={requested}\n")
+              handle.write(f"quality_run_id={quality[0]['id']}\n")
           PY
+
+      - name: Checkout exact canonical observer dependency on hosted runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ steps.command.outputs.canonical_sha }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Build immutable post-migration observer source bundle
+        shell: bash
+        env:
+          CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
+          QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
+          PRIVATE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          test -f canonical/scripts/run_private_phone_preflight.py
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-post-migration-source"
+          root.mkdir(parents=True, exist_ok=False)
+          source = Path("canonical/scripts/run_private_phone_preflight.py")
+          script = root / "run_private_phone_preflight.py"
+          shutil.copyfile(source, script)
+          manifest = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": os.environ["CANONICAL_SHA"],
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "private_execution_sha": os.environ["PRIVATE_SHA"],
+              "script_path": script.name,
+              "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+          }
+          (root / "source-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload immutable post-migration observer source
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phone-post-migration-source-${{ steps.command.outputs.canonical_sha }}
+          path: ${{ runner.temp }}/phone-post-migration-source
+          if-no-files-found: error
+          retention-days: 1
 
   diagnostic:
     name: Inspect bounded post-migration phone state read-only
     needs: command-gate
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      PRIVATE_SHA: ${{ github.sha }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
     steps:
-      - name: Fetch exact canonical registered-device preflight
+      - name: Download immutable post-migration observer source (attempt 1)
+        id: source-download-1
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phone-post-migration-source-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-post-migration-source-attempt-1
+
+      - name: Back off before immutable observer source retry 2
+        if: steps.source-download-1.outcome == 'failure'
+        shell: bash
+        run: sleep 3
+
+      - name: Download immutable post-migration observer source (attempt 2)
+        id: source-download-2
+        if: steps.source-download-1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phone-post-migration-source-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-post-migration-source-attempt-2
+
+      - name: Back off before immutable observer source retry 3
+        if: steps.source-download-1.outcome == 'failure' && steps.source-download-2.outcome == 'failure'
+        shell: bash
+        run: sleep 6
+
+      - name: Download immutable post-migration observer source (attempt 3)
+        id: source-download-3
+        if: steps.source-download-1.outcome == 'failure' && steps.source-download-2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phone-post-migration-source-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-post-migration-source-attempt-3
+
+      - name: Promote one successfully downloaded immutable observer bundle
+        id: source-transport
+        shell: bash
+        env:
+          SOURCE_DOWNLOAD_1_OUTCOME: ${{ steps.source-download-1.outcome }}
+          SOURCE_DOWNLOAD_2_OUTCOME: ${{ steps.source-download-2.outcome }}
+          SOURCE_DOWNLOAD_3_OUTCOME: ${{ steps.source-download-3.outcome }}
+        run: |
+          set -euo pipefail
+          selected=""
+          selected_attempt=""
+          if [ "${SOURCE_DOWNLOAD_1_OUTCOME}" = success ]; then
+            selected="${RUNNER_TEMP}/phone-post-migration-source-attempt-1"
+            selected_attempt=1
+          elif [ "${SOURCE_DOWNLOAD_2_OUTCOME}" = success ]; then
+            selected="${RUNNER_TEMP}/phone-post-migration-source-attempt-2"
+            selected_attempt=2
+          elif [ "${SOURCE_DOWNLOAD_3_OUTCOME}" = success ]; then
+            selected="${RUNNER_TEMP}/phone-post-migration-source-attempt-3"
+            selected_attempt=3
+          else
+            echo "no immutable post-migration observer source download attempt succeeded" >&2
+            exit 1
+          fi
+          destination="${RUNNER_TEMP}/phone-post-migration-source"
+          if [ -e "${destination}" ] || [ -L "${destination}" ]; then
+            echo "immutable post-migration observer source destination already exists" >&2
+            exit 1
+          fi
+          mv "${selected}" "${destination}"
+          echo "download_attempt=${selected_attempt}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify immutable observer bundle before phone access
+        id: bundle-verify
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --silent --show-error \
-            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
-            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "phone-post-migration-source"
+          manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
+          expected = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": os.environ["CANONICAL_SHA"],
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "private_execution_sha": os.environ["PRIVATE_SHA"],
+              "script_path": "run_private_phone_preflight.py",
+          }
+          for key, value in expected.items():
+              if manifest.get(key) != value:
+                  raise SystemExit(f"observer source authority differs: {key}")
+          script = root / manifest["script_path"]
+          if script.parent != root or not script.is_file():
+              raise SystemExit("observer source path differs")
+          observed = hashlib.sha256(script.read_bytes()).hexdigest()
+          if observed != manifest.get("script_sha256"):
+              raise SystemExit("observer source digest differs")
+          PY
 
       - name: Record bounded post-migration state
         id: snapshot
@@ -98,9 +276,8 @@ jobs:
           watchdog_script = "/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh"
           watchdog_pid = "/data/adb/mobile-proxy-node/logs/runtime-watchdog.pid"
 
-          spec = importlib.util.spec_from_file_location(
-              "phone_preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py"
-          )
+          source = Path(os.environ["RUNNER_TEMP"]) / "phone-post-migration-source" / "run_private_phone_preflight.py"
+          spec = importlib.util.spec_from_file_location("phone_preflight", source)
           preflight = importlib.util.module_from_spec(spec)
           assert spec.loader is not None
           spec.loader.exec_module(preflight)
@@ -162,10 +339,13 @@ jobs:
           ''')
 
           state = {
-              "format_version": 1,
+              "format_version": 2,
               "repository": "iamaman11/mobile-proxy",
               "canonical_sha": canonical_sha,
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "private_execution_sha": os.environ["PRIVATE_SHA"],
               "mode": "post_migration_read_only",
+              "physical_observation_performed": True,
               "package_installed": package_installed,
               "installed_version_code": int(codes[0]) if package_installed else None,
               "installed_version_name": names[0] if package_installed else None,
@@ -196,13 +376,66 @@ jobs:
           )
           PY
 
+      - name: Record bounded observer attempt outcome
+        id: observer-outcome
+        if: always()
+        shell: bash
+        env:
+          SOURCE_TRANSPORT_OUTCOME: ${{ steps.source-transport.outcome }}
+          BUNDLE_VERIFY_OUTCOME: ${{ steps.bundle-verify.outcome }}
+          SNAPSHOT_OUTCOME: ${{ steps.snapshot.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          transport = os.environ.get("SOURCE_TRANSPORT_OUTCOME", "skipped")
+          verify = os.environ.get("BUNDLE_VERIFY_OUTCOME", "skipped")
+          snapshot = os.environ.get("SNAPSHOT_OUTCOME", "skipped")
+          if transport != "success":
+              state = "TRANSPORT_FAILED"
+          elif verify != "success":
+              state = "SOURCE_AUTHORITY_FAILED"
+          elif snapshot == "success":
+              state = "PHYSICAL_OBSERVED"
+          else:
+              state = "PHYSICAL_OBSERVATION_FAILED"
+          result = {
+              "format_version": 1,
+              "canonical_sha": os.environ["CANONICAL_SHA"],
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "private_execution_sha": os.environ["PRIVATE_SHA"],
+              "state": state,
+              "source_transport_outcome": transport,
+              "source_authority_verification_outcome": verify,
+              "snapshot_outcome": snapshot,
+              "physical_observation_performed": snapshot == "success",
+              "physical_fact_emitted": snapshot == "success",
+              "phone_mutation_performed": False,
+              "apk_mutation_performed": False,
+              "phone_reboot_performed": False,
+              "raw_device_identifier_recorded": False,
+          }
+          Path(os.environ["RUNNER_TEMP"], "phone-post-migration-observer-outcome.json").write_text(
+              json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"state={state}\n")
+              handle.write(f"physical_observation_performed={'true' if snapshot == 'success' else 'false'}\n")
+          PY
+
       - name: Upload bounded diagnostic evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: phone-post-migration-diagnostic-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/phone-post-migration-diagnostic.json
-          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/phone-post-migration-diagnostic.json
+            ${{ runner.temp }}/phone-post-migration-observer-outcome.json
+          if-no-files-found: error
           retention-days: 30
 
       - name: Post safe audit pointer
@@ -210,11 +443,13 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SNAPSHOT_OUTCOME: ${{ steps.snapshot.outcome }}
+          OBSERVER_STATE: ${{ steps.observer-outcome.outputs.state }}
+          PHYSICAL_OBSERVATION_PERFORMED: ${{ steps.observer-outcome.outputs.physical_observation_performed }}
           RUN_ID: ${{ github.run_id }}
           REPOSITORY: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
+          QUALITY_RUN_ID_SAFE: ${{ env.QUALITY_RUN_ID }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -222,15 +457,20 @@ jobs:
           import os
           import urllib.request
 
+          state = os.environ.get("OBSERVER_STATE") or "OBSERVER_OUTCOME_UNAVAILABLE"
+          physical = os.environ.get("PHYSICAL_OBSERVATION_PERFORMED") or "false"
           body = (
               "POST-MIGRATION READ-ONLY DIAGNOSTIC — run `" + os.environ["RUN_ID"] + "`\n\n"
               "- canonical SHA: `" + os.environ["CANONICAL_SHA_SAFE"] + "`\n"
-              "- bounded snapshot outcome: `" + os.environ["SNAPSHOT_OUTCOME"] + "`\n"
+              "- exact Quality run: `" + os.environ["QUALITY_RUN_ID_SAFE"] + "`\n"
+              "- observer state: `" + state + "`\n"
+              "- physical observation performed: `" + physical + "`\n"
+              "- physical fact emitted: `" + physical + "`\n"
               "- phone mutation performed: false\n"
               "- APK mutation performed: false\n"
               "- phone reboot performed: false\n"
               "- raw device identifier recorded: false\n"
-              "- inspect run log/artifact for bounded state"
+              "- inspect bounded artifact for observer outcome and, only when PHYSICAL_OBSERVED, phone state"
           )
           request = urllib.request.Request(
               f"https://api.github.com/repos/{os.environ['REPOSITORY']}/issues/{os.environ['ISSUE_NUMBER']}/comments",
