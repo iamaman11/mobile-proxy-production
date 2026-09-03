@@ -22,18 +22,19 @@ jobs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
       quality_run_id: ${{ steps.command.outputs.quality_run_id }}
       observation_run_id: ${{ steps.command.outputs.observation_run_id }}
+      observation_source_sha: ${{ steps.command.outputs.observation_source_sha }}
       transaction_ids_json: ${{ steps.command.outputs.transaction_ids_json }}
       observation_artifact_name: ${{ steps.command.outputs.observation_artifact_name }}
+      promoted_artifact_name: ${{ steps.command.outputs.promoted_artifact_name }}
       operation_transaction_id: ${{ steps.command.outputs.operation_transaction_id }}
     steps:
-      - name: Validate exact command, current authority, and observation run
+      - name: Validate exact command, current authority, and causally promoted observation run
         id: command
         shell: bash
         env:
           COMMAND: ${{ github.event.comment.body }}
           GH_TOKEN: ${{ github.token }}
           PRIVATE_REPOSITORY: ${{ github.repository }}
-          PRIVATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -63,7 +64,6 @@ jobs:
 
           token = os.environ['GH_TOKEN']
           private_repository = os.environ['PRIVATE_REPOSITORY']
-          private_sha = os.environ['PRIVATE_SHA']
 
           def get_json(url, *, authenticated=False):
               headers = {
@@ -111,22 +111,34 @@ jobs:
               raise SystemExit('observation run event differs')
           if observation.get('status') != 'completed' or observation.get('conclusion') != 'success':
               raise SystemExit('observation run is not completed/success')
-          if observation.get('head_sha') != private_sha:
-              raise SystemExit('observation run private execution SHA differs')
 
-          artifact_name = (
-              f'phone-filesystem-quarantine-observation-{requested_sha}-{observation_run_id}'
-          )
           artifacts = get_json(
               f'https://api.github.com/repos/{private_repository}/actions/runs/{observation_run_id}/artifacts?per_page=100',
               authenticated=True,
           ).get('artifacts', [])
-          matches = [
-              artifact for artifact in artifacts
-              if artifact.get('name') == artifact_name and artifact.get('expired') is False
-          ]
-          if len(matches) != 1:
-              raise SystemExit('exact durable quarantine observation artifact is unavailable')
+          raw_pattern = re.compile(
+              rf'phone-filesystem-quarantine-observation-(?P<sha>[0-9a-f]{{40}})-{observation_run_id}'
+          )
+          promoted_pattern = re.compile(
+              rf'phone-filesystem-quarantine-observed-facts-(?P<sha>[0-9a-f]{{40}})-{observation_run_id}'
+          )
+          raw_matches = []
+          promoted_matches = []
+          for artifact in artifacts:
+              if artifact.get('expired') is not False:
+                  continue
+              name = str(artifact.get('name', ''))
+              raw_match = raw_pattern.fullmatch(name)
+              if raw_match:
+                  raw_matches.append((artifact, raw_match.group('sha')))
+              promoted_match = promoted_pattern.fullmatch(name)
+              if promoted_match:
+                  promoted_matches.append((artifact, promoted_match.group('sha')))
+          if len(raw_matches) != 1 or len(promoted_matches) != 1:
+              raise SystemExit('exact durable raw/promoted quarantine observation artifacts are unavailable')
+          observation_source_sha = raw_matches[0][1]
+          if promoted_matches[0][1] != observation_source_sha:
+              raise SystemExit('raw/promoted observation source provenance differs')
 
           transaction_ids_json = json.dumps(transaction_ids, separators=(',', ':'))
           operation_transaction_id = (
@@ -136,12 +148,14 @@ jobs:
               handle.write(f'canonical_sha={requested_sha}\n')
               handle.write(f"quality_run_id={quality[0]['id']}\n")
               handle.write(f'observation_run_id={observation_run_id}\n')
+              handle.write(f'observation_source_sha={observation_source_sha}\n')
               handle.write(f'transaction_ids_json={transaction_ids_json}\n')
-              handle.write(f'observation_artifact_name={artifact_name}\n')
+              handle.write(f"observation_artifact_name={raw_matches[0][0]['name']}\n")
+              handle.write(f"promoted_artifact_name={promoted_matches[0][0]['name']}\n")
               handle.write(f'operation_transaction_id={operation_transaction_id}\n')
           PY
 
-      - name: Download exact durable quarantine observation evidence
+      - name: Download exact durable raw quarantine observation evidence
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.command.outputs.observation_artifact_name }}
@@ -150,11 +164,20 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ steps.command.outputs.observation_run_id }}
 
-      - name: Verify prior observation authorizes exact cleanup transaction set
+      - name: Download exact promoted reusable quarantine facts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.command.outputs.promoted_artifact_name }}
+          path: ${{ runner.temp }}/prior-quarantine-promoted-facts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.command.outputs.observation_run_id }}
+
+      - name: Verify prior raw/promoted evidence binds the exact cleanup transaction set
         id: admission
         shell: bash
         env:
-          CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
+          OBSERVATION_SOURCE_SHA: ${{ steps.command.outputs.observation_source_sha }}
           TRANSACTION_IDS_JSON: ${{ steps.command.outputs.transaction_ids_json }}
         run: |
           set -euo pipefail
@@ -164,26 +187,26 @@ jobs:
           import os
           from pathlib import Path
 
-          root = Path(os.environ['RUNNER_TEMP']) / 'prior-quarantine-observation'
-          files = list(root.glob('*.json'))
-          if len(files) != 1:
+          raw_root = Path(os.environ['RUNNER_TEMP']) / 'prior-quarantine-observation'
+          raw_files = list(raw_root.glob('*.json'))
+          if len(raw_files) != 1:
               raise SystemExit('prior quarantine observation artifact shape differs')
-          path = files[0]
-          evidence = json.loads(path.read_text(encoding='utf-8'))
+          raw_path = raw_files[0]
+          raw = json.loads(raw_path.read_text(encoding='utf-8'))
           expected_ids = json.loads(os.environ['TRANSACTION_IDS_JSON'])
-          if evidence.get('format_version') != 1:
+          if raw.get('format_version') != 1:
               raise SystemExit('prior observation format differs')
-          if evidence.get('repository') != 'iamaman11/mobile-proxy':
+          if raw.get('repository') != 'iamaman11/mobile-proxy':
               raise SystemExit('prior observation repository differs')
-          if evidence.get('canonical_sha') != os.environ['CANONICAL_SHA']:
-              raise SystemExit('prior observation canonical SHA differs')
-          if evidence.get('operation_id') != 'android.filesystem-quarantine-observation.v1':
+          if raw.get('canonical_sha') != os.environ['OBSERVATION_SOURCE_SHA']:
+              raise SystemExit('prior observation source provenance differs')
+          if raw.get('operation_id') != 'android.filesystem-quarantine-observation.v1':
               raise SystemExit('prior observation operation differs')
-          if evidence.get('observation_complete') is not True:
+          if raw.get('observation_complete') is not True:
               raise SystemExit('prior observation is incomplete')
-          if evidence.get('cleanup_admissible') is not True:
+          if raw.get('cleanup_admissible') is not True:
               raise SystemExit('prior observation does not admit cleanup')
-          transactions = evidence.get('transactions')
+          transactions = raw.get('transactions')
           if not isinstance(transactions, list):
               raise SystemExit('prior observation transaction list differs')
           if [item.get('transaction_id') for item in transactions] != expected_ids:
@@ -194,20 +217,68 @@ jobs:
               'raw_device_identifier_recorded',
               'phone_mutation_performed',
           ):
-              if evidence.get(flag) is not False:
+              if raw.get(flag) is not False:
                   raise SystemExit(f'prior observation unsafe flag differs: {flag}')
-          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+          promoted_root = Path(os.environ['RUNNER_TEMP']) / 'prior-quarantine-promoted-facts'
+          promoted_files = list(promoted_root.glob('*.json'))
+          if len(promoted_files) != 1:
+              raise SystemExit('prior promoted quarantine artifact shape differs')
+          promoted_path = promoted_files[0]
+          promoted = json.loads(promoted_path.read_text(encoding='utf-8'))
+          if promoted.get('format_version') != 1:
+              raise SystemExit('promoted quarantine fact format differs')
+          if promoted.get('evidence_type') != 'PROMOTED_OBSERVED_FACT_SET':
+              raise SystemExit('promoted quarantine fact evidence type differs')
+          if promoted.get('authority') != 'CONTROL' or promoted.get('lifecycle') != 'CURRENT':
+              raise SystemExit('promoted quarantine authority/lifecycle differs')
+          if promoted.get('raw_evidence_persisted') is not True:
+              raise SystemExit('promoted quarantine fact lacks raw persistence proof')
+          if promoted.get('generation_stable') is not True:
+              raise SystemExit('promoted quarantine fact lacks stable double-resolution')
+          if promoted.get('promotion_changes_only_persistence') is not True:
+              raise SystemExit('promoted quarantine fact promotion contract differs')
+          facts = promoted.get('observed_facts')
+          if not isinstance(facts, list) or len(facts) != 2:
+              raise SystemExit('promoted quarantine fact set cardinality differs')
+          raw_facts = raw.get('observed_facts')
+          if not isinstance(raw_facts, list) or len(raw_facts) != 2:
+              raise SystemExit('raw quarantine causal fact set cardinality differs')
+          normalized_promoted = []
+          for fact in facts:
+              if not isinstance(fact, dict) or fact.get('persisted') is not True:
+                  raise SystemExit('promoted quarantine fact is not durable')
+              candidate = dict(fact)
+              candidate['persisted'] = False
+              normalized_promoted.append(candidate)
+          if normalized_promoted != raw_facts:
+              raise SystemExit('promoted facts do not exactly correspond to raw canonical facts')
+          predicates = {fact.get('predicate'): fact.get('value') for fact in facts}
+          if predicates.get('cleanup_admissible') is not True:
+              raise SystemExit('promoted quarantine fact does not admit cleanup')
+          if set(predicates) != {'transactions_absent', 'cleanup_admissible'}:
+              raise SystemExit('promoted quarantine fact predicate set differs')
+
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
-              handle.write(f'observation_sha256={digest}\n')
-              handle.write(f'observation_filename={path.name}\n')
+              handle.write(f'observation_sha256={hashlib.sha256(raw_path.read_bytes()).hexdigest()}\n')
+              handle.write(f'observation_filename={raw_path.name}\n')
+              handle.write(f'promoted_sha256={hashlib.sha256(promoted_path.read_bytes()).hexdigest()}\n')
+              handle.write(f'promoted_filename={promoted_path.name}\n')
           PY
 
-      - name: Checkout exact canonical source
+      - name: Checkout exact current canonical cleanup source
         uses: actions/checkout@v4
         with:
           repository: iamaman11/mobile-proxy
           ref: ${{ steps.command.outputs.canonical_sha }}
           path: canonical
+          persist-credentials: false
+
+      - name: Checkout exact private generation evidence adapter
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-control
           persist-credentials: false
 
       - name: Build immutable same-run quarantine cleanup bundle
@@ -216,12 +287,17 @@ jobs:
           CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
           QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
           OBSERVATION_RUN_ID: ${{ steps.command.outputs.observation_run_id }}
+          OBSERVATION_SOURCE_SHA: ${{ steps.command.outputs.observation_source_sha }}
           OBSERVATION_SHA256: ${{ steps.admission.outputs.observation_sha256 }}
           OBSERVATION_FILENAME: ${{ steps.admission.outputs.observation_filename }}
+          PROMOTED_SHA256: ${{ steps.admission.outputs.promoted_sha256 }}
+          PROMOTED_FILENAME: ${{ steps.admission.outputs.promoted_filename }}
           TRANSACTION_IDS_JSON: ${{ steps.command.outputs.transaction_ids_json }}
+          PRIVATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          test "$(git -C private-control rev-parse HEAD)" = "${PRIVATE_SHA}"
           python3 - <<'PY'
           import hashlib
           import json
@@ -237,6 +313,8 @@ jobs:
               'android_filesystem_comparator.py',
               'run_android_filesystem_certification.py',
               'run_android_filesystem_quarantine_recovery.py',
+              'physical_domain_generation.py',
+              'control_state_machine.py',
           )
           digests = {}
           for name in scripts:
@@ -247,24 +325,37 @@ jobs:
               shutil.copyfile(source, target)
               digests[name] = hashlib.sha256(target.read_bytes()).hexdigest()
 
-          prior = (
-              Path(os.environ['RUNNER_TEMP'])
-              / 'prior-quarantine-observation'
-              / os.environ['OBSERVATION_FILENAME']
-          )
+          helper_source = Path('private-control/.github/scripts/filesystem_generation_inventory.py')
+          if not helper_source.is_file():
+              raise SystemExit('private filesystem generation evidence adapter is missing')
+          helper = root / 'filesystem_generation_inventory.py'
+          shutil.copyfile(helper_source, helper)
+          helper_digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+
+          prior = Path(os.environ['RUNNER_TEMP']) / 'prior-quarantine-observation' / os.environ['OBSERVATION_FILENAME']
           if hashlib.sha256(prior.read_bytes()).hexdigest() != os.environ['OBSERVATION_SHA256']:
               raise SystemExit('prior observation digest changed during bundle construction')
           shutil.copyfile(prior, root / 'admission-observation.json')
 
+          promoted = Path(os.environ['RUNNER_TEMP']) / 'prior-quarantine-promoted-facts' / os.environ['PROMOTED_FILENAME']
+          if hashlib.sha256(promoted.read_bytes()).hexdigest() != os.environ['PROMOTED_SHA256']:
+              raise SystemExit('promoted fact digest changed during bundle construction')
+          shutil.copyfile(promoted, root / 'admission-promoted-facts.json')
+
           manifest = {
-              'format_version': 1,
+              'format_version': 2,
               'repository': 'iamaman11/mobile-proxy',
               'canonical_sha': os.environ['CANONICAL_SHA'],
               'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
               'observation_run_id': int(os.environ['OBSERVATION_RUN_ID']),
+              'observation_source_ref': os.environ['OBSERVATION_SOURCE_SHA'],
               'observation_sha256': os.environ['OBSERVATION_SHA256'],
+              'promoted_facts_sha256': os.environ['PROMOTED_SHA256'],
               'transaction_ids': json.loads(os.environ['TRANSACTION_IDS_JSON']),
               'scripts_sha256': digests,
+              'private_repository': 'iamaman11/mobile-proxy-production',
+              'private_sha': os.environ['PRIVATE_SHA'],
+              'private_evidence_adapter_sha256': helper_digest,
           }
           (root / 'source-manifest.json').write_text(
               json.dumps(manifest, indent=2, sort_keys=True) + '\n',
@@ -272,7 +363,7 @@ jobs:
           )
           PY
 
-      - name: Upload immutable quarantine cleanup source and admission bundle
+      - name: Upload immutable quarantine cleanup source and causal admission bundle
         uses: actions/upload-artifact@v4
         with:
           name: phone-filesystem-quarantine-cleanup-source-${{ steps.command.outputs.canonical_sha }}-${{ github.run_id }}
@@ -294,6 +385,7 @@ jobs:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       OBSERVATION_RUN_ID: ${{ needs.command-gate.outputs.observation_run_id }}
+      OBSERVATION_SOURCE_SHA: ${{ needs.command-gate.outputs.observation_source_sha }}
       TRANSACTION_IDS_JSON: ${{ needs.command-gate.outputs.transaction_ids_json }}
       OPERATION_TRANSACTION_ID: ${{ needs.command-gate.outputs.operation_transaction_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
@@ -308,13 +400,13 @@ jobs:
       failure_substep: ${{ steps.result.outputs.failure_substep }}
       artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
     steps:
-      - name: Download immutable quarantine cleanup source and admission bundle
+      - name: Download immutable quarantine cleanup source and causal admission bundle
         uses: actions/download-artifact@v4
         with:
           name: phone-filesystem-quarantine-cleanup-source-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phone-filesystem-quarantine-cleanup-source
 
-      - name: Verify exact source and prior admission bundle before phone access
+      - name: Verify exact source and bundled causal evidence before generation admission
         shell: bash
         run: |
           set -euo pipefail
@@ -326,7 +418,7 @@ jobs:
 
           root = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-cleanup-source'
           manifest = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
-          if manifest.get('format_version') != 1:
+          if manifest.get('format_version') != 2:
               raise SystemExit('unsupported cleanup source manifest')
           if manifest.get('repository') != 'iamaman11/mobile-proxy':
               raise SystemExit('cleanup source repository differs')
@@ -336,6 +428,8 @@ jobs:
               raise SystemExit('cleanup source Quality authority differs')
           if manifest.get('observation_run_id') != int(os.environ['OBSERVATION_RUN_ID']):
               raise SystemExit('cleanup observation run authority differs')
+          if manifest.get('observation_source_ref') != os.environ['OBSERVATION_SOURCE_SHA']:
+              raise SystemExit('cleanup observation source provenance differs')
           if manifest.get('transaction_ids') != json.loads(os.environ['TRANSACTION_IDS_JSON']):
               raise SystemExit('cleanup transaction set differs')
           expected = manifest.get('scripts_sha256')
@@ -345,6 +439,8 @@ jobs:
               'android_filesystem_comparator.py',
               'run_android_filesystem_certification.py',
               'run_android_filesystem_quarantine_recovery.py',
+              'physical_domain_generation.py',
+              'control_state_machine.py',
           }
           if not isinstance(expected, dict) or set(expected) != required:
               raise SystemExit('cleanup source script set differs')
@@ -352,16 +448,179 @@ jobs:
               path = root / name
               if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                   raise SystemExit(f'cleanup source digest differs: {name}')
+          helper = root / 'filesystem_generation_inventory.py'
+          if hashlib.sha256(helper.read_bytes()).hexdigest() != manifest.get('private_evidence_adapter_sha256'):
+              raise SystemExit('cleanup private evidence adapter digest differs')
           admission = root / 'admission-observation.json'
           if hashlib.sha256(admission.read_bytes()).hexdigest() != manifest.get('observation_sha256'):
               raise SystemExit('cleanup admission observation digest differs')
-          evidence = json.loads(admission.read_text(encoding='utf-8'))
-          if evidence.get('canonical_sha') != os.environ['CANONICAL_SHA']:
-              raise SystemExit('cleanup admission canonical SHA differs')
-          if evidence.get('observation_complete') is not True or evidence.get('cleanup_admissible') is not True:
-              raise SystemExit('cleanup admission evidence is not accepted')
-          if [item.get('transaction_id') for item in evidence.get('transactions', [])] != json.loads(os.environ['TRANSACTION_IDS_JSON']):
-              raise SystemExit('cleanup admission transaction set differs')
+          promoted = root / 'admission-promoted-facts.json'
+          if hashlib.sha256(promoted.read_bytes()).hexdigest() != manifest.get('promoted_facts_sha256'):
+              raise SystemExit('cleanup promoted fact digest differs')
+          PY
+
+      - name: Fetch current trusted filesystem CONTROL history under global mutation lock
+        id: current-history
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const headings = [
+              '## CONTROL FILESYSTEM MUTATION INTENT',
+              '## CONTROL ANDROID FILESYSTEM MUTATION RESULT',
+              '## CONTROL ANDROID FILESYSTEM QUARANTINE CLEANUP RESULT',
+            ];
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1,
+              per_page: 100,
+            });
+            const bounded = comments
+              .filter((comment) => headings.some((heading) => String(comment.body || '').startsWith(heading)))
+              .map((comment) => ({
+                id: comment.id,
+                body: String(comment.body || ''),
+                user: {login: String(comment.user?.login || '')},
+              }));
+            if (bounded.length > 512) {
+              throw new Error('bounded filesystem CONTROL history exceeds supported inventory size');
+            }
+            fs.writeFileSync(
+              path.join(process.env.RUNNER_TEMP, 'filesystem-control-comments-cleanup.json'),
+              JSON.stringify(bounded),
+              'utf8',
+            );
+
+      - name: Resolve current filesystem generation under global mutation lock
+        id: current-generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/phone-filesystem-quarantine-cleanup-source"
+          python3 "${root}/filesystem_generation_inventory.py" \
+            --comments "${RUNNER_TEMP}/filesystem-control-comments-cleanup.json" \
+            --output "${RUNNER_TEMP}/filesystem-generation-inventory-cleanup.json"
+          python3 "${root}/physical_domain_generation.py" \
+            --inventory "${RUNNER_TEMP}/filesystem-generation-inventory-cleanup.json" \
+            --output "${RUNNER_TEMP}/filesystem-generation-cleanup.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          resolution = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'filesystem-generation-cleanup.json').read_text(encoding='utf-8')
+          )
+          if resolution.get('state') != 'RESOLVED':
+              raise SystemExit('current filesystem generation is not resolved')
+          if resolution.get('domain_scope') != 'domain/filesystem':
+              raise SystemExit('current filesystem generation scope differs')
+          if resolution.get('git_source_dependency') is not False:
+              raise SystemExit('filesystem generation must not depend on Git source identity')
+          generation = str(resolution.get('generation', ''))
+          if not generation:
+              raise SystemExit('current filesystem generation is empty')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'generation={generation}\n')
+          PY
+
+      - name: Admit promoted quarantine facts through canonical control state classifier
+        id: causal-admission
+        shell: bash
+        env:
+          CURRENT_FILESYSTEM_GENERATION: ${{ steps.current-generation.outputs.generation }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import importlib.util
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-cleanup-source'
+          spec = importlib.util.spec_from_file_location('control_state_machine', root / 'control_state_machine.py')
+          if spec is None or spec.loader is None:
+              raise SystemExit('unable to load canonical control state classifier')
+          control = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = control
+          spec.loader.exec_module(control)
+
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          binding_key = os.environ.get('ANDROID_TARGET_BINDING_KEY', '')
+          if not serial:
+              raise SystemExit('registered production target binding is unavailable')
+          if len(binding_key) < 32:
+              raise SystemExit('target binding HMAC key is unavailable or too short')
+          if binding_key == serial:
+              raise SystemExit('target binding HMAC key must be independent from raw device binding')
+          message = b'android-production\0' + serial.encode('utf-8')
+          target_binding_id = (
+              'tb-hmac-sha256:'
+              + hmac.new(binding_key.encode('utf-8'), message, hashlib.sha256).hexdigest()
+          )
+          if re.fullmatch(r'tb-hmac-sha256:[0-9a-f]{64}', target_binding_id) is None:
+              raise SystemExit('opaque target binding identity is invalid')
+
+          promoted = json.loads((root / 'admission-promoted-facts.json').read_text(encoding='utf-8'))
+          if promoted.get('generation_stable') is not True:
+              raise SystemExit('promoted fact set is not generation-stable')
+          facts = promoted.get('observed_facts')
+          if not isinstance(facts, list) or len(facts) != 2:
+              raise SystemExit('promoted fact set cardinality differs')
+
+          transaction_ids = json.loads(os.environ['TRANSACTION_IDS_JSON'])
+          current_context = {
+              'target/android-production': target_binding_id,
+              'observer/filesystem-quarantine': 'android.filesystem-quarantine-observer.v2',
+              'domain/filesystem': os.environ['CURRENT_FILESYSTEM_GENERATION'],
+          }
+          for transaction_id in transaction_ids:
+              current_context[f'transaction/{transaction_id}'] = transaction_id
+          required_scopes = tuple(current_context)
+
+          predicates = {}
+          for payload in facts:
+              dependencies = tuple(
+                  control.FactDependency(str(item.get('scope', '')), str(item.get('identity', '')))
+                  for item in payload.get('dependencies', [])
+                  if isinstance(item, dict)
+              )
+              fact = control.ObservedFact(
+                  subject=str(payload.get('subject', '')),
+                  predicate=str(payload.get('predicate', '')),
+                  value=payload.get('value'),
+                  target=str(payload.get('target', '')),
+                  observation_ref=str(payload.get('observation_ref', '')),
+                  source_ref=str(payload.get('source_ref', '')),
+                  dependencies=dependencies,
+                  authority=str(payload.get('authority', '')),
+                  persisted=payload.get('persisted') is True,
+              )
+              validity = control.classify_observed_fact(
+                  fact,
+                  current_context,
+                  required_scopes=required_scopes,
+              )
+              if validity.state != control.FACT_VALID:
+                  raise SystemExit(
+                      'promoted quarantine fact is not reusable in current context: '
+                      + validity.state + ':' + ','.join(validity.reasons)
+                  )
+              predicates[fact.predicate] = fact.value
+          if set(predicates) != {'transactions_absent', 'cleanup_admissible'}:
+              raise SystemExit('promoted quarantine predicate set differs')
+          if predicates['cleanup_admissible'] is not True:
+              raise SystemExit('promoted quarantine facts do not admit cleanup')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write('causal_admission=true\n')
+              handle.write(f'target_binding_id={target_binding_id}\n')
           PY
 
       - name: Build bounded CONTROL mutation dispatch intent
@@ -394,6 +653,8 @@ jobs:
               'tb-hmac-sha256:'
               + hmac.new(binding_key.encode('utf-8'), message, hashlib.sha256).hexdigest()
           )
+          if target_binding_id != os.environ['ADMISSION_TARGET_BINDING_ID']:
+              raise SystemExit('target binding changed between causal admission and dispatch intent')
           marker = {
               'format_version': 1,
               'evidence_type': 'MUTATION_DISPATCH_INTENT',
@@ -423,6 +684,8 @@ jobs:
           path = Path(os.environ['RUNNER_TEMP']) / 'filesystem-mutation-dispatch-intent.json'
           path.write_text(json.dumps(marker, indent=2, sort_keys=True) + '\n', encoding='utf-8')
           PY
+        env:
+          ADMISSION_TARGET_BINDING_ID: ${{ steps.causal-admission.outputs.target_binding_id }}
 
       - name: Persist CONTROL mutation dispatch intent before adapter invocation
         uses: actions/upload-artifact@v4
@@ -704,6 +967,7 @@ jobs:
           CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
           QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
           OBSERVATION_RUN_ID: ${{ needs.command-gate.outputs.observation_run_id }}
+          OBSERVATION_SOURCE_SHA: ${{ needs.command-gate.outputs.observation_source_sha }}
           OPERATION_TRANSACTION_ID: ${{ needs.command-gate.outputs.operation_transaction_id }}
           CLEANUP_JOB_RESULT: ${{ needs.cleanup-quarantine.result }}
           RESULT_VALIDATED: ${{ needs.cleanup-quarantine.outputs.result_validated }}
@@ -758,6 +1022,7 @@ jobs:
               `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
               `- observation_run_id: \`${process.env.OBSERVATION_RUN_ID || 'unavailable'}\``,
+              `- observation_source_ref: \`${process.env.OBSERVATION_SOURCE_SHA || 'unavailable'}\``,
               `- operation_transaction_id: \`${process.env.OPERATION_TRANSACTION_ID || 'unavailable'}\``,
               `- workflow_run_id: \`${context.runId}\``,
               `- cleanup_job_result: \`${process.env.CLEANUP_JOB_RESULT}\``,
