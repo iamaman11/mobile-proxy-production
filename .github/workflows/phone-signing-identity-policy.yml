@@ -38,6 +38,9 @@ jobs:
           path = Path('.github/workflows/phone-signing-identity.yml')
           text = path.read_text(encoding='utf-8')
 
+          def actions_expr(expression):
+              return '$' + '{{ ' + expression + ' }}'
+
           required = (
               "github.event.comment.user.login == github.repository_owner",
               r"/phone-signing-identity ([0-9a-f]{40})",
@@ -47,7 +50,7 @@ jobs:
               'run.get("head_sha") == requested_sha',
               'run.get("conclusion") == "success"',
               'repository: iamaman11/mobile-proxy',
-              'ref: ${{ steps.command.outputs.canonical_sha }}',
+              'ref: ' + actions_expr('steps.command.outputs.canonical_sha'),
               'run_private_phone_preflight.py',
               'verify_android_installed_signer.py',
               'tools/apksigner.jar',
@@ -87,7 +90,7 @@ jobs:
           forbidden = (
               'PINNED_CANONICAL_SHA',
               '20702dda4df3b539cac4402503f7a107a20ef38b',
-              '${{ secrets.ANDROID_TARGET_BINDING_KEY }}',
+              actions_expr('secrets.ANDROID_TARGET_BINDING_KEY'),
               'command -v apksigner',
               'adb install',
               'adb uninstall',
