@@ -141,11 +141,15 @@ jobs:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
     outputs:
       accepted: ${{ steps.bounded-result.outputs.accepted }}
       registered_device_match: ${{ steps.bounded-result.outputs.registered_device_match }}
       adb_state: ${{ steps.bounded-result.outputs.adb_state }}
       shell_probe: ${{ steps.bounded-result.outputs.shell_probe }}
+      causal_fact_validated: ${{ steps.causal-fact-validation.outputs.causal_fact_validated }}
+      raw_evidence_persisted: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted }}
+      promoted_fact_persisted: ${{ steps.evidence-state.outputs.promoted_fact_persisted }}
       artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
     steps:
       - name: Download immutable canonical preflight logic (attempt 1)
@@ -243,6 +247,40 @@ jobs:
               raise SystemExit("source script digest differs")
           PY
 
+      - name: Derive bounded causal phone-access context
+        id: causal-context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import os
+          import re
+
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          binding_key = os.environ.get('ANDROID_TARGET_BINDING_KEY', '')
+          if not serial:
+              raise SystemExit('registered production target binding is unavailable')
+          if len(binding_key) < 32:
+              raise SystemExit('target binding HMAC key is unavailable or too short')
+          if binding_key == serial:
+              raise SystemExit('target binding HMAC key must be independent from raw device binding')
+          message = b'android-production\0' + serial.encode('utf-8')
+          target_binding_id = (
+              'tb-hmac-sha256:'
+              + hmac.new(binding_key.encode('utf-8'), message, hashlib.sha256).hexdigest()
+          )
+          if re.fullmatch(r'tb-hmac-sha256:[0-9a-f]{64}', target_binding_id) is None:
+              raise SystemExit('opaque target binding identity is invalid')
+          session_id = f"phone-preflight-session:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          observation_ref = f"phone-preflight-observation:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'target_binding_id={target_binding_id}\n')
+              handle.write(f'session_id={session_id}\n')
+              handle.write(f'observation_ref={observation_ref}\n')
+          PY
+
       - name: Run exact registered-device CONTROL preflight
         id: preflight
         shell: bash
@@ -250,7 +288,72 @@ jobs:
           set -euo pipefail
           python3 "${RUNNER_TEMP}/phone-preflight-source/run_private_phone_preflight.py" \
             --canonical-sha "${CANONICAL_SHA}" \
+            --target-binding-id "${{ steps.causal-context.outputs.target_binding_id }}" \
+            --session-id "${{ steps.causal-context.outputs.session_id }}" \
+            --observation-ref "${{ steps.causal-context.outputs.observation_ref }}" \
             --output "${RUNNER_TEMP}/phone-preflight.json"
+
+      - name: Validate canonical causal phone-access fact before persistence
+        id: causal-fact-validation
+        if: success()
+        shell: bash
+        env:
+          TARGET_BINDING_ID: ${{ steps.causal-context.outputs.target_binding_id }}
+          SESSION_ID: ${{ steps.causal-context.outputs.session_id }}
+          OBSERVATION_REF: ${{ steps.causal-context.outputs.observation_ref }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'phone-preflight.json').read_text(encoding='utf-8')
+          )
+          expected_device = {
+              'device_count': 1,
+              'registered_device_match': True,
+              'adb_state': 'device',
+              'shell_probe': True,
+          }
+          expected_dependencies = [
+              {'scope': 'target/android-production', 'identity': os.environ['TARGET_BINDING_ID']},
+              {'scope': 'observer/phone-access', 'identity': 'android.phone-access-observer.v2'},
+              {'scope': 'session/android-production', 'identity': os.environ['SESSION_ID']},
+          ]
+          expected_fact = {
+              'subject': 'phone',
+              'predicate': 'registered_phone_access_proven',
+              'value': True,
+              'target': 'android-production',
+              'observation_ref': os.environ['OBSERVATION_REF'],
+              'source_ref': os.environ['CANONICAL_SHA'],
+              'dependencies': expected_dependencies,
+              'authority': 'CONTROL',
+              'persisted': False,
+          }
+          if evidence.get('format_version') != 1:
+              raise SystemExit('phone preflight evidence format differs')
+          if evidence.get('repository') != 'iamaman11/mobile-proxy':
+              raise SystemExit('phone preflight evidence repository differs')
+          if evidence.get('canonical_sha') != os.environ['CANONICAL_SHA']:
+              raise SystemExit('phone preflight evidence source authority differs')
+          if evidence.get('mode') != 'read_only':
+              raise SystemExit('phone preflight evidence is not read-only')
+          if evidence.get('accepted') is not True or evidence.get('device') != expected_device:
+              raise SystemExit('registered-device probe predicates are not proven')
+          if evidence.get('causal_fact_envelope_emitted') is not True:
+              raise SystemExit('canonical phone-access causal fact was not emitted')
+          if evidence.get('observed_facts') != [expected_fact]:
+              raise SystemExit('canonical phone-access fact dependency envelope differs')
+          if evidence.get('raw_device_identifier_recorded') is not False:
+              raise SystemExit('raw device identifier recording is forbidden')
+          if evidence.get('mutation_performed') is not False:
+              raise SystemExit('phone preflight must remain read-only')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write('causal_fact_validated=true\n')
+          PY
 
       - name: Export bounded CONTROL result
         id: bounded-result
@@ -291,20 +394,93 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Export raw evidence persistence state
+        id: raw-evidence-state
+        if: always()
+        shell: bash
+        env:
+          BOUNDED_RESULT_OUTCOME: ${{ steps.bounded-result.outcome }}
+          CAUSAL_FACT_VALIDATION_OUTCOME: ${{ steps.causal-fact-validation.outcome }}
+          EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+        run: |
+          set -euo pipefail
+          persisted=false
+          if [ "${BOUNDED_RESULT_OUTCOME}" = success ] && [ "${CAUSAL_FACT_VALIDATION_OUTCOME}" = success ] && [ "${EVIDENCE_UPLOAD_OUTCOME}" = success ]; then
+            persisted=true
+          fi
+          echo "raw_evidence_persisted=${persisted}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote canonical phone-access fact after raw evidence persistence
+        id: promote-fact
+        if: steps.raw-evidence-state.outputs.raw_evidence_persisted == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import copy
+          import json
+          import os
+          from pathlib import Path
+
+          raw_path = Path(os.environ['RUNNER_TEMP']) / 'phone-preflight.json'
+          report = json.loads(raw_path.read_text(encoding='utf-8'))
+          facts = report.get('observed_facts')
+          if not isinstance(facts, list) or len(facts) != 1:
+              raise SystemExit('raw causal fact cardinality differs during promotion')
+          raw_fact = facts[0]
+          if raw_fact.get('authority') != 'CONTROL' or raw_fact.get('persisted') is not False:
+              raise SystemExit('only unpersisted CONTROL facts may be promoted')
+          promoted_fact = copy.deepcopy(raw_fact)
+          promoted_fact['persisted'] = True
+          comparison = copy.deepcopy(promoted_fact)
+          comparison['persisted'] = False
+          if comparison != raw_fact:
+              raise SystemExit('promotion changed physical value or causal dependency identity')
+          promoted = {
+              'format_version': 1,
+              'evidence_type': 'PROMOTED_OBSERVED_FACT',
+              'authority': 'CONTROL',
+              'lifecycle': 'CURRENT',
+              'workflow_run_id': int(os.environ['GITHUB_RUN_ID']),
+              'workflow_run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'raw_evidence_ref': f"phone-read-only-preflight:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}",
+              'raw_evidence_persisted': True,
+              'promotion_changes_only_persistence': True,
+              'observed_fact': promoted_fact,
+              'raw_device_identifier_recorded': False,
+              'phone_mutation_performed': False,
+          }
+          path = Path(os.environ['RUNNER_TEMP']) / 'phone-access-promoted-fact.json'
+          path.write_text(json.dumps(promoted, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+
+      - name: Persist promoted reusable phone-access fact independently
+        id: promoted-fact-upload
+        if: steps.promote-fact.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-access-observed-fact-${{ env.CANONICAL_SHA }}
+          path: ${{ runner.temp }}/phone-access-promoted-fact.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Export evidence persistence state
         id: evidence-state
         if: always()
         shell: bash
         env:
-          BOUNDED_RESULT_OUTCOME: ${{ steps.bounded-result.outcome }}
-          EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+          RAW_EVIDENCE_PERSISTED: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted }}
+          PROMOTE_FACT_OUTCOME: ${{ steps.promote-fact.outcome }}
+          PROMOTED_FACT_UPLOAD_OUTCOME: ${{ steps.promoted-fact-upload.outcome }}
         run: |
           set -euo pipefail
-          persisted=false
-          if [ "${BOUNDED_RESULT_OUTCOME}" = success ] && [ "${EVIDENCE_UPLOAD_OUTCOME}" = success ]; then
-            persisted=true
+          promoted=false
+          if [ "${RAW_EVIDENCE_PERSISTED}" = true ] && [ "${PROMOTE_FACT_OUTCOME}" = success ] && [ "${PROMOTED_FACT_UPLOAD_OUTCOME}" = success ]; then
+            promoted=true
           fi
-          echo "artifact_persisted=${persisted}" >> "$GITHUB_OUTPUT"
+          echo "promoted_fact_persisted=${promoted}" >> "$GITHUB_OUTPUT"
+          echo "artifact_persisted=${promoted}" >> "$GITHUB_OUTPUT"
 
       - name: Record safe result
         if: always()
@@ -317,7 +493,10 @@ jobs:
           - Runner labels: self-hosted, Linux, X64, android-production
           - Source transport attempt: ${{ steps.source-transport.outputs.download_attempt || 'none' }}
           - Preflight outcome: ${{ steps.preflight.outcome }}
+          - Causal fact validation: ${{ steps.causal-fact-validation.outputs.causal_fact_validated || 'false' }}
           - Bounded result outcome: ${{ steps.bounded-result.outcome }}
+          - Raw evidence persisted: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted || 'false' }}
+          - Promoted reusable fact persisted: ${{ steps.evidence-state.outputs.promoted_fact_persisted || 'false' }}
           - Evidence artifact persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
           - Device identifier recorded: false
           - Phone mutation performed: false
@@ -340,6 +519,9 @@ jobs:
           REGISTERED_DEVICE_MATCH: ${{ needs.phone-preflight.outputs.registered_device_match }}
           ADB_STATE: ${{ needs.phone-preflight.outputs.adb_state }}
           SHELL_PROBE: ${{ needs.phone-preflight.outputs.shell_probe }}
+          CAUSAL_FACT_VALIDATED: ${{ needs.phone-preflight.outputs.causal_fact_validated }}
+          RAW_EVIDENCE_PERSISTED: ${{ needs.phone-preflight.outputs.raw_evidence_persisted }}
+          PROMOTED_FACT_PERSISTED: ${{ needs.phone-preflight.outputs.promoted_fact_persisted }}
           ARTIFACT_PERSISTED: ${{ needs.phone-preflight.outputs.artifact_persisted }}
         with:
           script: |
@@ -364,9 +546,12 @@ jobs:
               `- workflow_run_id: \`${context.runId}\``,
               `- phone_job_result: \`${process.env.PHONE_JOB_RESULT}\``,
               `- probe_accepted: \`${probeAccepted}\``,
+              `- causal_fact_validated: \`${process.env.CAUSAL_FACT_VALIDATED || 'false'}\``,
               `- registered_device_match: \`${process.env.REGISTERED_DEVICE_MATCH || 'unobserved'}\``,
               `- adb_state: \`${process.env.ADB_STATE || 'unobserved'}\``,
               `- shell_probe: \`${process.env.SHELL_PROBE || 'unobserved'}\``,
+              `- raw_evidence_persisted: \`${process.env.RAW_EVIDENCE_PERSISTED || 'false'}\``,
+              `- promoted_fact_persisted: \`${process.env.PROMOTED_FACT_PERSISTED || 'false'}\``,
               `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
               '- raw_device_identifier_recorded: `false`',
               '- phone_mutation_performed: `false`',
