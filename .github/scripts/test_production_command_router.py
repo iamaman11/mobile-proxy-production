@@ -14,6 +14,10 @@ from control_request import RequestProvenance, build_request_envelope
 from production_command_router import RouteRefused, classify, load_registry
 
 
+GLOBAL_CURSOR = "issue179-comment-5531154097"
+RECOVERY_CURSOR = "issue179-comment-5533040841"
+
+
 def expect_refused(**kwargs) -> None:
     try:
         classify(**kwargs)
@@ -29,13 +33,20 @@ def main() -> int:
             json.dumps(
                 {
                     "schema": "production-command-routes.v1",
-                    "authority_cursor": "issue179-comment-5531154097",
+                    "authority_cursor": GLOBAL_CURSOR,
                     "routes": [
                         {
                             "command": "/observe",
                             "operation": "observe",
                             "workflow": "observe.yml",
                             "mutating": False,
+                        },
+                        {
+                            "command": "/recover",
+                            "operation": "recover",
+                            "workflow": "mixed.yml",
+                            "mutating": False,
+                            "authority_cursor": RECOVERY_CURSOR,
                         },
                         {
                             "command": "/mutate-a",
@@ -62,15 +73,21 @@ def main() -> int:
             "owner": "iamaman11",
         }
 
-        # Different semantic operations may intentionally share one thin workflow.
-        _, loaded = load_registry(registry)
+        global_cursor, loaded = load_registry(registry)
+        assert global_cursor == GLOBAL_CURSOR
         assert loaded["/mutate-a"].workflow == loaded["/mutate-b"].workflow
         assert loaded["/mutate-a"].operation != loaded["/mutate-b"].operation
+        assert loaded["/mutate-a"].authority_cursor == GLOBAL_CURSOR
+        assert loaded["/observe"].authority_cursor == GLOBAL_CURSOR
+        assert loaded["/recover"].authority_cursor == RECOVERY_CURSOR
+        assert loaded["/recover"].mutating is False
 
         route, first = classify(command_body="/mutate-a target generation", comment_id=101, **common)
         assert route.operation == "mutate-a"
         assert route.mutating is True
+        assert route.authority_cursor == GLOBAL_CURSOR
         assert first.arguments == ("target", "generation")
+        assert first.authority_cursor == GLOBAL_CURSOR
 
         route_b, other_operation = classify(
             command_body="/mutate-b target generation",
@@ -85,6 +102,37 @@ def main() -> int:
         assert first.request_id == second.request_id
         assert first.desired_generation == second.desired_generation
         assert first.provenance.comment_id != second.provenance.comment_id
+
+        # The bounded recovery route uses its own authority while legacy routes remain unchanged.
+        recovery_route, recovery_first = classify(
+            command_body="/recover issue-comment:5532752064",
+            comment_id=201,
+            **common,
+        )
+        _, recovery_second = classify(
+            command_body="/recover issue-comment:5532752064",
+            comment_id=202,
+            **common,
+        )
+        assert recovery_route.authority_cursor == RECOVERY_CURSOR
+        assert recovery_first.authority_cursor == RECOVERY_CURSOR
+        assert recovery_first.arguments == ("issue-comment:5532752064",)
+        assert recovery_first.request_id == recovery_second.request_id
+        assert recovery_first.provenance.comment_id != recovery_second.provenance.comment_id
+
+        default_recovery_identity = build_request_envelope(
+            operation="recover",
+            arguments=("issue-comment:5532752064",),
+            authority_cursor=GLOBAL_CURSOR,
+            mutating=False,
+            provenance=RequestProvenance(
+                repository="iamaman11/mobile-proxy-production",
+                issue_number=1,
+                comment_id=201,
+                actor="iamaman11",
+            ),
+        )
+        assert recovery_first.request_id != default_recovery_identity.request_id
 
         # Semantic changes and authority changes must create different request identities.
         _, changed_target = classify(command_body="/mutate-a other generation", comment_id=102, **common)
@@ -140,7 +188,7 @@ def main() -> int:
             json.dumps(
                 {
                     "schema": "production-command-routes.v1",
-                    "authority_cursor": "issue179-comment-5531154097",
+                    "authority_cursor": GLOBAL_CURSOR,
                     "routes": [
                         {"command": "/a", "operation": "same", "workflow": "shared.yml", "mutating": True},
                         {"command": "/b", "operation": "same", "workflow": "shared.yml", "mutating": True},
@@ -155,6 +203,32 @@ def main() -> int:
             pass
         else:
             raise AssertionError("duplicate semantic operation unexpectedly admitted")
+
+        malformed_route_cursor = Path(td) / "malformed-route-cursor.json"
+        malformed_route_cursor.write_text(
+            json.dumps(
+                {
+                    "schema": "production-command-routes.v1",
+                    "authority_cursor": GLOBAL_CURSOR,
+                    "routes": [
+                        {
+                            "command": "/recover",
+                            "operation": "recover",
+                            "workflow": "mixed.yml",
+                            "mutating": False,
+                            "authority_cursor": "issue179-comment-NOT-NUMERIC",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            load_registry(malformed_route_cursor)
+        except RouteRefused:
+            pass
+        else:
+            raise AssertionError("malformed per-route authority cursor unexpectedly admitted")
 
     print("PRODUCTION_COMMAND_ROUTER_TESTS_OK")
     return 0
