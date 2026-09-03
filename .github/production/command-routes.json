@@ -1,5 +1,5 @@
 {
-  "authority_cursor": "issue179-comment-5529299637",
+  "authority_cursor": "issue179-comment-5531154097",
   "routes": [
     {
       "command": "/android-release-build",
@@ -11,7 +11,7 @@
       "command": "/android-release-migrate",
       "mutating": true,
       "operation": "android-signing-migration",
-      "workflow": "android-signing-migration.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/android-signing-proof",
@@ -29,19 +29,19 @@
       "command": "/phone-clean-install",
       "mutating": true,
       "operation": "phone-clean-install",
-      "workflow": "phone-clean-install.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/phone-filesystem-cert",
       "mutating": true,
       "operation": "phone-filesystem-certification",
-      "workflow": "phone-filesystem-certification.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/phone-filesystem-quarantine-clean",
       "mutating": true,
       "operation": "phone-filesystem-quarantine-cleanup",
-      "workflow": "phone-filesystem-quarantine-cleanup.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/phone-filesystem-quarantine-observe",
@@ -101,7 +101,7 @@
       "command": "/phone-runtime-recover",
       "mutating": true,
       "operation": "phone-runtime-recovery",
-      "workflow": "phone-runtime-recovery.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/phone-runtime-release-inventory",
@@ -113,7 +113,7 @@
       "command": "/phone-runtime-repair-binaries",
       "mutating": true,
       "operation": "phone-runtime-binary-repair",
-      "workflow": "phone-runtime-binary-repair.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/phone-runtime-tooling-diagnostic",
@@ -143,7 +143,7 @@
       "command": "/runtime-reconstruction-execute",
       "mutating": true,
       "operation": "runtime-reconstruction-execution",
-      "workflow": "runtime-reconstruction-execution.yml"
+      "workflow": "physical-transaction-readiness.yml"
     },
     {
       "command": "/runtime-reconstruction-readiness",
