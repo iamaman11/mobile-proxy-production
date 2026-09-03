@@ -18,6 +18,17 @@ jobs:
       - name: Check out private execution repository
         uses: actions/checkout@v4
 
+      - name: Prove hosted apksigner transport source
+        shell: bash
+        run: |
+          set -euo pipefail
+          hosted_apksigner="$(command -v apksigner || true)"
+          test -n "${hosted_apksigner}"
+          hosted_apksigner="$(readlink -f "${hosted_apksigner}")"
+          hosted_apksigner_jar="$(dirname "${hosted_apksigner}")/lib/apksigner.jar"
+          test -f "${hosted_apksigner_jar}"
+          java -jar "${hosted_apksigner_jar}" version >/dev/null
+
       - name: Enforce current-authority signing observation contract
         shell: bash
         run: |
@@ -41,10 +52,17 @@ jobs:
               'ref: ${{ steps.command.outputs.canonical_sha }}',
               'run_private_phone_preflight.py',
               'verify_android_installed_signer.py',
+              'tools/apksigner.jar',
+              'same_run_hosted_digest_bound_jar',
+              'java -jar "${hosted_apksigner_jar}" version',
               'source-manifest.json',
               'hashlib.sha256(path.read_bytes()).hexdigest() != files[name]',
               'runs-on: [self-hosted, Linux, X64, android-production]',
-              'ANDROID_TARGET_BINDING_KEY',
+              'uses: actions/setup-java@v4',
+              "distribution: temurin",
+              "java-version: '17'",
+              'ANDROID_TARGET_BINDING_KEY: mobile-proxy/android-production/target-binding/v1/public-nonsecret',
+              'Activate same-run digest-bound apksigner tooling read-only',
               'android.package-signing-continuity-observer.v1',
               'SIGNING_CONTINUITY_PROVEN',
               'SIGNING_CONTINUITY_MISMATCH',
@@ -68,6 +86,7 @@ jobs:
           forbidden = (
               'PINNED_CANONICAL_SHA',
               '20702dda4df3b539cac4402503f7a107a20ef38b',
+              '${{ secrets.ANDROID_TARGET_BINDING_KEY }}',
               'adb install',
               'adb uninstall',
               'pm install',
@@ -81,21 +100,22 @@ jobs:
           present = [fragment for fragment in forbidden if fragment in text]
           if present:
               raise SystemExit(
-                  'phone-signing-identity read-only contract contains forbidden mutation/pinning: '
+                  'phone-signing-identity read-only contract contains forbidden mutation/pinning/secret dependency: '
                   + ', '.join(present)
               )
 
-          source_verify = text.index('Verify immutable canonical source before phone access')
-          tooling = text.index('Resolve existing apksigner tooling read-only')
+          source_verify = text.index('Verify immutable canonical source and apksigner before phone access')
+          java_setup = text.index('Ensure Java signing runtime on production runner')
+          tooling = text.index('Activate same-run digest-bound apksigner tooling read-only')
           context = text.index('Derive bounded causal signing-observation context')
           observe = text.index('Observe installed signer continuity with exact canonical verifier')
-          if not (source_verify < tooling < context < observe):
+          if not (source_verify < java_setup < tooling < context < observe):
               raise SystemExit('signing observer ordering allows phone observation before source/tool/context admission')
 
           if text.count('uses: actions/upload-artifact@v4') < 2:
-              raise SystemExit('immutable source and bounded observation persistence must both remain explicit')
+              raise SystemExit('immutable source/tool and bounded observation persistence must both remain explicit')
           if text.count('uses: actions/download-artifact@v4') < 3:
-              raise SystemExit('bounded immutable source transport retries were removed')
+              raise SystemExit('bounded immutable source/tool transport retries were removed')
 
           phone_job = re.search(
               r'(?ms)^  phone-signing-identity:\n(?P<body>.*?)(?=^  publish-control-evidence:\n)',
@@ -115,4 +135,6 @@ jobs:
                   raise SystemExit('read-only signing observer contains a phone mutation command')
 
           print('Phone signing identity current-authority policy: accepted')
+          print('apksigner_transport=same_run_hosted_digest_bound_jar')
+          print('target_binding_secret_required=false')
           PY
