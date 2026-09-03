@@ -26,9 +26,9 @@ class DeploymentTerminal:
     controller_revision: str
     target: str
     product_release: str
-    release_id: int
-    release_source_sha: str
-    artifact_digest: str
+    release_id: int | None
+    release_source_sha: str | None
+    artifact_digest: str | None
     deployment_id: int | None
     state: str
     current_step: str
@@ -64,17 +64,32 @@ def validate_terminal(value: Mapping[str, object]) -> None:
         raise TerminalContractError("terminal execution id invalid")
     if _SHA.fullmatch(str(value.get("controller_revision", ""))) is None:
         raise TerminalContractError("controller revision invalid")
-    if _SHA.fullmatch(str(value.get("release_source_sha", ""))) is None:
-        raise TerminalContractError("release source SHA invalid")
-    digest = str(value.get("artifact_digest", "")).removeprefix("sha256:")
-    if _SHA256.fullmatch(digest) is None:
-        raise TerminalContractError("artifact digest invalid")
-    if value.get("state") not in TERMINALS:
+    state = str(value.get("state", ""))
+    if state not in TERMINALS:
         raise TerminalContractError("terminal state is not terminal")
-    expected_projection = deployment_projection(str(value.get("state")))
+
+    release_id = value.get("release_id")
+    source_sha = value.get("release_source_sha")
+    artifact_digest = value.get("artifact_digest")
+    release_resolved = (
+        isinstance(release_id, int)
+        and release_id > 0
+        and _SHA.fullmatch(str(source_sha or "")) is not None
+        and _SHA256.fullmatch(str(artifact_digest or "").removeprefix("sha256:")) is not None
+    )
+    if state != "REFUSED" and not release_resolved:
+        raise TerminalContractError("post-admission terminal requires exact Release identity")
+    if state == "REFUSED":
+        partial = [release_id is not None, source_sha is not None, artifact_digest is not None]
+        if any(partial) and not all(partial):
+            raise TerminalContractError("REFUSED terminal has a partial Release identity")
+        if all(partial) and not release_resolved:
+            raise TerminalContractError("REFUSED terminal Release identity is invalid")
+
+    expected_projection = deployment_projection(state)
     if value.get("deployment_projection", expected_projection) != expected_projection:
         raise TerminalContractError("public Deployment projection contradicts canonical terminal")
-    if value.get("state") == "ACCEPTED" and value.get("postcondition_verified") is not True:
+    if state == "ACCEPTED" and value.get("postcondition_verified") is not True:
         raise TerminalContractError("ACCEPTED requires independent postcondition verification")
-    if value.get("state") == "RECOVERED" and expected_projection == "success":
+    if state == "RECOVERED" and expected_projection == "success":
         raise TerminalContractError("RECOVERED must never project original deployment success")
