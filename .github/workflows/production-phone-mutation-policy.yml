@@ -26,13 +26,13 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import ast
-          import re
           from pathlib import Path
 
           workflow = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
           runtime = Path('.github/scripts/run_phone_release_deployment.py')
-          adapter = Path('.github/controller/android_target.py').read_text(encoding='utf-8')
+          adapter_path = Path('.github/controller/android_target.py')
+          adapter = adapter_path.read_text(encoding='utf-8')
 
           required = (
               'runs-on: [self-hosted, Linux, X64, android-production]',
@@ -46,10 +46,27 @@ jobs:
           if missing:
               raise SystemExit('phone target execution boundary incomplete: ' + ', '.join(missing))
 
-          if 'adb", "-s", serial, "install", "-r"' not in adapter:
-              raise SystemExit('bounded Android install dispatch primitive differs')
-          if adapter.count('"install", "-r"') != 1:
-              raise SystemExit('Android adapter must contain exactly one install-replace primitive')
+          adapter_tree = ast.parse(adapter)
+          install_calls = []
+          for node in ast.walk(adapter_tree):
+              if not isinstance(node, ast.Call):
+                  continue
+              if not isinstance(node.func, ast.Attribute) or node.func.attr != 'run':
+                  continue
+              if not node.args or not isinstance(node.args[0], ast.List):
+                  continue
+              values = []
+              for item in node.args[0].elts:
+                  if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                      values.append(item.value)
+                  elif isinstance(item, ast.Name):
+                      values.append(f'<{item.id}>')
+                  else:
+                      values.append('<expr>')
+              if 'install' in values:
+                  install_calls.append(values)
+          if install_calls != [['<adb>', '-s', '<serial>', 'install', '-r', '<expr>']]:
+              raise SystemExit(f'Android adapter must contain exactly one bounded install-replace primitive; got {install_calls!r}')
 
           tree = ast.parse(runtime.read_text(encoding='utf-8'))
           calls = [
