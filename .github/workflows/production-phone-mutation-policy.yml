@@ -11,369 +11,92 @@ permissions:
 
 jobs:
   validate-phone-workflow-classification:
-    name: Validate phone workflow mutation classification and global lock
+    name: Validate sole controller-owned phone mutation path
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check out private execution wrappers
+      - name: Check out private deployment controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Enforce production-phone mutation serialization policy
+      - name: Enforce target lock, one dispatch and no legacy runtime routing
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import re
+          import ast
           from pathlib import Path
 
-          workflows = Path('.github/workflows')
-          required_group = 'production-phone-global-mutation'
+          workflow = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
+          router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
+          runtime = Path('.github/scripts/run_phone_release_deployment.py')
+          adapter_path = Path('.github/controller/android_target.py')
+          adapter = adapter_path.read_text(encoding='utf-8')
 
-          mutation_jobs = {
-              'android-signing-migration.yml': 'migrate-phone',
-              'phone-clean-install.yml': 'clean-install-phone',
-              'phone-filesystem-certification.yml': 'certify-filesystem',
-              'phone-filesystem-quarantine-cleanup.yml': 'cleanup-quarantine',
-              'phone-runtime-recovery.yml': 'recover-runtime',
-              'phone-runtime-binary-repair.yml': 'repair',
-              'runtime-reconstruction-execution.yml': 'reconstruct-phone',
-              'filesystem-scratch-kernel-rehearsal.yml': 'execute-scratch-transaction',
-          }
-          mutators = set(mutation_jobs)
-          read_only_phone = {
-              'phone-capability-inventory.yml',
-              'phone-filesystem-quarantine-observation.yml',
-              'phone-filesystem-tooling-diagnostic.yml',
-              'phone-preflight.yml',
-              'phone-post-migration-diagnostic.yml',
-              'phone-runtime-cutover-preflight.yml',
-              'phone-runtime-diagnostic.yml',
-              'phone-runtime-error-context.yml',
-              'phone-runtime-failure-diagnostic.yml',
-              'phone-runtime-release-inventory.yml',
-              'phone-runtime-tooling-diagnostic.yml',
-              'phone-signing-identity.yml',
-              'production-runner-rust-bootstrap.yml',
-          }
-
-          missing = sorted(name for name in mutators | read_only_phone if not (workflows / name).is_file())
+          required = (
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              'ANDROID_PRODUCTION_SERIAL',
+              'ANDROID_TARGET_BINDING_KEY',
+          )
+          missing = [item for item in required if item not in workflow]
           if missing:
-              raise SystemExit('classified production-phone workflow missing: ' + ', '.join(missing))
+              raise SystemExit('phone target execution boundary incomplete: ' + ', '.join(missing))
 
-          contents = {
-              path.name: path.read_text(encoding='utf-8')
-              for path in workflows.glob('*.yml')
-          }
-          phone_runner_line = re.compile(
-              r'(?m)^    runs-on:\s*\[\s*self-hosted\s*,\s*Linux\s*,\s*X64\s*,\s*android-production\s*\]\s*$'
-          )
-          phone_facing = {
-              name for name, text in contents.items()
-              if phone_runner_line.search(text)
-          }
-          classified = mutators | read_only_phone
-          unknown = sorted(phone_facing - classified)
-          if unknown:
-              raise SystemExit(
-                  'unclassified android-production workflow; classify it explicitly before merge: '
-                  + ', '.join(unknown)
-              )
+          adapter_tree = ast.parse(adapter)
+          install_calls = []
+          for node in ast.walk(adapter_tree):
+              if not isinstance(node, ast.Call):
+                  continue
+              if not isinstance(node.func, ast.Attribute) or node.func.attr != 'run':
+                  continue
+              if not node.args or not isinstance(node.args[0], ast.List):
+                  continue
+              values = []
+              for item in node.args[0].elts:
+                  if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                      values.append(item.value)
+                  elif isinstance(item, ast.Name):
+                      values.append(f'<{item.id}>')
+                  else:
+                      values.append('<expr>')
+              if 'install' in values:
+                  install_calls.append(values)
+          if install_calls != [['<adb>', '-s', '<serial>', 'install', '-r', '<expr>']]:
+              raise SystemExit(f'Android adapter must contain exactly one bounded install-replace primitive; got {install_calls!r}')
 
-          expected_lock = (
-              '    concurrency:\n'
-              f'      group: {required_group}\n'
-              '      cancel-in-progress: false\n'
-              '      queue: max\n'
-          )
-
-          for name, job_id in sorted(mutation_jobs.items()):
-              text = contents[name]
-              pre_jobs = text.split('\njobs:\n', 1)[0]
-              if required_group in pre_jobs:
-                  raise SystemExit(
-                      f'{name}: shared production mutation lock must not be workflow-level; '
-                      'issue_comment fan-out can cancel a legitimate pending workflow before command qualification'
-                  )
-              if text.count(f'group: {required_group}') != 1:
-                  raise SystemExit(f'{name}: global mutation group must appear exactly once on the exact mutation job')
-
-              job = re.search(
-                  rf'(?ms)^  {re.escape(job_id)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)',
-                  text,
-              )
-              if job is None:
-                  raise SystemExit(f'{name}: classified mutation job {job_id} is missing')
-              body = job.group('body')
-              if expected_lock not in body:
-                  raise SystemExit(
-                      f'{name}: mutation job {job_id} must use {required_group}, '
-                      'cancel-in-progress: false, and queue: max at job level'
-                  )
-              if 'runs-on: [self-hosted, Linux, X64, android-production]' not in body:
-                  raise SystemExit(f'{name}: classified mutation job {job_id} is not the exact production-phone job')
-
-          write_patterns = {
-              'canonical destructive migration script': r'migrate_android_signing_lineage\.py',
-              'adb push': r"(?:adb\s+-s[^\n]*\s+push\s+|subprocess\.run\(\s*\[\s*['\"]adb['\"][\s\S]{0,400}?['\"]push['\"])",
-              'package mutation command': r"(?:\bpm\s+(?:install|uninstall|clear|grant|revoke|enable|disable)\b|['\"]pm['\"]\s*,\s*['\"](?:install|uninstall|clear|grant|revoke|enable|disable)['\"])",
-              'root file replacement': r'\b(?:install\s+-m\s+0?755|mv\s+-f|cp\s+-p|rm\s+-rf|mkdir\s+-p)\b',
-              'runtime service execution': r"(?:\bsh\s+[^\n]*service\.sh\b|['\"]sh['\"]\s*,\s*['\"]-c['\"][\s\S]{0,200}?service\.sh)",
-              'android component mutation': r'\b(?:am\s+(?:start|startservice|force-stop)|cmd\s+package\s+(?:install|uninstall))\b',
-          }
-
-          for name in sorted(read_only_phone):
-              text = contents[name]
-              if f'group: {required_group}' in text:
-                  raise SystemExit(f'{name}: read-only workflow must stay outside the global mutation lock')
-              for label, pattern in write_patterns.items():
-                  if re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE):
-                      raise SystemExit(
-                          f'{name}: read-only classification contains possible {label}; '
-                          'reclassify as a mutator and use the global lock or remove the write behavior'
-                      )
-
-          preflight = contents['phone-preflight.yml']
-          required_preflight_persistence_contract = (
-              'id: evidence-upload',
-              'continue-on-error: true',
-              'id: evidence-state',
-              'artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}',
-              'ARTIFACT_PERSISTED: ${{ needs.phone-preflight.outputs.artifact_persisted }}',
-              "const probeAccepted =",
-              "process.env.ACCEPTED === 'true'",
-              "process.env.REGISTERED_DEVICE_MATCH === 'true'",
-              "process.env.ADB_STATE === 'device'",
-              "process.env.SHELL_PROBE === 'true'",
-              "const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';",
-              'const proven = probeAccepted && artifactPersisted;',
-              "? 'PHONE_ACCESS_PROVEN'",
-              "? 'PHONE_ACCESS_OBSERVED_UNPERSISTED'",
-              ": 'PHONE_ACCESS_UNOBSERVED';",
-              '`- phone_job_result: \\`${process.env.PHONE_JOB_RESULT}\\``',
-              '`- probe_accepted: \\`${probeAccepted}\\``',
-              '`- artifact_persisted: \\`${process.env.ARTIFACT_PERSISTED || \'false\'}\\``',
-              '- Device identifier recorded: false',
-              '- Phone mutation performed: false',
-          )
-          missing_preflight_contract = [
-              snippet for snippet in required_preflight_persistence_contract if snippet not in preflight
+          tree = ast.parse(runtime.read_text(encoding='utf-8'))
+          calls = [
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == 'dispatch_install_once'
           ]
-          if missing_preflight_contract:
-              raise SystemExit(
-                  'phone-preflight.yml: evidence persistence state contract missing: '
-                  + ', '.join(missing_preflight_contract)
-              )
-          if preflight.count('uses: actions/upload-artifact@v4') < 2:
-              raise SystemExit(
-                  'phone-preflight.yml: immutable source and bounded evidence persistence must remain explicit'
-              )
-          if "process.env.PHONE_JOB_RESULT === 'success'" in preflight:
-              raise SystemExit(
-                  'phone-preflight.yml: probe acceptance must be independent from overall workflow/job conclusion'
-              )
+          if len(calls) != 1:
+              raise SystemExit(f'controller must have exactly one destructive dispatch callsite; got {len(calls)}')
 
-          def classify_preflight(accepted, match, adb_state, shell_probe, persisted):
-              probe_accepted = (
-                  accepted
-                  and match
-                  and adb_state == 'device'
-                  and shell_probe
-              )
-              if probe_accepted and persisted:
-                  return 'PHONE_ACCESS_PROVEN'
-              if probe_accepted:
-                  return 'PHONE_ACCESS_OBSERVED_UNPERSISTED'
-              return 'PHONE_ACCESS_UNOBSERVED'
-
-          preflight_truth_table = (
-              ((True, True, 'device', True, True), 'PHONE_ACCESS_PROVEN'),
-              ((True, True, 'device', True, False), 'PHONE_ACCESS_OBSERVED_UNPERSISTED'),
-              ((False, True, 'device', True, True), 'PHONE_ACCESS_UNOBSERVED'),
-              ((True, False, 'device', True, True), 'PHONE_ACCESS_UNOBSERVED'),
-              ((True, True, 'offline', True, True), 'PHONE_ACCESS_UNOBSERVED'),
-              ((True, True, 'device', False, True), 'PHONE_ACCESS_UNOBSERVED'),
+          legacy_routes = (
+              '/phone-clean-install',
+              '/phone-filesystem-certification',
+              '/phone-filesystem-quarantine-cleanup',
+              '/phone-runtime-recovery',
+              '/runtime-reconstruction',
+              '/phone-apk-install',
+              'filesystem-scratch-kernel-rehearsal.yml',
+              'android-signing-migration.yml',
           )
-          for inputs, expected in preflight_truth_table:
-              actual = classify_preflight(*inputs)
-              if actual != expected:
-                  raise SystemExit(
-                      f'phone-preflight reducer truth table differs: inputs={inputs} expected={expected} actual={actual}'
-                  )
+          present = [item for item in legacy_routes if item in router]
+          if present:
+              raise SystemExit('legacy phone mutator remains reachable from production Issue #1: ' + ', '.join(present))
+          if "startsWith(github.event.comment.body, '/deploy ')" not in router:
+              raise SystemExit('Release deployment is not the sole v2 Issue #1 ingress')
 
-          filesystem_tooling = contents['phone-filesystem-tooling-diagnostic.yml']
-          required_tooling_persistence_contract = (
-              'observation_validated: ${{ steps.result.outputs.observation_validated }}',
-              'artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}',
-              'id: evidence-upload',
-              'continue-on-error: true',
-              'id: evidence-state',
-              'observation_validated=true',
-              'filesystem tooling evidence is contradictory: compatible but incomplete',
-              'OBSERVATION_VALIDATED: ${{ needs.diagnostic.outputs.observation_validated }}',
-              'ARTIFACT_PERSISTED: ${{ needs.diagnostic.outputs.artifact_persisted }}',
-              "const observationValidated = process.env.OBSERVATION_VALIDATED === 'true';",
-              "const complete = process.env.DIAGNOSTIC_COMPLETE === 'true';",
-              "const compatible = process.env.COMPARATOR_COMPATIBLE === 'true';",
-              "const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';",
-              "classification = 'FILESYSTEM_TOOLING_UNOBSERVED';",
-              "classification = 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED';",
-              "classification = 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN';",
-              "classification = 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED';",
-              "classification = 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED';",
-              '`- diagnostic_job_result: \\`${process.env.DIAGNOSTIC_JOB_RESULT}\\``',
-              '`- observation_validated: \\`${observationValidated}\\``',
-              '`- artifact_persisted: \\`${process.env.ARTIFACT_PERSISTED || \'false\'}\\``',
-              '- Raw device identifier recorded: false',
-              '- Raw command output recorded: false',
-              '- Phone mutation performed: false',
-          )
-          missing_tooling_contract = [
-              snippet for snippet in required_tooling_persistence_contract
-              if snippet not in filesystem_tooling
-          ]
-          if missing_tooling_contract:
-              raise SystemExit(
-                  'phone-filesystem-tooling-diagnostic.yml: observation/persistence contract missing: '
-                  + ', '.join(missing_tooling_contract)
-              )
-          if filesystem_tooling.count('uses: actions/upload-artifact@v4') < 2:
-              raise SystemExit(
-                  'phone-filesystem-tooling-diagnostic.yml: immutable source and bounded evidence persistence must remain explicit'
-              )
-          if filesystem_tooling.count('"android_filesystem_comparator.py"') < 2:
-              raise SystemExit(
-                  'phone-filesystem-tooling-diagnostic.yml: shared comparator module must be copied and manifest-required'
-              )
-          if "process.env.DIAGNOSTIC_JOB_RESULT === 'success'" in filesystem_tooling:
-              raise SystemExit(
-                  'phone-filesystem-tooling-diagnostic.yml: observation classification must be independent from overall diagnostic job conclusion'
-              )
+          recovery = Path('.github/controller/deployment_state_machine.py').read_text(encoding='utf-8')
+          if 'def recover_unknown' not in recovery or 'raise TransitionError("recovery is strictly read-only")' not in recovery:
+              raise SystemExit('UNKNOWN recovery is not structurally read-only')
 
-          def classify_filesystem_tooling(validated, complete, compatible, persisted):
-              if compatible and not complete:
-                  raise ValueError('contradictory filesystem tooling observation')
-              if not validated:
-                  return 'FILESYSTEM_TOOLING_UNOBSERVED'
-              if not persisted:
-                  return 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED'
-              if not complete:
-                  return 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN'
-              if compatible:
-                  return 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED'
-              return 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED'
-
-          tooling_truth_table = (
-              ((True, True, True, True), 'FILESYSTEM_COMPARATOR_PATH_SUPPORTED'),
-              ((True, True, False, True), 'FILESYSTEM_COMPARATOR_PATH_UNSUPPORTED'),
-              ((True, False, False, True), 'FILESYSTEM_COMPARATOR_PATH_UNKNOWN'),
-              ((True, True, True, False), 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED'),
-              ((True, False, False, False), 'FILESYSTEM_TOOLING_OBSERVED_UNPERSISTED'),
-              ((False, False, False, False), 'FILESYSTEM_TOOLING_UNOBSERVED'),
-          )
-          for inputs, expected in tooling_truth_table:
-              actual = classify_filesystem_tooling(*inputs)
-              if actual != expected:
-                  raise SystemExit(
-                      f'filesystem tooling reducer truth table differs: inputs={inputs} expected={expected} actual={actual}'
-                  )
-          try:
-              classify_filesystem_tooling(True, False, True, True)
-          except ValueError:
-              pass
-          else:
-              raise SystemExit('filesystem tooling reducer accepted contradictory complete/compatible evidence')
-
-          filesystem_certification = contents['phone-filesystem-certification.yml']
-          required_certification_contract = (
-              "'android_filesystem_comparator.py'",
-              'selection_before_mutation: ${{ steps.result.outputs.selection_before_mutation }}',
-              'scratch_selected: ${{ steps.result.outputs.scratch_selected }}',
-              'scratch_state: ${{ steps.result.outputs.scratch_state }}',
-              'managed_selected: ${{ steps.result.outputs.managed_selected }}',
-              'managed_state: ${{ steps.result.outputs.managed_state }}',
-              "admission.get('selection_before_mutation') is True",
-              "if values['accepted']:",
-              "if not values['selection_before_mutation']:",
-              "values['scratch_state'] != 'SUPPORTED' or values['managed_state'] != 'SUPPORTED'",
-              'SELECTION_BEFORE_MUTATION: ${{ needs.certify-filesystem.outputs.selection_before_mutation }}',
-              '`- comparator_selection_before_mutation: \\`${process.env.SELECTION_BEFORE_MUTATION || \'false\'}\\``',
-              '`- scratch_selected_comparator: \\`${process.env.SCRATCH_SELECTED || \'unobserved\'}\\``',
-              '`- managed_selected_comparator: \\`${process.env.MANAGED_SELECTED || \'unobserved\'}\\``',
-          )
-          missing_certification_contract = [
-              snippet for snippet in required_certification_contract
-              if snippet not in filesystem_certification
-          ]
-          if missing_certification_contract:
-              raise SystemExit(
-                  'phone-filesystem-certification.yml: comparator admission evidence contract missing: '
-                  + ', '.join(missing_certification_contract)
-              )
-          if filesystem_certification.count("'android_filesystem_comparator.py'") < 2:
-              raise SystemExit(
-                  'phone-filesystem-certification.yml: shared comparator module must be copied and manifest-required'
-              )
-
-          diagnostic = contents['phone-runtime-diagnostic.yml']
-          required_prestate_classifier = (
-              'current_absent=true',
-              'release_count_zero=true',
-              'managed_root_entries_allowed_only=true',
-              'routefix_absent=true',
-              'boot_hook_shape=absent',
-              'managed_executable_process_absent=true',
-              'managed_root_cmdline_process_absent=true',
-              'watchdog_cmdline_process_absent=true',
-              'failure_code=current_present',
-              'failure_code=release_count_nonzero',
-              'failure_code=unexpected_managed_entry',
-              'failure_code=routefix_present',
-              'failure_code=boot_hook_invalid_shape',
-              'failure_code=managed_executable_running',
-              'failure_code=managed_cmdline_running',
-              'failure_code=watchdog_running',
-              '"empty_prestate_failure_code": failure_code',
-              '"empty_prestate_admissible": empty_prestate_admissible',
-              '"raw_process_identifier_recorded": False',
-              '"raw_device_identifier_recorded": False',
-              '"raw_config_recorded": False',
-              '"runtime_secret_values_recorded": False',
-              '"provider_access_performed": False',
-              '"phone_mutation_performed": False',
-          )
-          missing_classifier = [
-              snippet for snippet in required_prestate_classifier if snippet not in diagnostic
-          ]
-          if missing_classifier:
-              raise SystemExit(
-                  'phone-runtime-diagnostic.yml: bounded reconstruction prestate classifier invariant missing: '
-                  + ', '.join(missing_classifier)
-              )
-          diagnostic_secret_refs = set(re.findall(r'secrets\.([A-Z0-9_]+)', diagnostic))
-          if diagnostic_secret_refs != {'ANDROID_PRODUCTION_SERIAL'}:
-              raise SystemExit(
-                  'phone-runtime-diagnostic.yml: read-only prestate classifier may reference only '
-                  'ANDROID_PRODUCTION_SERIAL secret binding'
-              )
-          if 'issues: write' in diagnostic:
-              raise SystemExit(
-                  'phone-runtime-diagnostic.yml: bounded read-only prestate classifier must not write issue comments'
-              )
-
-          print('production phone mutation policy: accepted')
-          print('mutators=' + ','.join(sorted(mutators)))
-          print('read_only_phone=' + ','.join(sorted(read_only_phone)))
-          print('global_mutation_group=' + required_group)
-          print('global_mutation_lock_scope=exact-self-hosted-mutation-jobs')
-          print('global_mutation_pending_queue=max')
-          print('phone_preflight_evidence_persistence_state=explicit')
-          print('phone_preflight_probe_state_independent_of_job_result=accepted')
-          print('phone_preflight_reducer_truth_table=accepted')
-          print('filesystem_tooling_evidence_persistence_state=explicit')
-          print('filesystem_tooling_observation_state_independent_of_job_result=accepted')
-          print('filesystem_tooling_unknown_distinct_from_unsupported=accepted')
-          print('filesystem_tooling_reducer_truth_table=accepted')
-          print('filesystem_comparator_shared_bundle_contract=accepted')
-          print('filesystem_certification_comparator_admission_evidence=explicit')
-          print('reconstruction_prestate_classifier=bounded-read-only')
+          print('CONTROLLER_OWNED_PHONE_MUTATION_POLICY_OK')
           PY

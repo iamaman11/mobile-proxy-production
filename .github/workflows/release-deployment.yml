@@ -1,0 +1,169 @@
+name: Production deployment controller — Release transaction
+
+on:
+  workflow_call:
+    inputs:
+      request_json:
+        required: true
+        type: string
+      execution_id:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      ANDROID_TARGET_BINDING_KEY:
+        required: true
+      PUBLIC_DEPLOYMENTS_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  admit:
+    name: Authorize exact immutable product Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+      duplicate: ${{ steps.admit.outputs.duplicate }}
+      recovery_only: ${{ steps.admit.outputs.recovery_only }}
+      admitted_release_json: ${{ steps.admit.outputs.admitted_release_json }}
+      deployment_id: ${{ steps.admit.outputs.deployment_id }}
+      canonical_terminal_ref: ${{ steps.admit.outputs.canonical_terminal_ref }}
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve Release and create queued public Deployment
+        id: admit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PUBLIC_DEPLOYMENTS_TOKEN: ${{ secrets.PUBLIC_DEPLOYMENTS_TOKEN }}
+          CONTROL_REQUEST_JSON: ${{ inputs.request_json }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/prepare_release_deployment.py \
+            --request-json "$CONTROL_REQUEST_JSON" \
+            --controller-revision "$GITHUB_SHA" \
+            --execution-id "$EXECUTION_ID"
+
+  execute-phone:
+    name: Execute Android Release transaction once
+    needs: admit
+    if: needs.admit.outputs.admitted == 'true' && inputs.target == 'phone-production'
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Reconcile recovery mode from durable private ledger
+        id: recovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CONTROL_REQUEST_JSON: ${{ inputs.request_json }}
+          ADMISSION_RECOVERY_ONLY: ${{ needs.admit.outputs.recovery_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/reconcile_recovery_mode.py \
+            --request-json "$CONTROL_REQUEST_JSON" \
+            --admission-recovery-only "$ADMISSION_RECOVERY_ONLY"
+
+      - name: Execute controller-owned transaction
+        id: deploy
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PUBLIC_DEPLOYMENTS_TOKEN: ${{ secrets.PUBLIC_DEPLOYMENTS_TOKEN }}
+          ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+          ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+          CONTROL_REQUEST_JSON: ${{ inputs.request_json }}
+          ADMITTED_RELEASE_JSON: ${{ needs.admit.outputs.admitted_release_json }}
+          DEPLOYMENT_ID: ${{ needs.admit.outputs.deployment_id }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+          RECOVERY_ONLY: ${{ steps.recovery.outputs.recovery_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/run_phone_release_deployment.py \
+            --request-json "$CONTROL_REQUEST_JSON" \
+            --admitted-release-json "$ADMITTED_RELEASE_JSON" \
+            --deployment-id "$DEPLOYMENT_ID" \
+            --execution-id "$EXECUTION_ID" \
+            --controller-revision "$GITHUB_SHA" \
+            --recovery-only "$RECOVERY_ONLY" \
+            --output "$RUNNER_TEMP/deployment-terminal.json"
+
+      - name: Preserve bounded terminal artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-terminal.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Enforce canonical terminal classification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'deployment-terminal.json'
+          if not path.is_file():
+              raise SystemExit('canonical deployment terminal artifact is unavailable')
+          value = json.loads(path.read_text(encoding='utf-8'))
+          if value.get('schema') != 'production-deployment-terminal.v2':
+              raise SystemExit('canonical deployment terminal schema differs')
+          if value.get('state') != 'ACCEPTED':
+              raise SystemExit('deployment did not reach canonical ACCEPTED terminal')
+          if value.get('postcondition_verified') is not True:
+              raise SystemExit('ACCEPTED deployment lacks independent phone postcondition')
+          if value.get('deployment_projection') != 'success':
+              raise SystemExit('ACCEPTED deployment projection differs')
+          print('PHONE_RELEASE_DEPLOYMENT_ACCEPTED')
+          PY
+
+  refuse-vm-before-adapter:
+    name: Keep VM target fail-closed until phone proof
+    needs: admit
+    if: needs.admit.outputs.admitted == 'true' && inputs.target == 'vm-production'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'vm-production adapter is intentionally unavailable until Android controller proof is accepted' >&2
+          exit 1
+
+  enforce-hosted-terminal:
+    name: Surface hosted refusal as failed execution
+    needs: admit
+    if: needs.admit.outputs.admitted != 'true' && needs.admit.outputs.duplicate != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Deployment refused before target access; canonical terminal: ${{ needs.admit.outputs.canonical_terminal_ref }}" >&2
+          exit 1

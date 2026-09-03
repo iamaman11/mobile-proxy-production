@@ -11,25 +11,42 @@ permissions:
 
 jobs:
   validate-apk-transaction-integration:
-    name: Validate Stage C.0g APK transaction execution seam
+    name: Validate controller-owned APK Release transaction seam
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check out private execution seam
+      - name: Check out private controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          path: private-control
-
-      - name: Check out current canonical source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: iamaman11/mobile-proxy
-          ref: main
-          path: canonical
           persist-credentials: false
 
-      - name: Validate private ports against canonical APK transaction truth table
-        working-directory: private-control
-        run: >-
-          python3 .github/scripts/test_apk_transaction_integration.py
-          --canonical-root ../canonical
+      - name: Prove Android transaction contract without public source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/controller/tests/test_controller.py
+          python3 .github/controller/tests/test_release_resolver.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
+          runner = Path('.github/scripts/run_phone_release_deployment.py').read_text(encoding='utf-8')
+          resolver = Path('.github/controller/release_resolver.py').read_text(encoding='utf-8')
+
+          if 'repository: iamaman11/mobile-proxy' in workflow or 'ref: main' in workflow:
+              raise SystemExit('APK deployment must consume Release assets, not public source checkout')
+          for required in (
+              'mobile-proxy-android-',
+              'release-manifest.json',
+              'provenance.json',
+              'SHA256SUMS',
+              'android-apk',
+          ):
+              if required not in resolver:
+                  raise SystemExit('Release admission contract missing ' + required)
+          if 'verify_artifact(' not in runner or 'dispatch_install_once(' not in runner or 'observe(' not in runner:
+              raise SystemExit('Android transaction does not connect verify/dispatch/postcondition seams')
+          if 'latest' in resolver.lower():
+              raise SystemExit('latest must never be deployment authority')
+          print('APK_RELEASE_TRANSACTION_INTEGRATION_OK')
+          PY

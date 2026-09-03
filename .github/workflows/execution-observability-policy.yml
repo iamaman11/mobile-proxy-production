@@ -4,24 +4,30 @@ on:
   pull_request:
     paths:
       - '.github/workflows/production-control-router.yml'
-      - '.github/workflows/phone-preflight.yml'
+      - '.github/workflows/release-deployment.yml'
       - '.github/workflows/execution-observability-policy.yml'
-      - '.github/scripts/control_execution.py'
-      - '.github/scripts/test_control_execution.py'
-      - '.github/scripts/production_command_router.py'
-      - '.github/scripts/control_request.py'
-      - '.github/production/command-routes.json'
+      - '.github/scripts/deployment_execution.py'
+      - '.github/scripts/prepare_release_deployment.py'
+      - '.github/scripts/reconcile_recovery_mode.py'
+      - '.github/scripts/test_reconcile_recovery_mode.py'
+      - '.github/scripts/run_phone_release_deployment.py'
+      - '.github/controller/terminal_result.py'
+      - '.github/controller/evidence_store.py'
+      - '.github/controller/github_projection.py'
   push:
     branches: [main]
     paths:
       - '.github/workflows/production-control-router.yml'
-      - '.github/workflows/phone-preflight.yml'
+      - '.github/workflows/release-deployment.yml'
       - '.github/workflows/execution-observability-policy.yml'
-      - '.github/scripts/control_execution.py'
-      - '.github/scripts/test_control_execution.py'
-      - '.github/scripts/production_command_router.py'
-      - '.github/scripts/control_request.py'
-      - '.github/production/command-routes.json'
+      - '.github/scripts/deployment_execution.py'
+      - '.github/scripts/prepare_release_deployment.py'
+      - '.github/scripts/reconcile_recovery_mode.py'
+      - '.github/scripts/test_reconcile_recovery_mode.py'
+      - '.github/scripts/run_phone_release_deployment.py'
+      - '.github/controller/terminal_result.py'
+      - '.github/controller/evidence_store.py'
+      - '.github/controller/github_projection.py'
 
 permissions:
   contents: read
@@ -32,20 +38,27 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Compile and test execution identity contract
+      - name: Compile and test v2 execution identity contract
         shell: bash
         run: |
           set -euo pipefail
           python3 -m py_compile \
-            .github/scripts/control_request.py \
-            .github/scripts/production_command_router.py \
-            .github/scripts/control_execution.py \
-            .github/scripts/test_control_execution.py
-          PYTHONPATH=.github/scripts python3 .github/scripts/test_control_execution.py
-          PYTHONPATH=.github/scripts python3 .github/scripts/test_production_command_router.py
+            .github/controller/deployment_request.py \
+            .github/controller/terminal_result.py \
+            .github/controller/evidence_store.py \
+            .github/controller/github_projection.py \
+            .github/scripts/deployment_execution.py \
+            .github/scripts/prepare_release_deployment.py \
+            .github/scripts/reconcile_recovery_mode.py \
+            .github/scripts/test_reconcile_recovery_mode.py \
+            .github/scripts/run_phone_release_deployment.py
+          python3 .github/controller/tests/test_controller.py
+          PYTHONPATH=.github/scripts python3 .github/scripts/test_reconcile_recovery_mode.py
 
-      - name: Enforce immediate correlation and terminal evidence invariants
+      - name: Enforce immediate ACK and canonical terminal invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -53,59 +66,115 @@ jobs:
           from pathlib import Path
 
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
-          preflight = Path('.github/workflows/phone-preflight.yml').read_text(encoding='utf-8')
-          helper = Path('.github/scripts/control_execution.py').read_text(encoding='utf-8')
+          deployment = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
+          ack = Path('.github/scripts/deployment_execution.py').read_text(encoding='utf-8')
+          terminal = Path('.github/controller/terminal_result.py').read_text(encoding='utf-8')
+          store = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
+          runtime = Path('.github/scripts/run_phone_release_deployment.py').read_text(encoding='utf-8')
+          reconcile = Path('.github/scripts/reconcile_recovery_mode.py').read_text(encoding='utf-8')
+          projection = Path('.github/controller/github_projection.py').read_text(encoding='utf-8')
 
           required_router = (
-              'Build bounded exact execution ACK',
-              'Publish immutable exact execution ACK before any routed operation',
+              'Build cursor-free semantic deployment request',
+              'Build exact controller execution ACK',
+              'Publish immediate immutable execution ACK',
               '--run-id "$GITHUB_RUN_ID"',
               '--run-attempt "$GITHUB_RUN_ATTEMPT"',
-              '--private-sha "$GITHUB_SHA"',
+              '--controller-revision "$GITHUB_SHA"',
               'execution_id: ${{ steps.execution.outputs.execution_id }}',
+              './.github/workflows/release-deployment.yml',
           )
           for marker in required_router:
               if marker not in router:
-                  raise SystemExit(f'missing router execution-correlation invariant: {marker}')
-          classify = router.index('Strictly classify command and build semantic request envelope')
-          publish = router.index('Publish immutable exact execution ACK before any routed operation')
-          first_route = router.index('\n  op_')
-          if not classify < publish < first_route:
-              raise SystemExit('execution ACK must be published after classification and before all routed jobs')
+                  raise SystemExit(f'missing v2 router execution-correlation invariant: {marker}')
+          classify = router.index('Build cursor-free semantic deployment request')
+          publish = router.index('Publish immediate immutable execution ACK')
+          deploy_job = router.index('\n  deploy:')
+          if not classify < publish < deploy_job:
+              raise SystemExit('v2 ACK must be published after classification and before deployment')
           if '/actions/runs?' in router or 'workflow_runs' in router:
-              raise SystemExit('router must not search run history to discover its own execution')
+              raise SystemExit('v2 router must not reconstruct its own execution from run history')
+          if 'authority_cursor' in router or 'issue179-comment-' in router:
+              raise SystemExit('v2 execution correlation must not depend on development tracker cursor')
 
-          required_helper = (
-              'control-execution-ack.v1',
-              'gh-run:{run}:{attempt}',
-              'requested_canonical_sha',
-              'request_authority_cursor',
-              '"state": "ROUTED"',
+          required_ack = (
+              'production-deployment-ack.v2',
+              'semantic_request_id',
+              'gh-run:{args.run_id}:{args.run_attempt}',
+              'controller_revision',
+              'product_release',
+              '"state": "REQUEST"',
               '"terminal": False',
-              'physical_transaction_id',
           )
-          for marker in required_helper:
-              if marker not in helper:
-                  raise SystemExit(f'missing execution ACK contract marker: {marker}')
+          for marker in required_ack:
+              if marker not in ack:
+                  raise SystemExit(f'missing v2 ACK contract marker: {marker}')
+          if 'requested_canonical_sha' in ack or 'request_authority_cursor' in ack:
+              raise SystemExit('v2 ACK still carries legacy public SHA/cursor authority')
 
           required_terminal = (
-              'control-execution-terminal.v1',
-              'workflow_run_attempt',
-              'physical_job_id',
-              'raw_artifact_id',
-              'promoted_fact_artifact_id',
-              'terminal_state',
-              "'UNKNOWN'",
-              'mutation_performed: false,',
-              '/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
-              '/actions/artifacts/{artifact_id}',
+              'production-deployment-terminal.v2',
+              'semantic_request_id',
+              'execution_id',
+              'controller_revision',
+              'product_release',
+              'release_source_sha',
+              'artifact_digest',
+              'deployment_id',
+              'current_step',
+              'facts',
+              'blocking_predicates',
+              'mutation_performed',
+              'postcondition_verified',
+              'recovery_required',
+              'recovery_state',
+              'next_allowed_operation',
+              'evidence_refs',
           )
           for marker in required_terminal:
-              if marker not in preflight:
-                  raise SystemExit(f'missing phone-preflight terminal correlation invariant: {marker}')
-          report = preflight[preflight.index('  report:'):]
-          if 'ANDROID_PRODUCTION_SERIAL' in report:
-              raise SystemExit('terminal reporter must not receive raw production device identity')
-          if 'ANDROID_TARGET_BINDING_KEY' in report:
-              raise SystemExit('terminal reporter must not receive target-binding credentials')
+              if marker not in terminal:
+                  raise SystemExit(f'missing canonical v2 terminal field: {marker}')
+
+          if 'TERMINAL_HEADING = "## DEPLOYMENT TERMINAL V2"' not in store:
+              raise SystemExit('canonical terminal is not durably namespaced in private Issue #1')
+          if 'TRUSTED_ACTOR = "github-actions[bot]"' not in store:
+              raise SystemExit('private canonical evidence trust boundary differs')
+          if 'persist_terminal' not in runtime:
+              raise SystemExit('physical transaction does not persist canonical private terminal')
+          persist_index = runtime.rfind('persist_terminal(')
+          project_index = runtime.rfind('_project_terminal(')
+          if persist_index < 0 or project_index < 0 or persist_index > project_index:
+              raise SystemExit('public Deployment projection must follow durable private terminal')
+
+          required_reconcile = (
+              'Durable private evidence is authoritative',
+              'durable_intent_exists',
+              'durable_terminal_exists',
+              'admission_recovery_only',
+              'if durable_intent_exists:',
+              'if admission_recovery_only:',
+              'evidence.request_history',
+          )
+          for marker in required_reconcile:
+              if marker not in reconcile:
+                  raise SystemExit(f'missing recovery reconciliation invariant: {marker}')
+          if 'Reconcile recovery mode from durable private ledger' not in deployment:
+              raise SystemExit('target execution does not refresh durable recovery state after lock acquisition')
+          if '.github/scripts/reconcile_recovery_mode.py' not in deployment:
+              raise SystemExit('target execution does not invoke durable recovery reconciler')
+          recovery_assignments = [
+              line.strip() for line in deployment.splitlines()
+              if line.strip().startswith('RECOVERY_ONLY:')
+          ]
+          if len(recovery_assignments) != 1 or 'steps.recovery.outputs.recovery_only' not in recovery_assignments[0]:
+              raise SystemExit('physical runtime recovery mode is not sourced from post-lock durable reconciliation')
+
+          if 'PUBLIC_DEPLOYMENTS_TOKEN' not in deployment:
+              raise SystemExit('public Deployment projection must use a separate credential')
+          if 'issues' in projection.lower() or 'contents' in projection.lower():
+              raise SystemExit('public Deployment projection implementation broadened beyond Deployments API')
+          if 'RECOVERED' not in terminal:
+              raise SystemExit('canonical terminal schema lost recovery semantics')
+
+          print('V2_EXECUTION_OBSERVABILITY_POLICY_OK')
           PY

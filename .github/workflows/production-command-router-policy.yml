@@ -1,4 +1,4 @@
-name: Production command router policy
+name: Production deployment controller policy
 
 on:
   push:
@@ -9,176 +9,115 @@ permissions:
   contents: read
 
 jobs:
-  validate-command-plane:
-    name: Validate single ingress and semantic request contract
+  controller-hosted-acceptance:
+    name: Validate controller boundary and fault-injection invariants
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check out private execution control plane
+      - name: Check out private deployment controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Compile and run pure router tests
+      - name: Compile controller and run pure hosted acceptance
         shell: bash
         run: |
           set -euo pipefail
           python3 -m py_compile \
-            .github/scripts/control_request.py \
-            .github/scripts/production_command_router.py \
-            .github/scripts/c0o_migrate_issue_comment_workflows.py \
-            .github/scripts/test_production_command_router.py
-          python3 .github/scripts/test_production_command_router.py
+            .github/controller/*.py \
+            .github/controller/tests/*.py \
+            .github/scripts/deployment_command_router.py \
+            .github/scripts/deployment_execution.py \
+            .github/scripts/prepare_release_deployment.py \
+            .github/scripts/run_phone_release_deployment.py
+          python3 .github/controller/tests/test_controller.py
+          python3 .github/controller/tests/test_release_resolver.py
 
-      - name: Enforce one Issue #1 ingress and bounded canonical mutator handoff
+      - name: Enforce repository ownership boundary and one Issue ingress
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json
+          import ast
           import re
           from pathlib import Path
 
           workflows = Path('.github/workflows')
-          router_path = workflows / 'production-control-router.yml'
-          registry_path = Path('.github/production/command-routes.json')
-          wiring_path = Path('.github/production/physical-transaction-wiring.json')
-          contents = {
-              path.name: path.read_text(encoding='utf-8')
-              for path in workflows.glob('*.yml')
-          }
+          router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
+          deployment = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
+          ack_script = Path('.github/scripts/deployment_execution.py').read_text(encoding='utf-8')
+          controller_files = list(Path('.github/controller').glob('*.py'))
+          v2_scripts = [
+              Path('.github/scripts/deployment_command_router.py'),
+              Path('.github/scripts/deployment_execution.py'),
+              Path('.github/scripts/prepare_release_deployment.py'),
+              Path('.github/scripts/run_phone_release_deployment.py'),
+          ]
 
           direct_ingress = sorted(
-              name for name, text in contents.items()
-              if re.search(r'(?m)^  issue_comment:\s*$', text)
+              path.name
+              for path in workflows.glob('*.yml')
+              if re.search(r'(?m)^  issue_comment:\s*$', path.read_text(encoding='utf-8'))
           )
           if direct_ingress != ['production-control-router.yml']:
-              raise SystemExit(
-                  'exactly one issue_comment ingress is required; found: ' + ', '.join(direct_ingress)
-              )
+              raise SystemExit('exactly one private Issue command ingress is required: ' + repr(direct_ingress))
 
-          router = router_path.read_text(encoding='utf-8')
-          required_router_contract = (
+          required_router = (
               "github.event.issue.number == 1",
               "github.event.comment.user.login == github.repository_owner",
-              "startsWith(github.event.comment.body, '/')",
-              '.github/scripts/production_command_router.py',
-              '--comment-id',
-              'github.event.comment.id',
-              'control_request_id:',
-              'control_request_json:',
+              "startsWith(github.event.comment.body, '/deploy ')",
+              '.github/scripts/deployment_command_router.py',
+              '.github/scripts/deployment_execution.py',
+              './.github/workflows/release-deployment.yml',
           )
-          missing_router = [value for value in required_router_contract if value not in router]
-          if missing_router:
-              raise SystemExit('router contract incomplete: ' + ', '.join(missing_router))
+          missing = [item for item in required_router if item not in router]
+          if missing:
+              raise SystemExit('deployment router contract incomplete: ' + ', '.join(missing))
+          if '## DEPLOYMENT EXECUTION ACK' not in ack_script:
+              raise SystemExit('deployment ACK contract is missing')
 
-          registry = json.loads(registry_path.read_text(encoding='utf-8'))
-          if registry.get('schema') != 'production-command-routes.v1':
-              raise SystemExit('route registry schema differs')
-          if registry.get('authority_cursor') != 'issue179-comment-5531491187':
-              raise SystemExit('route registry authority cursor differs from accepted checkpoint')
-          routes = registry.get('routes')
-          if not isinstance(routes, list) or not routes:
-              raise SystemExit('route registry empty')
-
-          commands = [route.get('command') for route in routes]
-          operations = [route.get('operation') for route in routes]
-          if len(commands) != len(set(commands)):
-              raise SystemExit('duplicate command in route registry')
-          if len(operations) != len(set(operations)):
-              raise SystemExit('duplicate operation in route registry')
-
-          wiring = json.loads(wiring_path.read_text(encoding='utf-8'))
-          shared = wiring.get('shared_mutation_workflow')
-          bindings = wiring.get('bindings')
-          rehearsal = wiring.get('authorized_rehearsal')
-          if not isinstance(rehearsal, dict):
-              raise SystemExit('authorized rehearsal binding is missing')
-          rehearsal_operation = rehearsal.get('semantic_operation')
-          rehearsal_workflow = rehearsal.get('workflow')
-          if rehearsal_operation != 'phone-filesystem-certification':
-              raise SystemExit('authorized rehearsal semantic operation differs')
-          if rehearsal_workflow != 'filesystem-scratch-kernel-rehearsal.yml':
-              raise SystemExit('authorized rehearsal workflow differs')
-          if rehearsal.get('phone_execution_enabled') is not True:
-              raise SystemExit('authorized rehearsal phone execution is not explicitly enabled')
-          if rehearsal.get('single_atomic_transaction') is not True:
-              raise SystemExit('authorized rehearsal is not constrained to one atomic transaction')
-          if rehearsal.get('continuation_authorized') is not False:
-              raise SystemExit('authorized rehearsal permits physical continuation')
-
-          mutating_operations = {str(item['operation']) for item in bindings}
-          routed_mutators = {
-              str(route['operation']) for route in routes if route.get('mutating') is True
-          }
-          if routed_mutators != mutating_operations:
-              raise SystemExit('router mutating operation set differs from physical wiring')
-
-          for route in routes:
-              if route.get('mutating') is not True:
-                  if route.get('workflow') in {shared, rehearsal_workflow}:
-                      raise SystemExit('non-mutating route points at a mutation workflow')
-                  continue
-              operation = str(route['operation'])
-              expected = rehearsal_workflow if operation == rehearsal_operation else shared
-              if route.get('workflow') != expected:
-                  raise SystemExit(
-                      f'mutating route {operation} must hand off to {expected}, got {route.get("workflow")}'
-                  )
-
-          if router.count(f'uses: ./.github/workflows/{shared}') != 1:
-              raise SystemExit('router must call shared canonical readiness exactly once')
-          if router.count(f'uses: ./.github/workflows/{rehearsal_workflow}') != 1:
-              raise SystemExit('router must call scratch rehearsal exactly once')
-          for operation in sorted(mutating_operations - {rehearsal_operation}):
-              if operation not in router:
-                  raise SystemExit(f'shared router selector missing mutator: {operation}')
-          rehearsal_job = 'op_' + re.sub(r'[^A-Za-z0-9_]', '_', str(rehearsal_operation))
-          if f'  {rehearsal_job}:' not in router:
-              raise SystemExit('router scratch rehearsal job is missing')
-          if 'secrets: inherit' not in re.search(
-              rf'(?ms)^  {re.escape(rehearsal_job)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)',
-              router,
-          ).group('body'):
-              raise SystemExit('scratch rehearsal router job must receive registered target bindings')
-
-          for route in routes:
-              name = str(route['workflow'])
-              path = workflows / name
-              if not path.is_file():
-                  raise SystemExit(f'routed workflow missing: {name}')
-              text = contents[name]
-              if re.search(r'(?m)^  workflow_call:\s*$', text) is None:
-                  raise SystemExit(f'{name}: routed operation must be reusable workflow_call')
-              if re.search(r'(?m)^  issue_comment:\s*$', text):
-                  raise SystemExit(f'{name}: routed operation retained direct issue_comment ingress')
-              if route.get('mutating') is True:
-                  continue
-              op = str(route['operation'])
-              job_id = 'op_' + re.sub(r'[^A-Za-z0-9_]', '_', op)
-              if f'  {job_id}:' not in router:
-                  raise SystemExit(f'router call job missing for {op}')
-              if f'uses: ./.github/workflows/{name}' not in router:
-                  raise SystemExit(f'router does not statically call {name}')
-
-          mutation_policy = contents['production-phone-mutation-policy.yml']
-          block = re.search(
-              r'(?ms)^          mutation_jobs = \{\n(?P<body>.*?)^          \}\n          mutators = set\(mutation_jobs\)',
-              mutation_policy,
+          forbidden_router = (
+              'authority_cursor',
+              'issue179-comment-',
+              'production_command_router.py',
+              'physical-transaction-readiness.yml',
+              'filesystem-scratch-kernel-rehearsal.yml',
           )
-          if block is None:
-              raise SystemExit('unable to read physical mutator inventory')
-          classified_mutators = set(re.findall(r"'([^']+\.yml)'\s*:", block.group('body')))
-          bound_legacy = {str(item['legacy_workflow']) for item in bindings}
-          expected_classified = bound_legacy | {str(rehearsal_workflow)}
-          if classified_mutators != expected_classified:
-              raise SystemExit(
-                  'mutation-policy inventory differs from canonical wiring + rehearsal: '
-                  + str(sorted(classified_mutators))
-                  + ' vs '
-                  + str(sorted(expected_classified))
-              )
+          present = [item for item in forbidden_router if item in router]
+          if present:
+              raise SystemExit('legacy runtime cursor/kernel route remains reachable: ' + ', '.join(present))
 
-          print(
-              f'COMMAND_ROUTER_POLICY_OK routes={len(routes)} '
-              f'mutators={len(routed_mutators)} shared={shared} rehearsal={rehearsal_workflow}'
-          )
+          combined = '\n'.join(path.read_text(encoding='utf-8') for path in controller_files + v2_scripts)
+          if 'issue179-comment-' in combined or 'authority_cursor' in combined:
+              raise SystemExit('deployment controller v2 depends on development tracker cursor')
+          if 'canonical-public' in deployment or 'repository: iamaman11/mobile-proxy' in deployment:
+              raise SystemExit('controller workflow checks out mutable/public product source instead of Release assets')
+          if 'PUBLIC_DEPLOYMENTS_TOKEN' not in deployment:
+              raise SystemExit('public Deployment projection lacks dedicated minimal credential boundary')
+          if 'production-target-phone-production' not in deployment or 'cancel-in-progress: false' not in deployment:
+              raise SystemExit('phone target global mutation serialization is missing')
+          if 'runs-on: [self-hosted, Linux, X64, android-production]' not in deployment:
+              raise SystemExit('Android physical adapter is not confined to registered target runner')
+
+          run_path = Path('.github/scripts/run_phone_release_deployment.py')
+          tree = ast.parse(run_path.read_text(encoding='utf-8'))
+          dispatch_calls = [
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == 'dispatch_install_once'
+          ]
+          if len(dispatch_calls) != 1:
+              raise SystemExit(f'exactly one destructive dispatch callsite required; got {len(dispatch_calls)}')
+
+          state_machine = Path('.github/controller/deployment_state_machine.py').read_text(encoding='utf-8')
+          required_states = ('ACCEPTED', 'REFUSED', 'UNKNOWN', 'RECOVERED', 'QUARANTINED')
+          if any(state not in state_machine for state in required_states):
+              raise SystemExit('deployment reducer terminal state set is incomplete')
+          if 'if state == ACCEPTED' not in state_machine or 'return "success"' not in state_machine:
+              raise SystemExit('public Deployment success is not derived from canonical ACCEPTED')
+          if 'state in {UNKNOWN, RECOVERED}' not in state_machine or 'return "error"' not in state_machine:
+              raise SystemExit('UNKNOWN/RECOVERED projection contract differs')
+
+          print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
           PY
