@@ -32,6 +32,10 @@ BOOTSTRAP_GENERATION = "filesystem-bootstrap-v1"
 _SHA = re.compile(r"[0-9a-f]{40}")
 _TRANSACTION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 _TARGET_BINDING = re.compile(r"tb-hmac-sha256:[0-9a-f]{64}")
+_CERT_TRANSACTION = re.compile(r"fs-(?P<run>[1-9][0-9]*)-(?P<attempt>[1-9][0-9]*)")
+_CLEANUP_TRANSACTION = re.compile(
+    r"fs-quarantine-clean-(?P<run>[1-9][0-9]*)-(?P<attempt>[1-9][0-9]*)"
+)
 _JOURNAL_BODY = re.compile(
     r"\A## CONTROL FILESYSTEM MUTATION INTENT\n\n```json\n(?P<payload>\{[^\n]*\})\n```\n?\Z"
 )
@@ -63,6 +67,13 @@ _COMMON_JOURNAL_KEYS = {
     "raw_device_identifier_recorded",
 }
 
+_STAGE_B_RESULT_MARKERS = {
+    "operation_transaction_id",
+    "dispatch_intent_persisted",
+    "domain/filesystem_generation",
+    "blind_retry_allowed",
+}
+
 _CERT_TERMINAL = {
     "FILESYSTEM_MUTATION_PROVEN": "ACCEPTED",
     "FILESYSTEM_MUTATION_RECOVERED": "RECOVERED",
@@ -70,6 +81,7 @@ _CERT_TERMINAL = {
     "FILESYSTEM_MUTATION_QUARANTINED": "QUARANTINED",
 }
 _CERT_UNRESOLVED = {"UNKNOWN_EXECUTION_OUTCOME"}
+_CERT_NO_INTENT = {"FILESYSTEM_MUTATION_UNOBSERVED"}
 
 _CLEANUP_TERMINAL = {
     "FILESYSTEM_QUARANTINE_CLEANUP_PROVEN": "CLEANED",
@@ -81,6 +93,7 @@ _CLEANUP_UNRESOLVED = {
     "UNKNOWN_EXECUTION_OUTCOME",
     "FILESYSTEM_QUARANTINE_CLEANUP_OBSERVED_UNPERSISTED",
 }
+_CLEANUP_NO_INTENT = {"FILESYSTEM_QUARANTINE_CLEANUP_UNOBSERVED"}
 
 
 class EvidenceAdapterError(RuntimeError):
@@ -113,6 +126,14 @@ def _expected_transaction(operation_id: str, run_id: int, run_attempt: int) -> s
     if operation_id == CLEANUP_OPERATION:
         return f"fs-quarantine-clean-{run_id}-{run_attempt}"
     raise EvidenceAdapterError(f"unsupported filesystem mutation operation: {operation_id}")
+
+
+def _transaction_sequence(operation_id: str, transaction_id: str) -> tuple[int, int]:
+    pattern = _CERT_TRANSACTION if operation_id == CERT_OPERATION else _CLEANUP_TRANSACTION
+    match = pattern.fullmatch(transaction_id)
+    if match is None:
+        raise EvidenceAdapterError("result transaction does not match operation transaction format")
+    return int(match.group("run")), int(match.group("attempt"))
 
 
 def _trusted(comment: Mapping[str, Any]) -> bool:
@@ -244,12 +265,14 @@ def _parse_result(comment: Mapping[str, Any]) -> dict[str, Any] | None:
         operation_id = CERT_OPERATION
         terminal = _CERT_TERMINAL
         unresolved = _CERT_UNRESOLVED
+        no_intent = _CERT_NO_INTENT
         state_key = "transaction_state"
     elif body.startswith(CLEANUP_RESULT_HEADING):
         heading = CLEANUP_RESULT_HEADING
         operation_id = CLEANUP_OPERATION
         terminal = _CLEANUP_TERMINAL
         unresolved = _CLEANUP_UNRESOLVED
+        no_intent = _CLEANUP_NO_INTENT
         state_key = "cleanup_state"
     else:
         return None
@@ -257,21 +280,40 @@ def _parse_result(comment: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
 
     classification, fields = _parse_result_fields(body, heading)
-    if fields.get("operation_id") != operation_id:
-        raise EvidenceAdapterError("trusted result operation_id differs")
+
+    # Historical result comments predate the Stage-B dispatch-intent contract.
+    # They are audit evidence only and must not be retrofitted into causal intent.
+    present_markers = _STAGE_B_RESULT_MARKERS.intersection(fields)
+    if not present_markers:
+        return None
+    if present_markers != _STAGE_B_RESULT_MARKERS:
+        raise EvidenceAdapterError("trusted Stage-B result marker set is incomplete")
+
+    canonical_sha = _require_text(fields.get("canonical_sha"), "result canonical SHA", _SHA)
+    quality_run_id = _positive_int(fields.get("quality_run_id"), "result Quality run ID")
     transaction_id = _require_text(
         fields.get("operation_transaction_id"), "result operation transaction", _TRANSACTION
     )
+    derived_run_id, run_attempt = _transaction_sequence(operation_id, transaction_id)
     run_id = _positive_int(fields.get("workflow_run_id"), "result workflow run ID")
-    run_attempt = _positive_int(fields.get("workflow_run_attempt"), "result workflow run attempt")
+    if derived_run_id != run_id:
+        raise EvidenceAdapterError("result transaction workflow run does not match explicit workflow_run_id")
     if transaction_id != _expected_transaction(operation_id, run_id, run_attempt):
         raise EvidenceAdapterError("result transaction does not match operation run/attempt identity")
-    if not _bool_field(fields, "dispatch_intent_persisted"):
-        raise EvidenceAdapterError("trusted Stage-B result does not prove dispatch intent persistence")
-    if fields.get("domain/filesystem_generation") != transaction_id:
-        raise EvidenceAdapterError("trusted result filesystem generation differs")
-    if _bool_field(fields, "blind_retry_allowed"):
+
+    dispatch_persisted = _bool_field(fields, "dispatch_intent_persisted")
+    generation = fields.get("domain/filesystem_generation")
+    blind_retry = _bool_field(fields, "blind_retry_allowed")
+    if blind_retry:
         raise EvidenceAdapterError("trusted result permits blind retry")
+
+    if not dispatch_persisted:
+        if generation != "unadvanced" or classification not in no_intent:
+            raise EvidenceAdapterError("trusted no-intent result claims advanced or terminal filesystem state")
+        return None
+
+    if generation != transaction_id:
+        raise EvidenceAdapterError("trusted result filesystem generation differs")
 
     state = fields.get(state_key, "")
     if classification in terminal:
@@ -297,6 +339,8 @@ def _parse_result(comment: Mapping[str, Any]) -> dict[str, Any] | None:
         "operation_transaction_id": transaction_id,
         "workflow_run_id": run_id,
         "workflow_run_attempt": run_attempt,
+        "canonical_sha": canonical_sha,
+        "quality_run_id": quality_run_id,
         "result_persisted": result_persisted,
         "result_state": result_state,
     }
@@ -335,7 +379,7 @@ def build_inventory(comments: list[Mapping[str, Any]]) -> dict[str, Any]:
 
     unknown_results = sorted(set(results) - set(journals))
     if unknown_results:
-        raise EvidenceAdapterError("trusted mutation result has no exact Stage-B journal pair")
+        raise EvidenceAdapterError("trusted Stage-B mutation result has no exact journal pair")
 
     intents: list[dict[str, Any]] = []
     for key, journal in sorted(
@@ -343,6 +387,11 @@ def build_inventory(comments: list[Mapping[str, Any]]) -> dict[str, Any]:
         key=lambda item: (item[0][2], item[0][3], item[0][1]),
     ):
         result = results.get(key)
+        if result is not None:
+            if result["canonical_sha"] != journal["canonical_sha"]:
+                raise EvidenceAdapterError("paired journal/result canonical SHA differs")
+            if result["quality_run_id"] != int(journal["canonical_quality_run_id"]):
+                raise EvidenceAdapterError("paired journal/result Quality authority differs")
         intents.append(
             {
                 "operation_transaction_id": journal["operation_transaction_id"],
