@@ -94,17 +94,18 @@ jobs:
               'physical_job_id',
               'raw_artifact_id',
               'promoted_fact_artifact_id',
-              "terminal_state",
+              'terminal_state',
               "'UNKNOWN'",
-              "mutation_performed: `false`",
+              'mutation_performed: `false`',
               '/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
-              '/actions/runs/{run_id}/artifacts',
+              '/actions/artifacts/{artifact_id}',
           )
           for marker in required_terminal:
               if marker not in preflight:
                   raise SystemExit(f'missing phone-preflight terminal correlation invariant: {marker}')
-          if 'ANDROID_PRODUCTION_SERIAL' in preflight[preflight.index('  report:'):]:
+          report = preflight[preflight.index('  report:'):]
+          if 'ANDROID_PRODUCTION_SERIAL' in report:
               raise SystemExit('terminal reporter must not receive raw production device identity')
-          if 'ANDROID_TARGET_BINDING_KEY' in preflight[preflight.index('  report:'):]:
+          if 'ANDROID_TARGET_BINDING_KEY' in report:
               raise SystemExit('terminal reporter must not receive target-binding credentials')
           PY
