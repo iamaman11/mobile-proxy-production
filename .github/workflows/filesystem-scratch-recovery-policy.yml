@@ -1,0 +1,135 @@
+name: Filesystem scratch recovery policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-read-only-recovery:
+    name: Validate canonical UNKNOWN recovery and private read-only binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private recovery candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check out exact accepted public recovery Kernel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: 80cf8ff10e6c75658beabf5170f242a52357dbc3
+          path: recovery-public
+          persist-credentials: false
+
+      - name: Compile recovery surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/filesystem_scratch_edges.py \
+            .github/scripts/filesystem_scratch_transaction_ports.py \
+            .github/scripts/run_filesystem_scratch_transaction.py \
+            .github/scripts/run_filesystem_scratch_recovery.py \
+            .github/scripts/test_filesystem_scratch_transaction.py
+
+      - name: Run private scratch safety truth table
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/test_filesystem_scratch_transaction.py
+
+      - name: Run accepted public Kernel recovery guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 recovery-public/scripts/tests/test_transaction_recovery_observe.py
+
+      - name: Enforce read-only workflow and bounded evidence surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/filesystem-scratch-kernel-rehearsal.yml').read_text(encoding='utf-8')
+          entry = Path('.github/scripts/run_filesystem_scratch_recovery.py').read_text(encoding='utf-8')
+          transaction_entry = Path('.github/scripts/run_filesystem_scratch_transaction.py').read_text(encoding='utf-8')
+          ports = Path('.github/scripts/filesystem_scratch_transaction_ports.py').read_text(encoding='utf-8')
+          edges = Path('.github/scripts/filesystem_scratch_edges.py').read_text(encoding='utf-8')
+          public_runner = Path('recovery-public/scripts/transaction_runner.py').read_text(encoding='utf-8')
+
+          recovery_job = re.search(
+              r'(?ms)^  recover-scratch-transaction:\n(?P<body>.*)\Z',
+              workflow,
+          )
+          if recovery_job is None:
+              raise SystemExit('read-only scratch recovery job missing')
+          body = recovery_job.group('body')
+          required = (
+              "inputs.operation == 'phone-filesystem-scratch-recovery-observation'",
+              "runs-on: [self-hosted, Linux, X64, android-production]",
+              'RECOVERY_KERNEL_SHA: 80cf8ff10e6c75658beabf5170f242a52357dbc3',
+              "RECOVERY_KERNEL_QUALITY_RUN_ID: '33812609204'",
+              'run_filesystem_scratch_recovery.py',
+              "request.get('mutating') is not False",
+              "result.get('state') not in ('RECOVERED', 'QUARANTINED', 'UNKNOWN_EXECUTION_OUTCOME')",
+          )
+          missing = [snippet for snippet in required if snippet not in body]
+          if missing:
+              raise SystemExit('recovery workflow contract missing: ' + ', '.join(missing))
+          for forbidden in (
+              'concurrency:',
+              'group: production-phone-global-mutation',
+              'run_filesystem_scratch_transaction.py',
+              '/phone-filesystem-cert ',
+          ):
+              if forbidden in body:
+                  raise SystemExit(f'read-only recovery job contains mutation surface: {forbidden}')
+
+          if 'recover_observe' not in public_runner:
+              raise SystemExit('accepted public Kernel recovery entrypoint missing')
+          if 'RecoveryDispatchForbiddenEdge' not in entry or 'recover_observe' not in entry:
+              raise SystemExit('private recovery entrypoint is not bound to read-only Kernel recovery')
+          for forbidden in ('AdbScratchRoundtripEdge', 'runner.run(', 'TransactionRunner().run('):
+              if forbidden in entry:
+                  raise SystemExit(f'private recovery entrypoint contains primary dispatch surface: {forbidden}')
+          if 'RecoveryDispatchForbiddenEdge' not in transaction_entry or 'recover_observe' not in transaction_entry:
+              raise SystemExit('future same-run UNKNOWN recovery is not automatic/fail-closed')
+
+          required_evidence = (
+              'RECOVERY_HEADING',
+              'prior_terminal_ref',
+              'recovery_kernel_sha',
+              'recovery_kernel_quality_run_id',
+              '"blind_retry_allowed": False',
+              '"phone_mutation_performed": False',
+              '"cleanup_performed": False',
+              '"original_transaction_accepted": False',
+              '"raw_device_identifier_recorded": False',
+              'recovery terminal already exists for this prior terminal',
+          )
+          missing = [snippet for snippet in required_evidence if snippet not in ports]
+          if missing:
+              raise SystemExit('bounded recovery evidence contract missing: ' + ', '.join(missing))
+
+          if edges.count('subprocess.run(') != 1:
+              raise SystemExit('ADB subprocess surface is no longer centralized')
+          if 'result.stderr' in edges:
+              raise SystemExit('raw ADB stderr entered classifier surface')
+          if 'scratch dispatch bounded_stage=' not in edges:
+              raise SystemExit('bounded dispatch stage classification missing')
+          forbidden_block = re.search(
+              r'(?ms)^class RecoveryDispatchForbiddenEdge:.*?(?=^@dataclass|\Z)',
+              edges,
+          )
+          if forbidden_block is None or '_adb_shell(' in forbidden_block.group(0):
+              raise SystemExit('recovery dispatch-forbidden edge can reach ADB')
+
+          print('FILESYSTEM_SCRATCH_RECOVERY_POLICY_OK')
+          PY
