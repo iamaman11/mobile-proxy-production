@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT))
 
 from deployment_request import RequestProvenance, build_deployment_request
@@ -38,7 +40,7 @@ def expect_transition_error(callable_) -> None:
     raise AssertionError("illegal transition unexpectedly admitted")
 
 
-def test_request_identity() -> None:
+def test_duplicate_command_semantic_identity() -> None:
     first = build_deployment_request(
         target="phone-production",
         product_release_tag="v0.1.4",
@@ -92,6 +94,22 @@ def test_transport_loss_after_durable_dispatch() -> None:
     assert recovered.mutation_performed is True
 
 
+def test_controller_rerun_after_intent_is_observation_only() -> None:
+    unknown = DeploymentState(
+        state=UNKNOWN,
+        current_step="DISPATCH",
+        intent_persisted=True,
+        dispatch_attempted=True,
+        mutation_performed=True,
+        recovery_required=True,
+        blocking_predicates=("durable_intent_exists_without_terminal",),
+    )
+    expect_transition_error(lambda: reduce_state(unknown, "dispatch_confirmed"))
+    recovered = recover_unknown(unknown, "recovery_observed_desired")
+    assert recovered.state == RECOVERED
+    assert recovered.postcondition_verified is True
+
+
 def test_postcondition_failure() -> None:
     state = reduce_state(advance_to_dispatch(), "dispatch_confirmed")
     state = reduce_state(state, "verify_mismatch")
@@ -110,6 +128,16 @@ def test_evidence_persistence_failure() -> None:
     after = reduce_state(after, "evidence_persistence_failed")
     assert after.state == UNKNOWN
     assert after.recovery_required is True
+
+
+def test_verified_noop_is_accepted_without_mutation() -> None:
+    state = DeploymentState()
+    state = reduce_state(state, "request_received")
+    state = reduce_state(state, "authorized")
+    state = reduce_state(state, "already_desired")
+    assert state.state == ACCEPTED
+    assert state.mutation_performed is False
+    assert state.postcondition_verified is True
 
 
 def test_success_and_terminal_projection() -> None:
@@ -140,6 +168,52 @@ def test_success_and_terminal_projection() -> None:
     value = terminal.to_dict()
     validate_terminal(value)
     assert value["deployment_projection"] == "success"
+
+
+def test_refused_terminal_can_precede_release_resolution() -> None:
+    terminal = DeploymentTerminal(
+        operation="deploy-product-release",
+        semantic_request_id="req-sha256:" + "2" * 64,
+        execution_id="gh-run:124:1",
+        controller_revision="a" * 40,
+        target="phone-production",
+        product_release="v0.1.4",
+        release_id=None,
+        release_source_sha=None,
+        artifact_digest=None,
+        deployment_id=None,
+        state=REFUSED,
+        current_step="AUTHORIZE",
+        blocking_predicates=("release_not_admissible",),
+        mutation_performed=False,
+    ).to_dict()
+    validate_terminal(terminal)
+    assert terminal["deployment_projection"] == "failure"
+
+
+def test_recovered_never_projects_success() -> None:
+    assert deployment_projection(RECOVERED) == "error"
+    assert deployment_projection(UNKNOWN) == "error"
+    assert deployment_projection(QUARANTINED) == "failure"
+
+
+def test_exactly_one_destructive_adapter_callsite() -> None:
+    path = REPO / "scripts" / "run_phone_release_deployment.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "dispatch_install_once"
+    ]
+    assert len(calls) == 1, f"expected one destructive dispatch callsite, got {len(calls)}"
+
+
+def test_recovery_api_has_no_dispatch_parameter() -> None:
+    import inspect
+    signature = inspect.signature(recover_unknown)
+    assert "dispatch" not in signature.parameters
+    assert "executor" not in signature.parameters
 
 
 def main() -> int:
