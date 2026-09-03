@@ -1,0 +1,136 @@
+name: Physical transaction canonical readiness
+
+on:
+  workflow_call:
+    inputs:
+      operation:
+        required: true
+        type: string
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-readiness:
+    name: Resolve canonical physical plan and refuse phone execution
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PHONE_EXECUTION_ENABLED: 'false'
+    steps:
+      - name: Check out exact private control revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Check out accepted public canonical transaction kernel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: 8e994aafcf1b56a86cffef1d99f380393fa71f17
+          path: canonical-public
+
+      - name: Verify private wiring against exact canonical plans, kernel and bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/validate_physical_transaction_wiring.py \
+            --private-root . \
+            --canonical-root canonical-public
+
+      - name: Resolve requested canonical disposition
+        shell: bash
+        env:
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          CONTROL_REQUEST_ID: ${{ inputs.control_request_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          private = json.loads(
+              Path('.github/production/physical-transaction-wiring.json').read_text(encoding='utf-8')
+          )
+          operation = os.environ['REQUESTED_OPERATION']
+          mapping = {
+              item['operation']: item['legacy_workflow']
+              for item in private['bindings']
+          }
+          if operation not in mapping:
+              raise SystemExit('requested operation is not in the canonical private binding set')
+
+          sys.path.insert(0, str(Path('canonical-public/scripts').resolve()))
+          plan = importlib.import_module('physical_operation_plan')
+          inventory = {item.workflow: item for item in plan.PRIVATE_MUTATOR_INVENTORY}
+          item = inventory[mapping[operation]]
+          if item.disposition == 'composite':
+              resolved = plan.machine_readable_plan(plan.composite_plan(item.plan_id))
+          elif item.disposition == 'atomic':
+              resolved = {
+                  'schema': 'atomic-physical-mutation-plan.v1',
+                  'operation_id': item.operation_id,
+              }
+          else:
+              resolved = {
+                  'schema': 'physical-mutation-hard-block.v1',
+                  'reason': item.hard_block_reason,
+              }
+
+          evidence = {
+              'schema': 'physical-transaction-readiness.v1',
+              'control_request_id': os.environ['CONTROL_REQUEST_ID'],
+              'operation': operation,
+              'canonical_sha': private['canonical_sha'],
+              'canonical_quality_run': private['canonical_quality_run'],
+              'disposition': item.disposition,
+              'resolved': resolved,
+              'phone_execution_enabled': False,
+          }
+          Path('physical-transaction-readiness.json').write_text(
+              json.dumps(evidence, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps(evidence, sort_keys=True))
+          PY
+
+      - name: Upload bounded hosted readiness evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: physical-transaction-readiness-${{ inputs.control_request_id }}
+          path: physical-transaction-readiness.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Refuse physical execution until a phone-test authority checkpoint exists
+        shell: bash
+        run: |
+          echo "PHYSICAL_EXECUTION_NOT_AUTHORIZED: canonical wiring is accepted for hosted validation only."
+          exit 2
