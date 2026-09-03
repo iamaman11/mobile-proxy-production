@@ -124,7 +124,7 @@ jobs:
       - name: Upload bounded hosted readiness evidence
         uses: actions/upload-artifact@v4
         with:
-          name: physical-transaction-readiness-${{ inputs.control_request_id }}
+          name: physical-transaction-readiness-${{ github.run_id }}
           path: physical-transaction-readiness.json
           if-no-files-found: error
           retention-days: 14
