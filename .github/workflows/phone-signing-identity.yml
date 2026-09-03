@@ -104,15 +104,10 @@ jobs:
           set -euo pipefail
           test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
 
-          hosted_apksigner="$(command -v apksigner || true)"
-          if [[ -z "${hosted_apksigner}" ]]; then
-            echo "GitHub-hosted runner does not provide apksigner" >&2
-            exit 1
-          fi
-          hosted_apksigner="$(readlink -f "${hosted_apksigner}")"
-          hosted_apksigner_jar="$(dirname "${hosted_apksigner}")/lib/apksigner.jar"
+          hosted_sdk_root="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          hosted_apksigner_jar="${hosted_sdk_root}/build-tools/36.0.0/lib/apksigner.jar"
           if [[ ! -f "${hosted_apksigner_jar}" ]]; then
-            echo "GitHub-hosted apksigner.jar is unavailable" >&2
+            echo "pinned GitHub-hosted build-tools 36.0.0 apksigner.jar is unavailable" >&2
             exit 1
           fi
           java -jar "${hosted_apksigner_jar}" version >/dev/null
@@ -154,6 +149,7 @@ jobs:
               "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
               "files": files,
               "apksigner_transport": "same_run_hosted_digest_bound_jar",
+              "apksigner_build_tools_version": "36.0.0",
           }
           (bundle / "source-manifest.json").write_text(
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -269,6 +265,8 @@ jobs:
               raise SystemExit("canonical Quality authority differs")
           if manifest.get("apksigner_transport") != "same_run_hosted_digest_bound_jar":
               raise SystemExit("apksigner transport differs")
+          if manifest.get("apksigner_build_tools_version") != "36.0.0":
+              raise SystemExit("apksigner build-tools version differs")
           expected = {
               "run_private_phone_preflight.py",
               "verify_android_installed_signer.py",
