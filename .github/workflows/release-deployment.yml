@@ -78,6 +78,19 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Reconcile recovery mode from durable private ledger
+        id: recovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CONTROL_REQUEST_JSON: ${{ inputs.request_json }}
+          ADMISSION_RECOVERY_ONLY: ${{ needs.admit.outputs.recovery_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/reconcile_recovery_mode.py \
+            --request-json "$CONTROL_REQUEST_JSON" \
+            --admission-recovery-only "$ADMISSION_RECOVERY_ONLY"
+
       - name: Execute controller-owned transaction
         id: deploy
         continue-on-error: true
@@ -90,7 +103,7 @@ jobs:
           ADMITTED_RELEASE_JSON: ${{ needs.admit.outputs.admitted_release_json }}
           DEPLOYMENT_ID: ${{ needs.admit.outputs.deployment_id }}
           EXECUTION_ID: ${{ inputs.execution_id }}
-          RECOVERY_ONLY: ${{ needs.admit.outputs.recovery_only }}
+          RECOVERY_ONLY: ${{ steps.recovery.outputs.recovery_only }}
         shell: bash
         run: |
           set -euo pipefail
