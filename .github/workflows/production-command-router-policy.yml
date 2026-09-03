@@ -45,6 +45,7 @@ jobs:
           workflows = Path('.github/workflows')
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           deployment = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
+          ack_script = Path('.github/scripts/deployment_execution.py').read_text(encoding='utf-8')
           controller_files = list(Path('.github/controller').glob('*.py'))
           v2_scripts = [
               Path('.github/scripts/deployment_command_router.py'),
@@ -68,11 +69,12 @@ jobs:
               '.github/scripts/deployment_command_router.py',
               '.github/scripts/deployment_execution.py',
               './.github/workflows/release-deployment.yml',
-              'DEPLOYMENT EXECUTION ACK',
           )
           missing = [item for item in required_router if item not in router]
           if missing:
               raise SystemExit('deployment router contract incomplete: ' + ', '.join(missing))
+          if '## DEPLOYMENT EXECUTION ACK' not in ack_script:
+              raise SystemExit('deployment ACK contract is missing')
 
           forbidden_router = (
               'authority_cursor',
