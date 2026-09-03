@@ -29,6 +29,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   issues: write
 
@@ -175,6 +176,8 @@ jobs:
       raw_evidence_persisted: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted }}
       promoted_fact_persisted: ${{ steps.evidence-state.outputs.promoted_fact_persisted }}
       artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
+      raw_evidence_artifact_id: ${{ steps.evidence-upload.outputs.artifact-id }}
+      promoted_fact_artifact_id: ${{ steps.promoted-fact-upload.outputs.artifact-id }}
     steps:
       - name: Download immutable canonical preflight logic (attempt 1)
         id: source-download-1
@@ -533,7 +536,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Comment bounded result on control issue
+      - name: Publish immutable correlated terminal receipt
         uses: actions/github-script@v7
         env:
           CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
@@ -547,38 +550,167 @@ jobs:
           RAW_EVIDENCE_PERSISTED: ${{ needs.phone-preflight.outputs.raw_evidence_persisted }}
           PROMOTED_FACT_PERSISTED: ${{ needs.phone-preflight.outputs.promoted_fact_persisted }}
           ARTIFACT_PERSISTED: ${{ needs.phone-preflight.outputs.artifact_persisted }}
+          RAW_EVIDENCE_ARTIFACT_ID: ${{ needs.phone-preflight.outputs.raw_evidence_artifact_id }}
+          PROMOTED_FACT_ARTIFACT_ID: ${{ needs.phone-preflight.outputs.promoted_fact_artifact_id }}
+          CONTROL_REQUEST_ID: ${{ inputs.control_request_id }}
+          CONTROL_REQUEST_JSON: ${{ inputs.control_request_json }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
         with:
           script: |
+            const attemptNumber = Number(process.env.GITHUB_RUN_ATTEMPT);
+            if (!Number.isInteger(attemptNumber) || attemptNumber <= 0) {
+              throw new Error('invalid GITHUB_RUN_ATTEMPT');
+            }
+            const executionId = `gh-run:${context.runId}:${attemptNumber}`;
+            const request = JSON.parse(process.env.CONTROL_REQUEST_JSON);
+            if (request.schema !== 'production-control-request.v1') {
+              throw new Error('unexpected control request schema');
+            }
+            if (request.request_id !== process.env.CONTROL_REQUEST_ID) {
+              throw new Error('semantic request id differs from routed input');
+            }
+            if (request.operation !== 'phone-preflight' || request.mutating !== false) {
+              throw new Error('terminal reporter received wrong operation semantics');
+            }
+            if (Number(request.provenance?.comment_id) !== Number(process.env.SOURCE_COMMENT_ID)) {
+              throw new Error('source command provenance differs');
+            }
+
+            const jobsResponse = await github.request(
+              'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                attempt_number: attemptNumber,
+                per_page: 100,
+              },
+            );
+            const phoneJobs = jobsResponse.data.jobs.filter(
+              (job) => job.name.endsWith('Registered production phone read-only preflight'),
+            );
+            if (phoneJobs.length !== 1) {
+              throw new Error(`expected exactly one physical preflight job, found ${phoneJobs.length}`);
+            }
+            const phoneJob = phoneJobs[0];
+
+            const rawArtifactId = Number(process.env.RAW_EVIDENCE_ARTIFACT_ID || 0);
+            const promotedArtifactId = Number(process.env.PROMOTED_FACT_ARTIFACT_ID || 0);
+            const validateArtifact = async (artifactId, expectedName) => {
+              if (!Number.isInteger(artifactId) || artifactId <= 0) return null;
+              const response = await github.request(
+                'GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}',
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifactId,
+                },
+              );
+              const artifact = response.data;
+              if (artifact.name !== expectedName || artifact.expired === true) {
+                throw new Error(`artifact ${artifactId} does not match expected durable evidence`);
+              }
+              if (Number(artifact.workflow_run?.id) !== Number(context.runId)) {
+                throw new Error(`artifact ${artifactId} belongs to a different workflow run`);
+              }
+              return artifact;
+            };
+            const canonicalSha = process.env.CANONICAL_SHA || null;
+            const rawArtifact = await validateArtifact(
+              rawArtifactId,
+              canonicalSha ? `phone-read-only-preflight-${canonicalSha}` : '',
+            );
+            const promotedArtifact = await validateArtifact(
+              promotedArtifactId,
+              canonicalSha ? `phone-access-observed-fact-${canonicalSha}` : '',
+            );
+
             const probeAccepted =
               process.env.ACCEPTED === 'true' &&
               process.env.REGISTERED_DEVICE_MATCH === 'true' &&
               process.env.ADB_STATE === 'device' &&
               process.env.SHELL_PROBE === 'true';
+            const causalFactValidated = process.env.CAUSAL_FACT_VALIDATED === 'true';
+            const rawPersisted = process.env.RAW_EVIDENCE_PERSISTED === 'true';
+            const promotedPersisted = process.env.PROMOTED_FACT_PERSISTED === 'true';
             const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';
-            const proven = probeAccepted && artifactPersisted;
-            const classification = proven
+            const accepted =
+              process.env.PHONE_JOB_RESULT === 'success' &&
+              phoneJob.conclusion === 'success' &&
+              probeAccepted &&
+              causalFactValidated &&
+              rawPersisted &&
+              promotedPersisted &&
+              artifactPersisted &&
+              rawArtifact !== null &&
+              promotedArtifact !== null;
+            const terminalState = accepted ? 'ACCEPTED' : probeAccepted ? 'UNKNOWN' : 'REFUSED';
+            const classification = accepted
               ? 'PHONE_ACCESS_PROVEN'
               : probeAccepted
                 ? 'PHONE_ACCESS_OBSERVED_UNPERSISTED'
                 : 'PHONE_ACCESS_UNOBSERVED';
+            const requestedCanonicalSha =
+              Array.isArray(request.arguments) && /^[0-9a-f]{40}$/.test(request.arguments[0] || '')
+                ? request.arguments[0]
+                : null;
+            const terminal = {
+              schema: 'control-execution-terminal.v1',
+              source_comment_id: Number(process.env.SOURCE_COMMENT_ID),
+              semantic_request_id: request.request_id,
+              execution_id: executionId,
+              workflow_run_id: Number(context.runId),
+              workflow_run_attempt: attemptNumber,
+              operation: 'phone-preflight',
+              requested_canonical_sha: requestedCanonicalSha,
+              canonical_sha: canonicalSha,
+              private_sha: context.sha,
+              request_authority_cursor: request.authority_cursor,
+              physical_job_id: Number(phoneJob.id),
+              physical_job_status: phoneJob.status,
+              physical_job_conclusion: phoneJob.conclusion,
+              runner: phoneJob.runner_name || null,
+              terminal_state: terminalState,
+              classification,
+              registered_device_match: process.env.REGISTERED_DEVICE_MATCH === 'true',
+              adb_state: process.env.ADB_STATE || 'unobserved',
+              shell_probe: process.env.SHELL_PROBE === 'true',
+              causal_fact_validated: causalFactValidated,
+              mutation_performed: false,
+              raw_device_identifier_recorded: false,
+              evidence: {
+                raw_artifact_id: rawArtifact ? Number(rawArtifact.id) : null,
+                promoted_fact_artifact_id: promotedArtifact ? Number(promotedArtifact.id) : null,
+              },
+              terminal: true,
+            };
             const body = [
-              '## CONTROL PHONE PREFLIGHT RESULT',
+              '## CONTROL EXECUTION TERMINAL',
               '',
-              `- classification: **${classification}**`,
-              `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
+              `- execution_id: \`${terminal.execution_id}\``,
+              `- semantic_request_id: \`${terminal.semantic_request_id}\``,
+              `- source_comment_id: \`${terminal.source_comment_id}\``,
+              `- operation: \`${terminal.operation}\``,
+              `- terminal_state: **${terminal.terminal_state}**`,
+              `- classification: **${terminal.classification}**`,
+              `- workflow_run_id: \`${terminal.workflow_run_id}\``,
+              `- workflow_run_attempt: \`${terminal.workflow_run_attempt}\``,
+              `- physical_job_id: \`${terminal.physical_job_id}\``,
+              `- runner: \`${terminal.runner || 'unassigned'}\``,
+              `- canonical_sha: \`${terminal.canonical_sha || 'unavailable'}\``,
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
-              `- workflow_run_id: \`${context.runId}\``,
-              `- phone_job_result: \`${process.env.PHONE_JOB_RESULT}\``,
-              `- probe_accepted: \`${probeAccepted}\``,
-              `- causal_fact_validated: \`${process.env.CAUSAL_FACT_VALIDATED || 'false'}\``,
-              `- registered_device_match: \`${process.env.REGISTERED_DEVICE_MATCH || 'unobserved'}\``,
-              `- adb_state: \`${process.env.ADB_STATE || 'unobserved'}\``,
-              `- shell_probe: \`${process.env.SHELL_PROBE || 'unobserved'}\``,
-              `- raw_evidence_persisted: \`${process.env.RAW_EVIDENCE_PERSISTED || 'false'}\``,
-              `- promoted_fact_persisted: \`${process.env.PROMOTED_FACT_PERSISTED || 'false'}\``,
-              `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
-              '- raw_device_identifier_recorded: `false`',
-              '- phone_mutation_performed: `false`',
+              `- registered_device_match: \`${terminal.registered_device_match}\``,
+              `- adb_state: \`${terminal.adb_state}\``,
+              `- shell_probe: \`${terminal.shell_probe}\``,
+              `- mutation_performed: \`false\``,
+              `- raw_artifact_id: \`${terminal.evidence.raw_artifact_id || 'none'}\``,
+              `- promoted_fact_artifact_id: \`${terminal.evidence.promoted_fact_artifact_id || 'none'}\``,
+              '',
+              'This receipt is an immutable operator projection. Acceptance authority remains the exact run/job plus validated durable evidence.',
+              '',
+              '```json',
+              JSON.stringify(terminal, null, 2),
+              '```',
             ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner,
