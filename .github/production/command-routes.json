@@ -1,5 +1,5 @@
 {
-  "authority_cursor": "issue179-comment-5531154097",
+  "authority_cursor": "issue179-comment-5531491187",
   "routes": [
     {
       "command": "/android-release-build",
@@ -35,7 +35,7 @@
       "command": "/phone-filesystem-cert",
       "mutating": true,
       "operation": "phone-filesystem-certification",
-      "workflow": "physical-transaction-readiness.yml"
+      "workflow": "filesystem-scratch-kernel-rehearsal.yml"
     },
     {
       "command": "/phone-filesystem-quarantine-clean",

@@ -37,6 +37,7 @@ jobs:
               'phone-runtime-recovery.yml': 'recover-runtime',
               'phone-runtime-binary-repair.yml': 'repair',
               'runtime-reconstruction-execution.yml': 'reconstruct-phone',
+              'filesystem-scratch-kernel-rehearsal.yml': 'execute-scratch-transaction',
           }
           mutators = set(mutation_jobs)
           read_only_phone = {

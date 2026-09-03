@@ -1,11 +1,21 @@
 {
   "schema": "physical-transaction-wiring.v1",
-  "authority_cursor": "issue179-comment-5531154097",
+  "authority_cursor": "issue179-comment-5531491187",
   "canonical_repository": "iamaman11/mobile-proxy",
-  "canonical_sha": "8e994aafcf1b56a86cffef1d99f380393fa71f17",
-  "canonical_quality_run": 33797487865,
+  "canonical_sha": "374073b4e666d71981d5ccf9169c30e0979845e6",
+  "canonical_quality_run": 33802912939,
   "shared_mutation_workflow": "physical-transaction-readiness.yml",
   "phone_execution_enabled": false,
+  "authorized_rehearsal": {
+    "semantic_operation": "phone-filesystem-certification",
+    "workflow": "filesystem-scratch-kernel-rehearsal.yml",
+    "physical_operation_id": "android.filesystem-scratch-roundtrip.v1",
+    "plan_id": "android.filesystem-certification.plan.v1",
+    "plan_step_index": 0,
+    "phone_execution_enabled": true,
+    "single_atomic_transaction": true,
+    "continuation_authorized": false
+  },
   "bindings": [
     {
       "operation": "android-signing-migration",

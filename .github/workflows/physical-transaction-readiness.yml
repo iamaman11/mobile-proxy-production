@@ -51,7 +51,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: iamaman11/mobile-proxy
-          ref: 8e994aafcf1b56a86cffef1d99f380393fa71f17
+          ref: 374073b4e666d71981d5ccf9169c30e0979845e6
           path: canonical-public
 
       - name: Verify private wiring against exact canonical plans, kernel and bindings
@@ -129,8 +129,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Refuse physical execution until a phone-test authority checkpoint exists
+      - name: Refuse physical execution until an operation-specific authority checkpoint exists
         shell: bash
         run: |
-          echo "PHYSICAL_EXECUTION_NOT_AUTHORIZED: canonical wiring is accepted for hosted validation only."
+          echo "PHYSICAL_EXECUTION_NOT_AUTHORIZED: this shared path remains hosted-only; only the explicitly wired scratch rehearsal may reach the phone."
           exit 2
