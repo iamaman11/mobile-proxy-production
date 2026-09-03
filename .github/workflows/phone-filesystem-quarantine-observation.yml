@@ -101,15 +101,24 @@ jobs:
           path: canonical
           persist-credentials: false
 
+      - name: Checkout exact private evidence adapter
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: private-control
+          persist-credentials: false
+
       - name: Build immutable quarantine observation source bundle
         shell: bash
         env:
           CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
           QUALITY_RUN_ID: ${{ steps.command.outputs.quality_run_id }}
           TRANSACTION_IDS_JSON: ${{ steps.command.outputs.transaction_ids_json }}
+          PRIVATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+          test "$(git -C private-control rev-parse HEAD)" = "${PRIVATE_SHA}"
           python3 - <<'PY'
           import hashlib
           import json
@@ -125,6 +134,7 @@ jobs:
               'android_filesystem_comparator.py',
               'run_android_filesystem_certification.py',
               'run_android_filesystem_quarantine_recovery.py',
+              'physical_domain_generation.py',
           )
           digests = {}
           for name in scripts:
@@ -134,13 +144,25 @@ jobs:
               target = root / name
               shutil.copyfile(source, target)
               digests[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+
+          helper_source = Path('private-control/.github/scripts/filesystem_generation_inventory.py')
+          if not helper_source.is_file():
+              raise SystemExit('private filesystem generation evidence adapter is missing')
+          helper = root / 'filesystem_generation_inventory.py'
+          shutil.copyfile(helper_source, helper)
+          helper_digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+
           manifest = {
-              'format_version': 1,
+              'format_version': 2,
               'repository': 'iamaman11/mobile-proxy',
               'canonical_sha': os.environ['CANONICAL_SHA'],
               'quality_run_id': int(os.environ['QUALITY_RUN_ID']),
               'transaction_ids': json.loads(os.environ['TRANSACTION_IDS_JSON']),
               'scripts_sha256': digests,
+              'private_repository': 'iamaman11/mobile-proxy-production',
+              'private_sha': os.environ['PRIVATE_SHA'],
+              'private_evidence_adapter': helper.name,
+              'private_evidence_adapter_sha256': helper_digest,
           }
           (root / 'source-manifest.json').write_text(
               json.dumps(manifest, indent=2, sort_keys=True) + '\n',
@@ -166,6 +188,7 @@ jobs:
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       TRANSACTION_IDS_JSON: ${{ needs.command-gate.outputs.transaction_ids_json }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
     outputs:
       observation_validated: ${{ steps.result.outputs.observation_validated }}
       observation_complete: ${{ steps.result.outputs.observation_complete }}
@@ -176,6 +199,13 @@ jobs:
       scratch_base_executable: ${{ steps.result.outputs.scratch_base_executable }}
       managed_base_state: ${{ steps.result.outputs.managed_base_state }}
       transaction_summary_json: ${{ steps.result.outputs.transaction_summary_json }}
+      pre_generation_state: ${{ steps.pre-generation.outputs.state }}
+      pre_filesystem_generation: ${{ steps.pre-generation.outputs.generation }}
+      post_generation_state: ${{ steps.post-generation.outputs.state }}
+      post_filesystem_generation: ${{ steps.post-generation.outputs.generation }}
+      generation_stable: ${{ steps.generation-stability.outputs.generation_stable }}
+      raw_evidence_persisted: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted }}
+      promoted_facts_persisted: ${{ steps.evidence-state.outputs.promoted_facts_persisted }}
       artifact_persisted: ${{ steps.evidence-state.outputs.artifact_persisted }}
     steps:
       - name: Download immutable canonical quarantine observation logic (attempt 1)
@@ -246,7 +276,7 @@ jobs:
           mv "${selected}" "${destination}"
           echo "download_attempt=${selected_attempt}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify source bundle before device access
+      - name: Verify source bundle before generation resolution
         shell: bash
         run: |
           set -euo pipefail
@@ -258,7 +288,7 @@ jobs:
 
           root = Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observe-source'
           manifest = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
-          if manifest.get('format_version') != 1:
+          if manifest.get('format_version') != 2:
               raise SystemExit('unsupported source manifest')
           if manifest.get('repository') != 'iamaman11/mobile-proxy':
               raise SystemExit('source repository differs')
@@ -275,6 +305,7 @@ jobs:
               'android_filesystem_comparator.py',
               'run_android_filesystem_certification.py',
               'run_android_filesystem_quarantine_recovery.py',
+              'physical_domain_generation.py',
           }
           if not isinstance(expected, dict) or set(expected) != required:
               raise SystemExit('source script set differs')
@@ -282,9 +313,130 @@ jobs:
               path = root / name
               if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                   raise SystemExit(f'source digest differs: {name}')
+          if manifest.get('private_repository') != 'iamaman11/mobile-proxy-production':
+              raise SystemExit('private evidence adapter repository differs')
+          helper = root / manifest.get('private_evidence_adapter', '')
+          if helper.name != 'filesystem_generation_inventory.py' or helper.parent != root:
+              raise SystemExit('private evidence adapter path differs')
+          if hashlib.sha256(helper.read_bytes()).hexdigest() != manifest.get('private_evidence_adapter_sha256'):
+              raise SystemExit('private evidence adapter digest differs')
+          PY
+
+      - name: Fetch trusted filesystem CONTROL history before observation
+        id: pre-history
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const headings = [
+              '## CONTROL FILESYSTEM MUTATION INTENT',
+              '## CONTROL ANDROID FILESYSTEM MUTATION RESULT',
+              '## CONTROL ANDROID FILESYSTEM QUARANTINE CLEANUP RESULT',
+            ];
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1,
+              per_page: 100,
+            });
+            const bounded = comments
+              .filter((comment) => headings.some((heading) => String(comment.body || '').startsWith(heading)))
+              .map((comment) => ({
+                id: comment.id,
+                body: String(comment.body || ''),
+                user: {login: String(comment.user?.login || '')},
+              }));
+            if (bounded.length > 512) {
+              throw new Error('bounded filesystem CONTROL history exceeds supported inventory size');
+            }
+            fs.writeFileSync(
+              path.join(process.env.RUNNER_TEMP, 'filesystem-control-comments-pre.json'),
+              JSON.stringify(bounded),
+              'utf8',
+            );
+
+      - name: Resolve filesystem generation before any device observation
+        id: pre-generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/phone-filesystem-quarantine-observe-source"
+          python3 "${root}/filesystem_generation_inventory.py" \
+            --comments "${RUNNER_TEMP}/filesystem-control-comments-pre.json" \
+            --output "${RUNNER_TEMP}/filesystem-generation-inventory-pre.json"
+          set +e
+          python3 "${root}/physical_domain_generation.py" \
+            --inventory "${RUNNER_TEMP}/filesystem-generation-inventory-pre.json" \
+            --output "${RUNNER_TEMP}/filesystem-generation-pre.json"
+          resolver_status=$?
+          set -e
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          resolution = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'filesystem-generation-pre.json').read_text(encoding='utf-8')
+          )
+          state = str(resolution.get('state', 'INVALID_EVIDENCE'))
+          generation = str(resolution.get('generation', ''))
+          if resolution.get('domain_scope') != 'domain/filesystem':
+              raise SystemExit('pre-observation generation scope differs')
+          if resolution.get('git_source_dependency') is not False:
+              raise SystemExit('filesystem generation must not depend on Git source identity')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'state={state}\n')
+              handle.write(f'generation={generation}\n')
+          PY
+          test "${resolver_status}" -eq 0 || true
+
+      - name: Require resolved filesystem generation before device access
+        shell: bash
+        env:
+          GENERATION_STATE: ${{ steps.pre-generation.outputs.state }}
+          FILESYSTEM_GENERATION: ${{ steps.pre-generation.outputs.generation }}
+        run: |
+          set -euo pipefail
+          test "${GENERATION_STATE}" = RESOLVED
+          test -n "${FILESYSTEM_GENERATION}"
+
+      - name: Derive bounded causal quarantine observation context
+        id: causal-context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import os
+          import re
+
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          binding_key = os.environ.get('ANDROID_TARGET_BINDING_KEY', '')
+          if not serial:
+              raise SystemExit('registered production target binding is unavailable')
+          if len(binding_key) < 32:
+              raise SystemExit('target binding HMAC key is unavailable or too short')
+          if binding_key == serial:
+              raise SystemExit('target binding HMAC key must be independent from raw device binding')
+          message = b'android-production\0' + serial.encode('utf-8')
+          target_binding_id = (
+              'tb-hmac-sha256:'
+              + hmac.new(binding_key.encode('utf-8'), message, hashlib.sha256).hexdigest()
+          )
+          if re.fullmatch(r'tb-hmac-sha256:[0-9a-f]{64}', target_binding_id) is None:
+              raise SystemExit('opaque target binding identity is invalid')
+          observation_ref = (
+              f"filesystem-quarantine-observation:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'target_binding_id={target_binding_id}\n')
+              handle.write(f'observation_ref={observation_ref}\n')
           PY
 
       - name: Run bounded read-only quarantine observation
+        id: observe-physical
         shell: bash
         run: |
           set -euo pipefail
@@ -301,16 +453,27 @@ jobs:
               str(root / 'run_android_filesystem_quarantine_recovery.py'),
               '--mode', 'observe',
               '--canonical-sha', os.environ['CANONICAL_SHA'],
+              '--target-binding-id', os.environ['TARGET_BINDING_ID'],
+              '--filesystem-generation', os.environ['FILESYSTEM_GENERATION'],
+              '--observation-ref', os.environ['OBSERVATION_REF'],
           ]
           for transaction_id in json.loads(os.environ['TRANSACTION_IDS_JSON']):
               command += ['--transaction-id', transaction_id]
           command += ['--output', str(output)]
           subprocess.run(command, check=True)
           PY
+        env:
+          TARGET_BINDING_ID: ${{ steps.causal-context.outputs.target_binding_id }}
+          FILESYSTEM_GENERATION: ${{ steps.pre-generation.outputs.generation }}
+          OBSERVATION_REF: ${{ steps.causal-context.outputs.observation_ref }}
 
-      - name: Validate and export bounded quarantine observation
+      - name: Validate canonical causal quarantine facts and export bounded observation
         id: result
         shell: bash
+        env:
+          TARGET_BINDING_ID: ${{ steps.causal-context.outputs.target_binding_id }}
+          FILESYSTEM_GENERATION: ${{ steps.pre-generation.outputs.generation }}
+          OBSERVATION_REF: ${{ steps.causal-context.outputs.observation_ref }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -382,6 +545,48 @@ jobs:
           admissible = evidence.get('cleanup_admissible') is True
           if admissible and not complete:
               raise SystemExit('cleanup admissible cannot be true for incomplete observation')
+
+          dependencies = [
+              {'scope': 'target/android-production', 'identity': os.environ['TARGET_BINDING_ID']},
+              {
+                  'scope': 'observer/filesystem-quarantine',
+                  'identity': 'android.filesystem-quarantine-observer.v2',
+              },
+              {'scope': 'domain/filesystem', 'identity': os.environ['FILESYSTEM_GENERATION']},
+          ]
+          dependencies.extend(
+              {'scope': f'transaction/{transaction_id}', 'identity': transaction_id}
+              for transaction_id in expected_ids
+          )
+          common = {
+              'target': 'android-production',
+              'observation_ref': os.environ['OBSERVATION_REF'],
+              'source_ref': os.environ['CANONICAL_SHA'],
+              'dependencies': dependencies,
+              'authority': 'CONTROL',
+              'persisted': False,
+          }
+          expected_facts = []
+          if complete:
+              expected_facts = [
+                  {
+                      'subject': 'filesystem-quarantine',
+                      'predicate': 'transactions_absent',
+                      'value': all_absent,
+                      **common,
+                  },
+                  {
+                      'subject': 'filesystem-quarantine',
+                      'predicate': 'cleanup_admissible',
+                      'value': admissible,
+                      **common,
+                  },
+              ]
+          if evidence.get('observed_facts') != expected_facts:
+              raise SystemExit('canonical quarantine causal fact envelope differs')
+          if evidence.get('causal_fact_envelope_emitted') is not bool(expected_facts):
+              raise SystemExit('canonical quarantine causal fact emission flag differs')
+
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
               handle.write('observation_validated=true\n')
               handle.write(f'observation_complete={str(complete).lower()}\n')
@@ -394,7 +599,7 @@ jobs:
               handle.write('transaction_summary_json=' + json.dumps(summary, separators=(',', ':')) + '\n')
           PY
 
-      - name: Upload bounded quarantine observation evidence (attempt 1)
+      - name: Upload raw bounded quarantine observation evidence (attempt 1)
         id: evidence-upload-1
         if: success()
         continue-on-error: true
@@ -410,7 +615,7 @@ jobs:
         shell: bash
         run: sleep 3
 
-      - name: Upload bounded quarantine observation evidence (attempt 2)
+      - name: Upload raw bounded quarantine observation evidence (attempt 2)
         id: evidence-upload-2
         if: always() && steps.result.outcome == 'success' && steps.evidence-upload-1.outcome == 'failure'
         continue-on-error: true
@@ -427,7 +632,7 @@ jobs:
         shell: bash
         run: sleep 6
 
-      - name: Upload bounded quarantine observation evidence (attempt 3)
+      - name: Upload raw bounded quarantine observation evidence (attempt 3)
         id: evidence-upload-3
         if: always() && steps.result.outcome == 'success' && steps.evidence-upload-1.outcome == 'failure' && steps.evidence-upload-2.outcome == 'failure'
         continue-on-error: true
@@ -439,8 +644,8 @@ jobs:
           retention-days: 30
           overwrite: true
 
-      - name: Export quarantine observation evidence persistence state
-        id: evidence-state
+      - name: Export raw quarantine observation persistence state
+        id: raw-evidence-state
         if: always()
         shell: bash
         env:
@@ -459,7 +664,192 @@ jobs:
               fi
             done
           fi
-          echo "artifact_persisted=${persisted}" >> "$GITHUB_OUTPUT"
+          echo "raw_evidence_persisted=${persisted}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch trusted filesystem CONTROL history after observation
+        id: post-history
+        if: steps.raw-evidence-state.outputs.raw_evidence_persisted == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const headings = [
+              '## CONTROL FILESYSTEM MUTATION INTENT',
+              '## CONTROL ANDROID FILESYSTEM MUTATION RESULT',
+              '## CONTROL ANDROID FILESYSTEM QUARANTINE CLEANUP RESULT',
+            ];
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1,
+              per_page: 100,
+            });
+            const bounded = comments
+              .filter((comment) => headings.some((heading) => String(comment.body || '').startsWith(heading)))
+              .map((comment) => ({
+                id: comment.id,
+                body: String(comment.body || ''),
+                user: {login: String(comment.user?.login || '')},
+              }));
+            if (bounded.length > 512) {
+              throw new Error('bounded filesystem CONTROL history exceeds supported inventory size');
+            }
+            fs.writeFileSync(
+              path.join(process.env.RUNNER_TEMP, 'filesystem-control-comments-post.json'),
+              JSON.stringify(bounded),
+              'utf8',
+            );
+
+      - name: Resolve filesystem generation after raw observation persistence
+        id: post-generation
+        if: steps.raw-evidence-state.outputs.raw_evidence_persisted == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/phone-filesystem-quarantine-observe-source"
+          python3 "${root}/filesystem_generation_inventory.py" \
+            --comments "${RUNNER_TEMP}/filesystem-control-comments-post.json" \
+            --output "${RUNNER_TEMP}/filesystem-generation-inventory-post.json"
+          set +e
+          python3 "${root}/physical_domain_generation.py" \
+            --inventory "${RUNNER_TEMP}/filesystem-generation-inventory-post.json" \
+            --output "${RUNNER_TEMP}/filesystem-generation-post.json"
+          resolver_status=$?
+          set -e
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          resolution = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'filesystem-generation-post.json').read_text(encoding='utf-8')
+          )
+          state = str(resolution.get('state', 'INVALID_EVIDENCE'))
+          generation = str(resolution.get('generation', ''))
+          if resolution.get('domain_scope') != 'domain/filesystem':
+              raise SystemExit('post-observation generation scope differs')
+          if resolution.get('git_source_dependency') is not False:
+              raise SystemExit('filesystem generation must not depend on Git source identity')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'state={state}\n')
+              handle.write(f'generation={generation}\n')
+              handle.write(f'resolver_exit={resolver_status}\n')
+          PY
+
+      - name: Classify pre/post filesystem generation stability
+        id: generation-stability
+        if: always()
+        shell: bash
+        env:
+          RAW_EVIDENCE_PERSISTED: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted }}
+          PRE_STATE: ${{ steps.pre-generation.outputs.state }}
+          PRE_GENERATION: ${{ steps.pre-generation.outputs.generation }}
+          POST_STATE: ${{ steps.post-generation.outputs.state }}
+          POST_GENERATION: ${{ steps.post-generation.outputs.generation }}
+        run: |
+          set -euo pipefail
+          stable=false
+          if [ "${RAW_EVIDENCE_PERSISTED}" = true ] && \
+             [ "${PRE_STATE}" = RESOLVED ] && \
+             [ "${POST_STATE}" = RESOLVED ] && \
+             [ -n "${PRE_GENERATION}" ] && \
+             [ "${PRE_GENERATION}" = "${POST_GENERATION}" ]; then
+            stable=true
+          fi
+          echo "generation_stable=${stable}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote canonical quarantine facts after stable double-resolution
+        id: promote-facts
+        if: >-
+          steps.raw-evidence-state.outputs.raw_evidence_persisted == 'true' &&
+          steps.generation-stability.outputs.generation_stable == 'true' &&
+          steps.result.outputs.observation_complete == 'true'
+        shell: bash
+        env:
+          PRE_GENERATION: ${{ steps.pre-generation.outputs.generation }}
+          POST_GENERATION: ${{ steps.post-generation.outputs.generation }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import copy
+          import json
+          import os
+          from pathlib import Path
+
+          raw = json.loads(
+              (Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-observation.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          facts = raw.get('observed_facts')
+          if not isinstance(facts, list) or len(facts) != 2:
+              raise SystemExit('only one complete two-fact quarantine observation may be promoted')
+          promoted_facts = []
+          for raw_fact in facts:
+              if raw_fact.get('authority') != 'CONTROL' or raw_fact.get('persisted') is not False:
+                  raise SystemExit('only unpersisted CONTROL quarantine facts may be promoted')
+              promoted = copy.deepcopy(raw_fact)
+              promoted['persisted'] = True
+              comparison = copy.deepcopy(promoted)
+              comparison['persisted'] = False
+              if comparison != raw_fact:
+                  raise SystemExit('quarantine fact promotion changed causal or physical identity')
+              promoted_facts.append(promoted)
+          envelope = {
+              'format_version': 1,
+              'evidence_type': 'PROMOTED_OBSERVED_FACT_SET',
+              'authority': 'CONTROL',
+              'lifecycle': 'CURRENT',
+              'workflow_run_id': int(os.environ['GITHUB_RUN_ID']),
+              'workflow_run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'raw_evidence_ref': f"phone-filesystem-quarantine-observation:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}",
+              'raw_evidence_persisted': True,
+              'pre_filesystem_generation': os.environ['PRE_GENERATION'],
+              'post_filesystem_generation': os.environ['POST_GENERATION'],
+              'generation_stable': True,
+              'promotion_changes_only_persistence': True,
+              'observed_facts': promoted_facts,
+              'raw_device_identifier_recorded': False,
+              'phone_mutation_performed': False,
+          }
+          (Path(os.environ['RUNNER_TEMP']) / 'phone-filesystem-quarantine-promoted-facts.json').write_text(
+              json.dumps(envelope, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Persist promoted reusable quarantine facts independently
+        id: promoted-facts-upload
+        if: steps.promote-facts.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-quarantine-observed-facts-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-filesystem-quarantine-promoted-facts.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Export reusable quarantine fact persistence state
+        id: evidence-state
+        if: always()
+        shell: bash
+        env:
+          RAW_EVIDENCE_PERSISTED: ${{ steps.raw-evidence-state.outputs.raw_evidence_persisted }}
+          GENERATION_STABLE: ${{ steps.generation-stability.outputs.generation_stable }}
+          PROMOTE_FACTS_OUTCOME: ${{ steps.promote-facts.outcome }}
+          PROMOTED_FACTS_UPLOAD_OUTCOME: ${{ steps.promoted-facts-upload.outcome }}
+        run: |
+          set -euo pipefail
+          promoted=false
+          if [ "${RAW_EVIDENCE_PERSISTED}" = true ] && \
+             [ "${GENERATION_STABLE}" = true ] && \
+             [ "${PROMOTE_FACTS_OUTCOME}" = success ] && \
+             [ "${PROMOTED_FACTS_UPLOAD_OUTCOME}" = success ]; then
+            promoted=true
+          fi
+          echo "promoted_facts_persisted=${promoted}" >> "$GITHUB_OUTPUT"
+          echo "artifact_persisted=${promoted}" >> "$GITHUB_OUTPUT"
 
   report:
     name: Publish bounded quarantine observation classification
@@ -483,6 +873,13 @@ jobs:
           SCRATCH_BASE_EXECUTABLE: ${{ needs.observe.outputs.scratch_base_executable }}
           MANAGED_BASE_STATE: ${{ needs.observe.outputs.managed_base_state }}
           TRANSACTION_SUMMARY_JSON: ${{ needs.observe.outputs.transaction_summary_json }}
+          PRE_GENERATION_STATE: ${{ needs.observe.outputs.pre_generation_state }}
+          PRE_FILESYSTEM_GENERATION: ${{ needs.observe.outputs.pre_filesystem_generation }}
+          POST_GENERATION_STATE: ${{ needs.observe.outputs.post_generation_state }}
+          POST_FILESYSTEM_GENERATION: ${{ needs.observe.outputs.post_filesystem_generation }}
+          GENERATION_STABLE: ${{ needs.observe.outputs.generation_stable }}
+          RAW_EVIDENCE_PERSISTED: ${{ needs.observe.outputs.raw_evidence_persisted }}
+          PROMOTED_FACTS_PERSISTED: ${{ needs.observe.outputs.promoted_facts_persisted }}
           ARTIFACT_PERSISTED: ${{ needs.observe.outputs.artifact_persisted }}
         with:
           script: |
@@ -490,14 +887,24 @@ jobs:
             const complete = process.env.OBSERVATION_COMPLETE === 'true';
             const admissible = process.env.CLEANUP_ADMISSIBLE === 'true';
             const allAbsent = process.env.ALL_ABSENT === 'true';
+            const rawPersisted = process.env.RAW_EVIDENCE_PERSISTED === 'true';
+            const generationStable = process.env.GENERATION_STABLE === 'true';
             const persisted = process.env.ARTIFACT_PERSISTED === 'true';
             let classification;
-            if (!validated) {
+            if (process.env.PRE_GENERATION_STATE === 'UNKNOWN_EXECUTION_OUTCOME') {
+              classification = 'FILESYSTEM_QUARANTINE_GENERATION_UNKNOWN';
+            } else if (process.env.PRE_GENERATION_STATE === 'INVALID_EVIDENCE') {
+              classification = 'FILESYSTEM_QUARANTINE_GENERATION_INVALID';
+            } else if (!validated) {
               classification = 'FILESYSTEM_QUARANTINE_UNOBSERVED';
-            } else if (!persisted) {
+            } else if (!rawPersisted) {
               classification = 'FILESYSTEM_QUARANTINE_OBSERVED_UNPERSISTED';
             } else if (!complete) {
               classification = 'FILESYSTEM_QUARANTINE_OBSERVATION_UNKNOWN';
+            } else if (!generationStable) {
+              classification = 'FILESYSTEM_QUARANTINE_STALE_DURING_OBSERVATION';
+            } else if (!persisted) {
+              classification = 'FILESYSTEM_QUARANTINE_OBSERVED_UNPERSISTED';
             } else if (allAbsent) {
               classification = 'FILESYSTEM_QUARANTINE_ALREADY_ABSENT';
             } else if (admissible) {
@@ -519,10 +926,18 @@ jobs:
               `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
               `- workflow_run_id: \`${context.runId}\``,
+              `- workflow_run_attempt: \`${process.env.GITHUB_RUN_ATTEMPT}\``,
               `- observation_job_result: \`${process.env.OBSERVATION_JOB_RESULT}\``,
               `- observation_validated: \`${validated}\``,
               `- observation_complete: \`${process.env.OBSERVATION_COMPLETE || 'unobserved'}\``,
               `- cleanup_admissible: \`${process.env.CLEANUP_ADMISSIBLE || 'false'}\``,
+              `- pre_generation_state: \`${process.env.PRE_GENERATION_STATE || 'unobserved'}\``,
+              `- pre_domain/filesystem_generation: \`${process.env.PRE_FILESYSTEM_GENERATION || 'unobserved'}\``,
+              `- post_generation_state: \`${process.env.POST_GENERATION_STATE || 'unobserved'}\``,
+              `- post_domain/filesystem_generation: \`${process.env.POST_FILESYSTEM_GENERATION || 'unobserved'}\``,
+              `- generation_stable: \`${generationStable}\``,
+              `- raw_evidence_persisted: \`${rawPersisted}\``,
+              `- promoted_facts_persisted: \`${process.env.PROMOTED_FACTS_PERSISTED || 'false'}\``,
               `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
               `- scratch_base_state: \`${process.env.SCRATCH_BASE_STATE || 'unobserved'}\``,
               `- scratch_base_writable: \`${process.env.SCRATCH_BASE_WRITABLE || 'unobserved'}\``,
