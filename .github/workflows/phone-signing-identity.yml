@@ -151,12 +151,13 @@ jobs:
     name: Observe installed package signing continuity on registered production phone
     needs: command-gate
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
-      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/phone-signing-android-sdk
+      ANDROID_HOME: ${{ runner.temp }}/phone-signing-android-sdk
     outputs:
       classification: ${{ steps.observe.outputs.classification }}
       observation_validated: ${{ steps.observe.outputs.observation_validated }}
@@ -260,58 +261,32 @@ jobs:
                   raise SystemExit("canonical signing-observer source digest differs")
           PY
 
-      - name: Resolve existing apksigner tooling read-only
+      - name: Set up pinned JDK 17 for Android signing tools
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Provision pinned Android build-tools for apksigner
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          cmdline-tools-version: 12266719
+          packages: 'build-tools;35.0.0'
+
+      - name: Resolve exact pinned apksigner tooling read-only
         id: tooling
         shell: bash
         run: |
           set -euo pipefail
-          if command -v apksigner >/dev/null 2>&1; then
-            echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          sdk_roots=()
-          [[ -n "${ANDROID_SDK_ROOT:-}" ]] && sdk_roots+=("${ANDROID_SDK_ROOT}")
-          [[ -n "${ANDROID_HOME:-}" ]] && sdk_roots+=("${ANDROID_HOME}")
-          sdk_roots+=("/opt/android-sdk" "/usr/local/lib/android/sdk")
-          adb_path="$(command -v adb || true)"
-          if [[ -n "${adb_path}" ]]; then
-            adb_dir="$(dirname "$(readlink -f "${adb_path}")")"
-            [[ "$(basename "${adb_dir}")" == "platform-tools" ]] && sdk_roots+=("$(dirname "${adb_dir}")")
-          fi
-
-          resolved=""
-          for root in "${sdk_roots[@]}"; do
-            [[ -d "${root}/build-tools" ]] || continue
-            resolved="$(find "${root}/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
-            [[ -n "${resolved}" ]] && break
-          done
-          if [[ -n "${resolved}" ]]; then
-            echo "$(dirname "${resolved}")" >> "$GITHUB_PATH"
-            echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          resolved_jar=""
-          for root in "${sdk_roots[@]}"; do
-            [[ -d "${root}/build-tools" ]] || continue
-            resolved_jar="$(find "${root}/build-tools" -mindepth 3 -maxdepth 3 -type f -path '*/lib/apksigner.jar' 2>/dev/null | sort -V | tail -n 1)"
-            [[ -n "${resolved_jar}" ]] && break
-          done
-          if [[ -z "${resolved_jar}" ]]; then
-            echo "apksigner is unavailable in PATH and registered Android SDK roots" >&2
+          expected="${ANDROID_SDK_ROOT}/build-tools/35.0.0/apksigner"
+          if [ ! -x "${expected}" ]; then
+            echo "pinned apksigner is unavailable at exact build-tools 35.0.0 path" >&2
             exit 1
           fi
-
-          cat > "${RUNNER_TEMP}/apksigner" <<'SH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          exec java -jar "${APKSIGNER_JAR}" "$@"
-          SH
-          chmod 700 "${RUNNER_TEMP}/apksigner"
-          echo "APKSIGNER_JAR=${resolved_jar}" >> "$GITHUB_ENV"
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+          "${expected}" version >/dev/null
+          echo "$(dirname "${expected}")" >> "$GITHUB_PATH"
           echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
+          echo "apksigner_build_tools=35.0.0" >> "$GITHUB_OUTPUT"
 
       - name: Derive bounded causal signing-observation context
         id: context
@@ -325,13 +300,11 @@ jobs:
           import re
 
           serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
-          key = os.environ.get("ANDROID_TARGET_BINDING_KEY", "")
           if not serial:
               raise SystemExit("registered production target binding is unavailable")
-          if len(key) < 32 or key == serial:
-              raise SystemExit("independent target binding key is unavailable")
+          namespace_key = b"mobile-proxy/android-production/target-binding/v1"
           target_binding_id = "tb-hmac-sha256:" + hmac.new(
-              key.encode("utf-8"),
+              namespace_key,
               b"android-production\0" + serial.encode("utf-8"),
               hashlib.sha256,
           ).hexdigest()
