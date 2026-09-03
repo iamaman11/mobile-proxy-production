@@ -182,23 +182,28 @@ def test_unknown_rerun_block(operation, control, runner, apk) -> None:
     request = apk.ApkInstallRequest(TX, REF)
     first = runner.TransactionRunner().run(request, ports=first_ports, binding=apk.ApkInstallBinding(first_executor), existing_evidence=first_ports.load_existing_evidence())
     require(first.derived["state"] == "UNKNOWN_EXECUTION_OUTCOME", "lost post-dispatch result must be UNKNOWN_EXECUTION_OUTCOME")
-    require(first.terminal_ref is None, "UNKNOWN result must not fabricate a terminal record")
+    require(first.lifecycle_state == runner.TERMINAL_UNKNOWN, "post-dispatch ambiguity must classify as durable UNKNOWN")
+    require(isinstance(first.terminal_ref, str) and first.terminal_ref.startswith("issue-comment:"), "UNKNOWN result must persist a durable terminal record")
     require(first_executor.dispatch_calls == 1, "first attempt must dispatch once")
     require(first_preflight.calls == 1, "first attempt boundary must be observed once")
-    require(headings(comments) == [PORTS.BOUNDARY_RAW_HEADING, PORTS.BOUNDARY_FACT_HEADING, PORTS.INTENT_HEADING], "UNKNOWN path must stop with durable intent and no terminal")
+    require(headings(comments) == [PORTS.BOUNDARY_RAW_HEADING, PORTS.BOUNDARY_FACT_HEADING, PORTS.INTENT_HEADING, PORTS.TERMINAL_HEADING], "UNKNOWN path must persist boundary, intent and terminal evidence")
+    terminal = PORTS._parse(comments.comments[3], PORTS.TERMINAL_HEADING)
+    require(terminal is not None, "durable UNKNOWN terminal is missing")
+    require(terminal["derived"]["state"] == "UNKNOWN_EXECUTION_OUTCOME", "durable terminal must preserve UNKNOWN state")
+    require(terminal["blind_retry_allowed"] is False, "durable UNKNOWN terminal must forbid blind retry")
     retry_ports, retry_preflight = make_ports(operation, control, runner, comments)
     retry_executor = FakeExecutor(runner)
     existing = retry_ports.load_existing_evidence()
-    require(existing[-1].status == operation.DISPATCHED, "journaled intent must reconstruct DISPATCHED")
+    require(existing[-1].status == operation.DISPATCHED, "durable UNKNOWN terminal must reconstruct the dispatch boundary")
     try:
         runner.TransactionRunner().run(request, ports=retry_ports, binding=apk.ApkInstallBinding(retry_executor), existing_evidence=existing)
     except runner.BlindRetryForbidden:
         pass
     else:
-        raise AssertionError("journaled UNKNOWN transaction must forbid blind retry")
+        raise AssertionError("durable UNKNOWN transaction must forbid blind retry")
     require(retry_executor.dispatch_calls == 0, "rerun must be blocked before APK dispatch")
     require(retry_preflight.calls == 0, "rerun must be blocked before phone observation")
-    require(len(comments.comments) == 3, "blocked rerun must not create new durable evidence or a new destructive identity")
+    require(len(comments.comments) == 4, "blocked rerun must not create new durable evidence or a new destructive identity")
 
 
 def test_terminal_rerun_block(operation, control, runner, apk) -> None:

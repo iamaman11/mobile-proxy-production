@@ -1,0 +1,39 @@
+{
+  "schema": "physical-transaction-wiring.v1",
+  "authority_cursor": "issue179-comment-5531154097",
+  "canonical_repository": "iamaman11/mobile-proxy",
+  "canonical_sha": "8e994aafcf1b56a86cffef1d99f380393fa71f17",
+  "canonical_quality_run": 33797487865,
+  "shared_mutation_workflow": "physical-transaction-readiness.yml",
+  "phone_execution_enabled": false,
+  "bindings": [
+    {
+      "operation": "android-signing-migration",
+      "legacy_workflow": "android-signing-migration.yml"
+    },
+    {
+      "operation": "phone-clean-install",
+      "legacy_workflow": "phone-clean-install.yml"
+    },
+    {
+      "operation": "phone-filesystem-certification",
+      "legacy_workflow": "phone-filesystem-certification.yml"
+    },
+    {
+      "operation": "phone-filesystem-quarantine-cleanup",
+      "legacy_workflow": "phone-filesystem-quarantine-cleanup.yml"
+    },
+    {
+      "operation": "phone-runtime-recovery",
+      "legacy_workflow": "phone-runtime-recovery.yml"
+    },
+    {
+      "operation": "phone-runtime-binary-repair",
+      "legacy_workflow": "phone-runtime-binary-repair.yml"
+    },
+    {
+      "operation": "runtime-reconstruction-execution",
+      "legacy_workflow": "runtime-reconstruction-execution.yml"
+    }
+  ]
+}

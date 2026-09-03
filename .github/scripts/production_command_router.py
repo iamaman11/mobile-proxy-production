@@ -35,7 +35,6 @@ def load_registry(path: Path) -> tuple[str, dict[str, Route]]:
         raise RouteRefused("unsupported command route registry schema")
     cursor = str(raw.get("authority_cursor", ""))
     routes: dict[str, Route] = {}
-    workflows: set[str] = set()
     operations: set[str] = set()
     for item in raw.get("routes", []):
         route = Route(
@@ -48,10 +47,9 @@ def load_registry(path: Path) -> tuple[str, dict[str, Route]]:
             raise RouteRefused(f"invalid registered command: {route.command!r}")
         if not route.workflow.endswith(".yml") or "/" in route.workflow or "\\" in route.workflow:
             raise RouteRefused("invalid registered workflow path")
-        if route.command in routes or route.workflow in workflows or route.operation in operations:
-            raise RouteRefused("duplicate command/workflow/operation in route registry")
+        if route.command in routes or route.operation in operations:
+            raise RouteRefused("duplicate command/operation in route registry")
         routes[route.command] = route
-        workflows.add(route.workflow)
         operations.add(route.operation)
     if not routes:
         raise RouteRefused("empty command route registry")

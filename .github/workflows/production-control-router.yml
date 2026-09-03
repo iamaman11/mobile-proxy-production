@@ -60,22 +60,6 @@ jobs:
       control_request_json: ${{ needs.route.outputs.request_json }}
     secrets: inherit
 
-  op_android_signing_migration:
-    name: Route android-signing-migration
-    needs: route
-    if: needs.route.outputs.operation == 'android-signing-migration'
-    uses: ./.github/workflows/android-signing-migration.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
   op_android_signing_proof:
     name: Route android-signing-proof
     needs: route
@@ -97,54 +81,6 @@ jobs:
     needs: route
     if: needs.route.outputs.operation == 'phone-capability-inventory'
     uses: ./.github/workflows/phone-capability-inventory.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
-  op_phone_clean_install:
-    name: Route phone-clean-install
-    needs: route
-    if: needs.route.outputs.operation == 'phone-clean-install'
-    uses: ./.github/workflows/phone-clean-install.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
-  op_phone_filesystem_certification:
-    name: Route phone-filesystem-certification
-    needs: route
-    if: needs.route.outputs.operation == 'phone-filesystem-certification'
-    uses: ./.github/workflows/phone-filesystem-certification.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
-  op_phone_filesystem_quarantine_cleanup:
-    name: Route phone-filesystem-quarantine-cleanup
-    needs: route
-    if: needs.route.outputs.operation == 'phone-filesystem-quarantine-cleanup'
-    uses: ./.github/workflows/phone-filesystem-quarantine-cleanup.yml
     with:
       command: ${{ github.event.comment.body }}
       source_event_name: issue_comment
@@ -300,43 +236,11 @@ jobs:
       control_request_json: ${{ needs.route.outputs.request_json }}
     secrets: inherit
 
-  op_phone_runtime_recovery:
-    name: Route phone-runtime-recovery
-    needs: route
-    if: needs.route.outputs.operation == 'phone-runtime-recovery'
-    uses: ./.github/workflows/phone-runtime-recovery.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
   op_phone_runtime_release_inventory:
     name: Route phone-runtime-release-inventory
     needs: route
     if: needs.route.outputs.operation == 'phone-runtime-release-inventory'
     uses: ./.github/workflows/phone-runtime-release-inventory.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
-  op_phone_runtime_binary_repair:
-    name: Route phone-runtime-binary-repair
-    needs: route
-    if: needs.route.outputs.operation == 'phone-runtime-binary-repair'
-    uses: ./.github/workflows/phone-runtime-binary-repair.yml
     with:
       command: ${{ github.event.comment.body }}
       source_event_name: issue_comment
@@ -412,22 +316,6 @@ jobs:
       control_request_json: ${{ needs.route.outputs.request_json }}
     secrets: inherit
 
-  op_runtime_reconstruction_execution:
-    name: Route runtime-reconstruction-execution
-    needs: route
-    if: needs.route.outputs.operation == 'runtime-reconstruction-execution'
-    uses: ./.github/workflows/runtime-reconstruction-execution.yml
-    with:
-      command: ${{ github.event.comment.body }}
-      source_event_name: issue_comment
-      source_issue_number: ${{ github.event.issue.number }}
-      source_comment_id: ${{ github.event.comment.id }}
-      source_actor: ${{ github.event.comment.user.login }}
-      source_comment_url: ${{ github.event.comment.html_url }}
-      control_request_id: ${{ needs.route.outputs.request_id }}
-      control_request_json: ${{ needs.route.outputs.request_json }}
-    secrets: inherit
-
   op_runtime_reconstruction_readiness_transport:
     name: Route runtime-reconstruction-readiness-transport
     needs: route
@@ -443,3 +331,19 @@ jobs:
       control_request_id: ${{ needs.route.outputs.request_id }}
       control_request_json: ${{ needs.route.outputs.request_json }}
     secrets: inherit
+
+  op_canonical_physical_transaction:
+    name: Route mutator through canonical physical transaction readiness
+    needs: route
+    if: contains(fromJSON('["android-signing-migration","phone-clean-install","phone-filesystem-certification","phone-filesystem-quarantine-cleanup","phone-runtime-recovery","phone-runtime-binary-repair","runtime-reconstruction-execution"]'), needs.route.outputs.operation)
+    uses: ./.github/workflows/physical-transaction-readiness.yml
+    with:
+      operation: ${{ needs.route.outputs.operation }}
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
