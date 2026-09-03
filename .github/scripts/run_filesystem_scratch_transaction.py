@@ -15,7 +15,11 @@ from typing import Any
 
 from apk_transaction_ports import PRIVATE_REPOSITORY, RestIssueCommentClient
 from control_request import RequestProvenance, build_request_envelope
-from filesystem_scratch_edges import AdbScratchAbsenceObserver, AdbScratchRoundtripEdge
+from filesystem_scratch_edges import (
+    AdbScratchAbsenceObserver,
+    AdbScratchRoundtripEdge,
+    RecoveryDispatchForbiddenEdge,
+)
 from filesystem_scratch_transaction_ports import (
     OPERATION_ID,
     SEMANTIC_OPERATION,
@@ -184,30 +188,64 @@ def main() -> int:
         target_binding_key=binding_key,
         workflow_run_id=run_id,
         workflow_run_attempt=run_attempt,
+        recovery_kernel_sha=args.canonical_sha,
+        recovery_kernel_quality_run_id=args.quality_run_id,
     )
+    comments = RestIssueCommentClient(token=token)
     ports = PrivateScratchTransactionPorts(
         transaction_module=transaction,
         operation_module=operation,
         control_module=control,
         preflight_module=preflight,
-        comments=RestIssueCommentClient(token=token),
+        comments=comments,
         context=context,
     )
+    observer = AdbScratchAbsenceObserver(serial, transaction)
     executor = filesystem.FilesystemScratchRoundtripExecutor(
         filesystem=AdbScratchRoundtripEdge(serial, transaction),
-        observer=AdbScratchAbsenceObserver(serial, transaction),
+        observer=observer,
     )
     binding = filesystem.FilesystemScratchRoundtripBinding(executor)
     require(binding.transaction_id(request) == transaction_id, "binding physical transaction identity differs")
 
-    result = transaction.TransactionRunner().run(
+    runner = transaction.TransactionRunner()
+    result = runner.run(
         request,
         ports=ports,
         binding=binding,
         existing_evidence=ports.load_existing_evidence(),
     )
+
+    recovery_attempted = False
+    recovery_state = None
+    recovery_lifecycle_state = None
+    recovery_terminal_ref = None
+    recovery_error = None
+    if result.derived.get("state") == "UNKNOWN_EXECUTION_OUTCOME":
+        recovery_attempted = True
+        require(bool(result.terminal_ref), "UNKNOWN transaction lacks durable terminal reference")
+        recover_observe = getattr(runner, "recover_observe", None)
+        require(callable(recover_observe), "canonical Kernel lacks read-only UNKNOWN recovery path")
+        prior_terminal = ports.load_terminal_by_ref(str(result.terminal_ref))
+        recovery_executor = filesystem.FilesystemScratchRoundtripExecutor(
+            filesystem=RecoveryDispatchForbiddenEdge(transaction),
+            observer=observer,
+        )
+        recovery_binding = filesystem.FilesystemScratchRoundtripBinding(recovery_executor)
+        recovery = recover_observe(
+            request,
+            ports=ports,
+            binding=recovery_binding,
+            prior_terminal=prior_terminal,
+            prior_terminal_ref=str(result.terminal_ref),
+        )
+        recovery_state = recovery.derived.get("state")
+        recovery_lifecycle_state = recovery.lifecycle_state
+        recovery_terminal_ref = recovery.terminal_ref
+        recovery_error = recovery.recovery_error
+
     output = {
-        "format_version": 1,
+        "format_version": 2,
         "schema": "filesystem-scratch-kernel-result.v1",
         "operation_id": OPERATION_ID,
         "semantic_operation": SEMANTIC_OPERATION,
@@ -223,6 +261,11 @@ def main() -> int:
         "terminal_ref": result.terminal_ref,
         "dispatch_error": result.dispatch_error,
         "postcondition_error": result.postcondition_error,
+        "recovery_attempted": recovery_attempted,
+        "recovery_state": recovery_state,
+        "recovery_lifecycle_state": recovery_lifecycle_state,
+        "recovery_terminal_ref": recovery_terminal_ref,
+        "recovery_error_class": None if recovery_error is None else "OBSERVATION_UNAVAILABLE",
         "blind_retry_allowed": False,
         "raw_device_identifier_recorded": False,
         "scratch_namespace_absent_required": True,
