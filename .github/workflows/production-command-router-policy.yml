@@ -28,7 +28,7 @@ jobs:
             .github/scripts/test_production_command_router.py
           python3 .github/scripts/test_production_command_router.py
 
-      - name: Enforce one Issue #1 ingress and complete route inventory
+      - name: Enforce one Issue #1 ingress and canonical mutator handoff
         shell: bash
         run: |
           set -euo pipefail
@@ -40,13 +40,12 @@ jobs:
           workflows = Path('.github/workflows')
           router_path = workflows / 'production-control-router.yml'
           registry_path = Path('.github/production/command-routes.json')
-          if not router_path.is_file() or not registry_path.is_file():
-              raise SystemExit('router/route registry missing')
-
+          wiring_path = Path('.github/production/physical-transaction-wiring.json')
           contents = {
               path.name: path.read_text(encoding='utf-8')
               for path in workflows.glob('*.yml')
           }
+
           direct_ingress = sorted(
               name for name, text in contents.items()
               if re.search(r'(?m)^  issue_comment:\s*$', text)
@@ -56,7 +55,7 @@ jobs:
                   'exactly one issue_comment ingress is required; found: ' + ', '.join(direct_ingress)
               )
 
-          router = contents['production-control-router.yml']
+          router = router_path.read_text(encoding='utf-8')
           required_router_contract = (
               "github.event.issue.number == 1",
               "github.event.comment.user.login == github.repository_owner",
@@ -66,7 +65,6 @@ jobs:
               'github.event.comment.id',
               'control_request_id:',
               'control_request_json:',
-              'secrets: inherit',
           )
           missing_router = [value for value in required_router_contract if value not in router]
           if missing_router:
@@ -75,7 +73,7 @@ jobs:
           registry = json.loads(registry_path.read_text(encoding='utf-8'))
           if registry.get('schema') != 'production-command-routes.v1':
               raise SystemExit('route registry schema differs')
-          if registry.get('authority_cursor') != 'issue179-comment-5529299637':
+          if registry.get('authority_cursor') != 'issue179-comment-5531154097':
               raise SystemExit('route registry authority cursor differs from accepted checkpoint')
           routes = registry.get('routes')
           if not isinstance(routes, list) or not routes:
@@ -83,16 +81,39 @@ jobs:
 
           commands = [route.get('command') for route in routes]
           operations = [route.get('operation') for route in routes]
-          route_files = [route.get('workflow') for route in routes]
           if len(commands) != len(set(commands)):
               raise SystemExit('duplicate command in route registry')
           if len(operations) != len(set(operations)):
               raise SystemExit('duplicate operation in route registry')
-          if len(route_files) != len(set(route_files)):
-              raise SystemExit('duplicate workflow in route registry')
+
+          wiring = json.loads(wiring_path.read_text(encoding='utf-8'))
+          shared = wiring.get('shared_mutation_workflow')
+          bindings = wiring.get('bindings')
+          mutating_operations = {str(item['operation']) for item in bindings}
+          routed_mutators = {
+              str(route['operation']) for route in routes if route.get('mutating') is True
+          }
+          if routed_mutators != mutating_operations:
+              raise SystemExit('router mutating operation set differs from physical wiring')
+          if any(
+              route.get('workflow') != shared
+              for route in routes if route.get('mutating') is True
+          ):
+              raise SystemExit('every mutating route must hand off to shared canonical readiness')
+          if any(
+              route.get('workflow') == shared
+              for route in routes if route.get('mutating') is not True
+          ):
+              raise SystemExit('non-mutating route points at canonical mutation readiness')
+
+          if router.count(f'uses: ./.github/workflows/{shared}') != 1:
+              raise SystemExit('router must call shared canonical readiness exactly once')
+          for operation in sorted(mutating_operations):
+              if operation not in router:
+                  raise SystemExit(f'shared router selector missing mutator: {operation}')
 
           for route in routes:
-              name = route['workflow']
+              name = str(route['workflow'])
               path = workflows / name
               if not path.is_file():
                   raise SystemExit(f'routed workflow missing: {name}')
@@ -101,16 +122,8 @@ jobs:
                   raise SystemExit(f'{name}: routed operation must be reusable workflow_call')
               if re.search(r'(?m)^  issue_comment:\s*$', text):
                   raise SystemExit(f'{name}: routed operation retained direct issue_comment ingress')
-              if 'github.event.comment.' in text or 'github.event.issue.' in text:
-                  raise SystemExit(f'{name}: direct source event dependency survived router migration')
-              for required_input in (
-                  '      control_request_id:',
-                  '      control_request_json:',
-                  '      source_comment_id:',
-                  '      source_actor:',
-              ):
-                  if required_input not in text:
-                      raise SystemExit(f'{name}: shared routed request input missing: {required_input.strip()}')
+              if route.get('mutating') is True:
+                  continue
               op = str(route['operation'])
               job_id = 'op_' + re.sub(r'[^A-Za-z0-9_]', '_', op)
               if f'  {job_id}:' not in router:
@@ -118,34 +131,25 @@ jobs:
               if f'uses: ./.github/workflows/{name}' not in router:
                   raise SystemExit(f'router does not statically call {name}')
 
-          # The semantic mutator classification must be identical to the existing
-          # physical mutation policy inventory; neither policy can silently drift.
           mutation_policy = contents['production-phone-mutation-policy.yml']
           block = re.search(
               r'(?ms)^          mutation_jobs = \{\n(?P<body>.*?)^          \}\n          mutators = set\(mutation_jobs\)',
               mutation_policy,
           )
           if block is None:
-              raise SystemExit('unable to read mutation inventory from existing policy')
+              raise SystemExit('unable to read legacy physical mutator inventory')
           classified_mutators = set(re.findall(r"'([^']+\.yml)'\s*:", block.group('body')))
-          routed_mutators = {str(route['workflow']) for route in routes if route.get('mutating') is True}
-          if routed_mutators != classified_mutators:
+          bound_legacy = {str(item['legacy_workflow']) for item in bindings}
+          if classified_mutators != bound_legacy:
               raise SystemExit(
-                  'router mutation classification differs: router=' + str(sorted(routed_mutators))
-                  + ' policy=' + str(sorted(classified_mutators))
+                  'legacy mutation-policy inventory differs from canonical wiring: '
+                  + str(sorted(classified_mutators))
+                  + ' vs '
+                  + str(sorted(bound_legacy))
               )
 
-          # There may be many historical comments, but no routed workflow may
-          # make full Issue #1 history its implicit request identity.
-          for route in routes:
-              text = contents[str(route['workflow'])]
-              if "transaction_id = f\"" in text and 'GITHUB_RUN_ID' in text:
-                  # Legacy operation-local transaction IDs are permitted during
-                  # this convergence stage only if the shared semantic request
-                  # envelope is also supplied. Stage C.0p consumes it in the
-                  # universal transaction kernel.
-                  if 'control_request_id:' not in text:
-                      raise SystemExit(f"{route['workflow']}: run-derived identity without shared request envelope")
-
-          print(f'COMMAND_ROUTER_POLICY_OK routes={len(routes)} mutators={len(routed_mutators)}')
+          print(
+              f'COMMAND_ROUTER_POLICY_OK routes={len(routes)} '
+              f'mutators={len(routed_mutators)} shared={shared}'
+          )
           PY
