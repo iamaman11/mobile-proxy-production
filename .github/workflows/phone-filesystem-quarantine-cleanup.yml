@@ -24,6 +24,7 @@ jobs:
       observation_run_id: ${{ steps.command.outputs.observation_run_id }}
       transaction_ids_json: ${{ steps.command.outputs.transaction_ids_json }}
       observation_artifact_name: ${{ steps.command.outputs.observation_artifact_name }}
+      operation_transaction_id: ${{ steps.command.outputs.operation_transaction_id }}
     steps:
       - name: Validate exact command, current authority, and observation run
         id: command
@@ -128,12 +129,16 @@ jobs:
               raise SystemExit('exact durable quarantine observation artifact is unavailable')
 
           transaction_ids_json = json.dumps(transaction_ids, separators=(',', ':'))
+          operation_transaction_id = (
+              f"fs-quarantine-clean-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
               handle.write(f'canonical_sha={requested_sha}\n')
               handle.write(f"quality_run_id={quality[0]['id']}\n")
               handle.write(f'observation_run_id={observation_run_id}\n')
               handle.write(f'transaction_ids_json={transaction_ids_json}\n')
               handle.write(f'observation_artifact_name={artifact_name}\n')
+              handle.write(f'operation_transaction_id={operation_transaction_id}\n')
           PY
 
       - name: Download exact durable quarantine observation evidence
@@ -290,7 +295,9 @@ jobs:
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       OBSERVATION_RUN_ID: ${{ needs.command-gate.outputs.observation_run_id }}
       TRANSACTION_IDS_JSON: ${{ needs.command-gate.outputs.transaction_ids_json }}
+      OPERATION_TRANSACTION_ID: ${{ needs.command-gate.outputs.operation_transaction_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
     outputs:
       result_validated: ${{ steps.result.outputs.result_validated }}
       state: ${{ steps.result.outputs.state }}
@@ -356,6 +363,74 @@ jobs:
           if [item.get('transaction_id') for item in evidence.get('transactions', [])] != json.loads(os.environ['TRANSACTION_IDS_JSON']):
               raise SystemExit('cleanup admission transaction set differs')
           PY
+
+      - name: Build bounded CONTROL mutation dispatch intent
+        id: dispatch-intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          operation_transaction_id = os.environ['OPERATION_TRANSACTION_ID']
+          if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,95}', operation_transaction_id) is None:
+              raise SystemExit('operation transaction identity is invalid')
+          target_transaction_ids = json.loads(os.environ['TRANSACTION_IDS_JSON'])
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          binding_key = os.environ.get('ANDROID_TARGET_BINDING_KEY', '')
+          if not serial:
+              raise SystemExit('registered production target binding is unavailable')
+          if len(binding_key) < 32:
+              raise SystemExit('target binding HMAC key is unavailable or too short')
+          if binding_key == serial:
+              raise SystemExit('target binding HMAC key must be independent from raw device binding')
+          message = b'android-production\0' + serial.encode('utf-8')
+          target_binding_id = (
+              'tb-hmac-sha256:'
+              + hmac.new(binding_key.encode('utf-8'), message, hashlib.sha256).hexdigest()
+          )
+          marker = {
+              'format_version': 1,
+              'evidence_type': 'MUTATION_DISPATCH_INTENT',
+              'authority': 'CONTROL',
+              'lifecycle': 'CURRENT',
+              'private_repository': os.environ['GITHUB_REPOSITORY'],
+              'private_sha': os.environ['GITHUB_SHA'],
+              'canonical_repository': 'iamaman11/mobile-proxy',
+              'canonical_sha': os.environ['CANONICAL_SHA'],
+              'canonical_quality_run_id': int(os.environ['QUALITY_RUN_ID']),
+              'workflow_run_id': int(os.environ['GITHUB_RUN_ID']),
+              'workflow_run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'operation_id': 'android.filesystem-quarantine-cleanup.v1',
+              'operation_transaction_id': operation_transaction_id,
+              'target_transaction_ids': target_transaction_ids,
+              'destructive_step_id': 'cleanup_exact_paths',
+              'target': 'android-production',
+              'target_binding_id': target_binding_id,
+              'target_binding_algorithm': 'HMAC-SHA256(ANDROID_TARGET_BINDING_KEY, target+serial)',
+              'affected_domain_generations': {'domain/filesystem': operation_transaction_id},
+              'dispatch_may_reach_target': True,
+              'adapter_invocation_allowed_only_after_persistence': True,
+              'blind_retry_allowed': False,
+              'raw_device_identifier_recorded': False,
+              'phone_mutation_performed': False,
+          }
+          path = Path(os.environ['RUNNER_TEMP']) / 'filesystem-mutation-dispatch-intent.json'
+          path.write_text(json.dumps(marker, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+
+      - name: Persist CONTROL mutation dispatch intent before adapter invocation
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-filesystem-dispatch-intent-${{ env.CANONICAL_SHA }}-${{ env.OPERATION_TRANSACTION_ID }}
+          path: ${{ runner.temp }}/filesystem-mutation-dispatch-intent.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Run exact bounded quarantine cleanup
         id: cleanup
@@ -551,6 +626,7 @@ jobs:
           CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
           QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
           OBSERVATION_RUN_ID: ${{ needs.command-gate.outputs.observation_run_id }}
+          OPERATION_TRANSACTION_ID: ${{ needs.command-gate.outputs.operation_transaction_id }}
           CLEANUP_JOB_RESULT: ${{ needs.cleanup-quarantine.result }}
           RESULT_VALIDATED: ${{ needs.cleanup-quarantine.outputs.result_validated }}
           STATE: ${{ needs.cleanup-quarantine.outputs.state }}
@@ -567,8 +643,22 @@ jobs:
             const accepted = process.env.ACCEPTED === 'true';
             const verified = process.env.CLEANUP_VERIFIED === 'true';
             const state = process.env.STATE || 'UNOBSERVED';
+            const markerName = `phone-filesystem-dispatch-intent-${process.env.CANONICAL_SHA}-${process.env.OPERATION_TRANSACTION_ID}`;
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            const markers = artifacts.filter((artifact) => artifact.name === markerName && artifact.expired === false);
+            if (markers.length > 1) {
+              throw new Error('filesystem dispatch intent artifact is ambiguous');
+            }
+            const markerPersisted = markers.length === 1;
             let classification;
-            if (!validated) {
+            if (markerPersisted && !validated) {
+              classification = 'UNKNOWN_EXECUTION_OUTCOME';
+            } else if (!validated) {
               classification = 'FILESYSTEM_QUARANTINE_CLEANUP_UNOBSERVED';
             } else if (!persisted) {
               classification = 'FILESYSTEM_QUARANTINE_CLEANUP_OBSERVED_UNPERSISTED';
@@ -590,8 +680,12 @@ jobs:
               `- canonical_sha: \`${process.env.CANONICAL_SHA || 'unavailable'}\``,
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
               `- observation_run_id: \`${process.env.OBSERVATION_RUN_ID || 'unavailable'}\``,
+              `- operation_transaction_id: \`${process.env.OPERATION_TRANSACTION_ID || 'unavailable'}\``,
               `- workflow_run_id: \`${context.runId}\``,
               `- cleanup_job_result: \`${process.env.CLEANUP_JOB_RESULT}\``,
+              `- dispatch_intent_persisted: \`${markerPersisted}\``,
+              `- domain/filesystem_generation: \`${markerPersisted ? process.env.OPERATION_TRANSACTION_ID : 'unadvanced'}\``,
+              `- blind_retry_allowed: \`false\``,
               `- result_validated: \`${validated}\``,
               `- cleanup_state: \`${state}\``,
               `- accepted: \`${process.env.ACCEPTED || 'false'}\``,
