@@ -38,13 +38,7 @@ class FakeComments:
     def create_comment(self, body: str) -> int:
         comment_id = self.next_id
         self.next_id += 1
-        self.comments.append(
-            {
-                "id": comment_id,
-                "body": body,
-                "user": {"login": PORTS.TRUSTED_BOT},
-            }
-        )
+        self.comments.append({"id": comment_id, "body": body, "user": {"login": PORTS.TRUSTED_BOT}})
         return comment_id
 
 
@@ -54,57 +48,30 @@ class FakePreflight:
     mutation_attempted: bool = False
     calls: int = 0
 
-    def build_report(
-        self,
-        canonical_sha: str,
-        *,
-        target_binding_id: str,
-        session_id: str,
-        observation_ref: str,
-        transaction_id: str,
-    ) -> dict[str, Any]:
+    def build_report(self, canonical_sha: str, *, target_binding_id: str, session_id: str, observation_ref: str, transaction_id: str) -> dict[str, Any]:
         self.calls += 1
         return {
             "format_version": 1,
             "repository": PORTS.CANONICAL_REPOSITORY,
             "canonical_sha": canonical_sha,
             "mode": "read_only",
-            "device": {
-                "device_count": 1,
-                "registered_device_match": True,
-                "adb_state": "device",
-                "shell_probe": True,
-            },
-            "observed_facts": [
-                {
-                    "subject": "phone",
-                    "predicate": "registered_phone_access_proven",
-                    "value": True,
-                    "target": PORTS.TARGET,
-                    "observation_ref": observation_ref,
-                    "source_ref": canonical_sha,
-                    "dependencies": [
-                        {
-                            "scope": PORTS.TARGET_SCOPE,
-                            "identity": target_binding_id,
-                        },
-                        {
-                            "scope": PORTS.OBSERVER_SCOPE,
-                            "identity": PORTS.OBSERVER_ID,
-                        },
-                        {
-                            "scope": PORTS.SESSION_SCOPE,
-                            "identity": session_id,
-                        },
-                        {
-                            "scope": f"transaction/{transaction_id}",
-                            "identity": transaction_id,
-                        },
-                    ],
-                    "authority": "CONTROL",
-                    "persisted": False,
-                }
-            ],
+            "device": {"device_count": 1, "registered_device_match": True, "adb_state": "device", "shell_probe": True},
+            "observed_facts": [{
+                "subject": "phone",
+                "predicate": "registered_phone_access_proven",
+                "value": True,
+                "target": PORTS.TARGET,
+                "observation_ref": observation_ref,
+                "source_ref": canonical_sha,
+                "dependencies": [
+                    {"scope": PORTS.TARGET_SCOPE, "identity": target_binding_id},
+                    {"scope": PORTS.OBSERVER_SCOPE, "identity": PORTS.OBSERVER_ID},
+                    {"scope": PORTS.SESSION_SCOPE, "identity": session_id},
+                    {"scope": f"transaction/{transaction_id}", "identity": transaction_id},
+                ],
+                "authority": "CONTROL",
+                "persisted": False,
+            }],
             "causal_fact_envelope_emitted": True,
             "raw_device_identifier_recorded": False,
             "mutation_performed": False,
@@ -184,30 +151,15 @@ def test_success(operation, control, runner, apk) -> None:
     ports, preflight = make_ports(operation, control, runner, comments)
     executor = FakeExecutor(runner)
     request = apk.ApkInstallRequest(TX, REF)
-    result = runner.TransactionRunner().run(
-        request,
-        ports=ports,
-        binding=apk.ApkInstallBinding(executor),
-        existing_evidence=ports.load_existing_evidence(),
-    )
+    result = runner.TransactionRunner().run(request, ports=ports, binding=apk.ApkInstallBinding(executor), existing_evidence=ports.load_existing_evidence())
     require(result.derived["state"] == "ACCEPTED", "success transaction must be ACCEPTED")
     require(executor.dispatch_calls == 1, "APK executor must dispatch exactly once")
     require(executor.postcondition_calls == 1, "APK postcondition must execute exactly once")
     require(preflight.calls == 1, "transaction-bound phone observer must execute exactly once")
-    require(
-        headings(comments)
-        == [
-            PORTS.BOUNDARY_RAW_HEADING,
-            PORTS.BOUNDARY_FACT_HEADING,
-            PORTS.INTENT_HEADING,
-            PORTS.TERMINAL_HEADING,
-        ],
-        "durable CONTROL evidence order differs",
-    )
-
-    raw = PORTS._parse_control_json(comments.comments[0], PORTS.BOUNDARY_RAW_HEADING)
-    promoted = PORTS._parse_control_json(comments.comments[1], PORTS.BOUNDARY_FACT_HEADING)
-    intent = PORTS._parse_control_json(comments.comments[2], PORTS.INTENT_HEADING)
+    require(headings(comments) == [PORTS.BOUNDARY_RAW_HEADING, PORTS.BOUNDARY_FACT_HEADING, PORTS.INTENT_HEADING, PORTS.TERMINAL_HEADING], "durable CONTROL evidence order differs")
+    raw = PORTS._parse(comments.comments[0], PORTS.BOUNDARY_RAW_HEADING)
+    promoted = PORTS._parse(comments.comments[1], PORTS.BOUNDARY_FACT_HEADING)
+    intent = PORTS._parse(comments.comments[2], PORTS.INTENT_HEADING)
     require(raw is not None and promoted is not None and intent is not None, "CONTROL records missing")
     raw_fact = raw["fact"]
     promoted_fact = promoted["fact"]
@@ -216,10 +168,7 @@ def test_success(operation, control, runner, apk) -> None:
     reverted = dict(promoted_fact)
     reverted["persisted"] = False
     require(reverted == raw_fact, "promotion must change only persistence")
-    require(
-        intent["affected_domain_generations"] == {PORTS.PACKAGE_DOMAIN: TX},
-        "package generation must advance to exact transaction",
-    )
+    require(intent["affected_domain_generations"] == {PORTS.PACKAGE_DOMAIN: TX}, "package generation must advance to exact transaction")
     require(intent["dispatch_may_reach_target"] is True, "intent must conservatively mark may-have-reached")
     require(intent["blind_retry_allowed"] is False, "APK mutation intent must forbid blind retry")
     serialized = "\n".join(str(item["body"]) for item in comments.comments)
@@ -231,71 +180,37 @@ def test_unknown_rerun_block(operation, control, runner, apk) -> None:
     first_ports, first_preflight = make_ports(operation, control, runner, comments)
     first_executor = FakeExecutor(runner, unknown=True)
     request = apk.ApkInstallRequest(TX, REF)
-    first = runner.TransactionRunner().run(
-        request,
-        ports=first_ports,
-        binding=apk.ApkInstallBinding(first_executor),
-        existing_evidence=first_ports.load_existing_evidence(),
-    )
-    require(
-        first.derived["state"] == "UNKNOWN_EXECUTION_OUTCOME",
-        "lost post-dispatch result must be UNKNOWN_EXECUTION_OUTCOME",
-    )
+    first = runner.TransactionRunner().run(request, ports=first_ports, binding=apk.ApkInstallBinding(first_executor), existing_evidence=first_ports.load_existing_evidence())
+    require(first.derived["state"] == "UNKNOWN_EXECUTION_OUTCOME", "lost post-dispatch result must be UNKNOWN_EXECUTION_OUTCOME")
     require(first.terminal_ref is None, "UNKNOWN result must not fabricate a terminal record")
     require(first_executor.dispatch_calls == 1, "first attempt must dispatch once")
     require(first_preflight.calls == 1, "first attempt boundary must be observed once")
-    require(
-        headings(comments)
-        == [
-            PORTS.BOUNDARY_RAW_HEADING,
-            PORTS.BOUNDARY_FACT_HEADING,
-            PORTS.INTENT_HEADING,
-        ],
-        "UNKNOWN path must stop with durable intent and no terminal",
-    )
-
+    require(headings(comments) == [PORTS.BOUNDARY_RAW_HEADING, PORTS.BOUNDARY_FACT_HEADING, PORTS.INTENT_HEADING], "UNKNOWN path must stop with durable intent and no terminal")
     retry_ports, retry_preflight = make_ports(operation, control, runner, comments)
     retry_executor = FakeExecutor(runner)
     existing = retry_ports.load_existing_evidence()
     require(existing[-1].status == operation.DISPATCHED, "journaled intent must reconstruct DISPATCHED")
     try:
-        runner.TransactionRunner().run(
-            request,
-            ports=retry_ports,
-            binding=apk.ApkInstallBinding(retry_executor),
-            existing_evidence=existing,
-        )
+        runner.TransactionRunner().run(request, ports=retry_ports, binding=apk.ApkInstallBinding(retry_executor), existing_evidence=existing)
     except runner.BlindRetryForbidden:
         pass
     else:
         raise AssertionError("journaled UNKNOWN transaction must forbid blind retry")
     require(retry_executor.dispatch_calls == 0, "rerun must be blocked before APK dispatch")
     require(retry_preflight.calls == 0, "rerun must be blocked before phone observation")
-    require(
-        len(comments.comments) == 3,
-        "blocked rerun must not create new durable evidence or a new destructive identity",
-    )
+    require(len(comments.comments) == 3, "blocked rerun must not create new durable evidence or a new destructive identity")
 
 
 def test_terminal_rerun_block(operation, control, runner, apk) -> None:
     comments = FakeComments()
     ports, _ = make_ports(operation, control, runner, comments)
     request = apk.ApkInstallRequest(TX, REF)
-    runner.TransactionRunner().run(
-        request,
-        ports=ports,
-        binding=apk.ApkInstallBinding(FakeExecutor(runner)),
-    )
+    runner.TransactionRunner().run(request, ports=ports, binding=apk.ApkInstallBinding(FakeExecutor(runner)))
     replay_ports, replay_preflight = make_ports(operation, control, runner, comments)
     existing = replay_ports.load_existing_evidence()
     replay_executor = FakeExecutor(runner)
     try:
-        runner.TransactionRunner().run(
-            request,
-            ports=replay_ports,
-            binding=apk.ApkInstallBinding(replay_executor),
-            existing_evidence=existing,
-        )
+        runner.TransactionRunner().run(request, ports=replay_ports, binding=apk.ApkInstallBinding(replay_executor), existing_evidence=existing)
     except runner.TransactionRefusal:
         pass
     else:
@@ -308,11 +223,7 @@ def test_authority_refusal(operation, control, runner, apk) -> None:
     comments = FakeComments()
     ports, preflight = make_ports(operation, control, runner, comments)
     request = apk.ApkInstallRequest(TX, "b3:" + "b" * 64)
-    result = runner.TransactionRunner().run(
-        request,
-        ports=ports,
-        binding=apk.ApkInstallBinding(FakeExecutor(runner)),
-    )
+    result = runner.TransactionRunner().run(request, ports=ports, binding=apk.ApkInstallBinding(FakeExecutor(runner)))
     require(result.derived["state"] == "REFUSED", "artifact mismatch must refuse authority")
     require(preflight.calls == 0, "authority refusal must happen before phone observation")
     require(headings(comments) == [PORTS.TERMINAL_HEADING], "authority refusal may persist only terminal evidence")
@@ -322,10 +233,7 @@ def test_static_split() -> None:
     ports_text = (PRIVATE_SCRIPTS / "apk_transaction_ports.py").read_text(encoding="utf-8")
     entry_text = (PRIVATE_SCRIPTS / "run_apk_transaction.py").read_text(encoding="utf-8")
     workflows = PRIVATE_SCRIPTS.parent / "workflows"
-    workflow_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(workflows.glob("*.yml"))
-    )
+    workflow_text = "\n".join(path.read_text(encoding="utf-8") for path in sorted(workflows.glob("*.yml")))
     require("TransactionRunner().run" in entry_text, "entrypoint must invoke canonical TransactionRunner")
     require("ApkInstallBinding" in entry_text, "entrypoint must instantiate canonical APK binding")
     require("CanonicalApkInstallExecutor" in entry_text, "entrypoint must instantiate canonical APK executor")
@@ -345,7 +253,6 @@ def main() -> int:
     parser.add_argument("--canonical-root", type=Path, required=True)
     args = parser.parse_args()
     operation, control, runner, apk = load_canonical(args.canonical_root.resolve())
-
     test_static_split()
     test_success(operation, control, runner, apk)
     test_unknown_rerun_block(operation, control, runner, apk)
