@@ -47,6 +47,34 @@ def _next(state: str) -> str:
     }.get(state, "none")
 
 
+def _pre_release_refusal(*, request: dict[str, object], execution_id: str, controller_revision: str, reason: str) -> dict[str, object]:
+    state = reduce_state(DeploymentState(), "request_received")
+    state = reduce_state(state, "authorize_refused", reason=reason)
+    terminal = DeploymentTerminal(
+        operation="deploy-product-release",
+        semantic_request_id=str(request["request_id"]),
+        execution_id=execution_id,
+        controller_revision=controller_revision,
+        target=str(request["target"]),
+        product_release=str(request["product_release_tag"]),
+        release_id=None,
+        release_source_sha=None,
+        artifact_digest=None,
+        deployment_id=None,
+        state=state.state,
+        current_step=state.current_step,
+        facts={},
+        blocking_predicates=state.blocking_predicates,
+        mutation_performed=False,
+        postcondition_verified=False,
+        recovery_required=False,
+        next_allowed_operation=_next(state.state),
+        evidence_refs=(f"issue-comment:{request['provenance']['comment_id']}",),
+    ).to_dict()
+    validate_terminal(terminal)
+    return terminal
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request-json", required=True)
@@ -72,6 +100,7 @@ def main() -> int:
             "target": request["target"],
             "product_release": request["product_release_tag"],
             "canonical_terminal_ref": existing_terminal.ref,
+            "canonical_terminal": existing_terminal.payload,
             "mutation_performed": False,
             "reason": "semantic_request_already_terminal",
         })
@@ -81,6 +110,23 @@ def main() -> int:
         _output("canonical_terminal_ref", existing_terminal.ref)
         return 0
 
+    # VM support is deliberately not prebuilt. Until the Android controller path is
+    # accepted end-to-end, a VM request is classified before Release lookup or any
+    # public Deployment creation, so it cannot leave an orphan external projection.
+    if request["target"] == "vm-production":
+        terminal = _pre_release_refusal(
+            request=request,
+            execution_id=args.execution_id,
+            controller_revision=args.controller_revision,
+            reason="vm_target_adapter_not_accepted_until_phone_controller_proof",
+        )
+        record = evidence.persist_terminal(terminal)
+        _output("admitted", False)
+        _output("duplicate", False)
+        _output("recovery_only", False)
+        _output("canonical_terminal_ref", record.ref)
+        return 0
+
     state = reduce_state(DeploymentState(), "request_received")
     try:
         admitted = resolve_release(
@@ -88,29 +134,12 @@ def main() -> int:
             target=str(request["target"]),
         )
     except ReleaseAdmissionError as exc:
-        state = reduce_state(state, "authorize_refused", reason=str(exc))
-        terminal = DeploymentTerminal(
-            operation="deploy-product-release",
-            semantic_request_id=str(request["request_id"]),
+        terminal = _pre_release_refusal(
+            request=request,
             execution_id=args.execution_id,
             controller_revision=args.controller_revision,
-            target=str(request["target"]),
-            product_release=str(request["product_release_tag"]),
-            release_id=None,
-            release_source_sha=None,
-            artifact_digest=None,
-            deployment_id=None,
-            state=state.state,
-            current_step=state.current_step,
-            facts={},
-            blocking_predicates=state.blocking_predicates,
-            mutation_performed=False,
-            postcondition_verified=False,
-            recovery_required=False,
-            next_allowed_operation=_next(state.state),
-            evidence_refs=(f"issue-comment:{request['provenance']['comment_id']}",),
-        ).to_dict()
-        validate_terminal(terminal)
+            reason=str(exc),
+        )
         record = evidence.persist_terminal(terminal)
         _output("admitted", False)
         _output("duplicate", False)
