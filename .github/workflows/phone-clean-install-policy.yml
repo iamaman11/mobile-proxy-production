@@ -75,14 +75,13 @@ jobs:
           if missing:
               raise SystemExit('clean-install entrypoint invariant missing: ' + ', '.join(missing))
 
-          ordering = (
-              entrypoint.index('refuse_prior_transaction(token, args.transaction_id)'),
-              entrypoint.index('clean.prove_registered_device(serial)'),
-              entrypoint.index('intent_comment_id = post_control(token, INTENT_HEADING, intent)'),
-              entrypoint.index('report = clean.clean_install('),
-              entrypoint.index('terminal_comment_id = post_control(token, TERMINAL_HEADING, terminal)'),
-          )
-          if list(ordering) != sorted(ordering):
+          execute_start = entrypoint.index('def execute(args: argparse.Namespace)')
+          refuse = entrypoint.index('refuse_prior_transaction(token, args.transaction_id)', execute_start)
+          preflight = entrypoint.index('clean.prove_registered_device(serial)', refuse)
+          intent = entrypoint.index('intent_comment_id = post_control(token, INTENT_HEADING, intent)', preflight)
+          dispatch = entrypoint.index('report = clean.clean_install(', intent)
+          terminal = entrypoint.index('terminal_comment_id = post_control(token, TERMINAL_HEADING, terminal)', dispatch)
+          if not (execute_start < refuse < preflight < intent < dispatch < terminal):
               raise SystemExit('clean-install durable intent / dispatch / terminal ordering differs')
 
           forbidden = (
