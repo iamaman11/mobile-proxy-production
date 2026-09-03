@@ -15,6 +15,7 @@ from control_request import RequestContractError, RequestProvenance, build_reque
 
 REGISTRY_SCHEMA = "production-command-routes.v1"
 _COMMAND_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+_CURSOR_RE = re.compile(r"issue179-comment-[1-9][0-9]*")
 
 
 class RouteRefused(ValueError):
@@ -27,21 +28,36 @@ class Route:
     operation: str
     workflow: str
     mutating: bool
+    authority_cursor: str
+
+
+def _authority_cursor(value: object, *, field: str) -> str:
+    cursor = str(value).strip()
+    if _CURSOR_RE.fullmatch(cursor) is None:
+        raise RouteRefused(f"invalid {field}")
+    return cursor
 
 
 def load_registry(path: Path) -> tuple[str, dict[str, Route]]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if raw.get("schema") != REGISTRY_SCHEMA:
         raise RouteRefused("unsupported command route registry schema")
-    cursor = str(raw.get("authority_cursor", ""))
+    cursor = _authority_cursor(raw.get("authority_cursor", ""), field="global authority cursor")
     routes: dict[str, Route] = {}
     operations: set[str] = set()
     for item in raw.get("routes", []):
+        if not isinstance(item, dict):
+            raise RouteRefused("invalid command route entry")
+        route_cursor = _authority_cursor(
+            item.get("authority_cursor", cursor),
+            field="route authority cursor",
+        )
         route = Route(
             command=str(item.get("command", "")),
             operation=str(item.get("operation", "")),
             workflow=str(item.get("workflow", "")),
             mutating=bool(item.get("mutating", False)),
+            authority_cursor=route_cursor,
         )
         if _COMMAND_RE.fullmatch(route.command) is None:
             raise RouteRefused(f"invalid registered command: {route.command!r}")
@@ -79,7 +95,7 @@ def classify(
     if not tokens or _COMMAND_RE.fullmatch(tokens[0]) is None:
         raise RouteRefused("invalid command token")
 
-    cursor, routes = load_registry(registry_path)
+    _, routes = load_registry(registry_path)
     route = routes.get(tokens[0])
     if route is None:
         raise RouteRefused("unknown production command")
@@ -100,7 +116,7 @@ def classify(
         envelope = build_request_envelope(
             operation=route.operation,
             arguments=tokens[1:],
-            authority_cursor=cursor,
+            authority_cursor=route.authority_cursor,
             mutating=route.mutating,
             provenance=provenance,
         )
