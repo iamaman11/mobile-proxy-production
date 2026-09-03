@@ -11,14 +11,30 @@ permissions:
 
 jobs:
   validate-clean-install-transaction:
-    name: Validate destructive clean-install evidence and replay contract
+    name: Validate cursor-bound destructive clean-install control
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out private execution repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Enforce clean-install invariants
+      - name: Compile clean-install control code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/clean_install_control.py \
+            .github/scripts/run_destructive_clean_install.py \
+            .github/scripts/run_destructive_clean_install_v2.py \
+            .github/scripts/test_destructive_clean_install_control.py
+
+      - name: Run destructive clean-install hosted truth table
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/test_destructive_clean_install_control.py
+
+      - name: Enforce fail-closed workflow invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -26,79 +42,69 @@ jobs:
           from pathlib import Path
 
           workflow = Path('.github/workflows/phone-clean-install.yml').read_text(encoding='utf-8')
-          entrypoint = Path('.github/scripts/run_destructive_clean_install.py').read_text(encoding='utf-8')
+          control = Path('.github/scripts/clean_install_control.py').read_text(encoding='utf-8')
+          wrapper = Path('.github/scripts/run_destructive_clean_install_v2.py').read_text(encoding='utf-8')
 
-          workflow_required = (
+          required_workflow = (
               "startsWith(github.event.comment.body, '/phone-clean-install ')",
               'github.event.comment.user.login == github.repository_owner',
-              "transaction_id = f\"clean-install-comment-{os.environ['COMMENT_ID']}\"",
-              'requested SHA is not current canonical public main',
-              'current canonical SHA has no exact successful main Quality run',
-              'transaction already has durable CONTROL evidence; blind retry forbidden',
-              'build_signed_android_release.py',
-              'mobile-proxy-android-v0.1.4.apk',
-              'android-release-evidence.json',
-              'clean_install_android_production.py',
-              'run_destructive_clean_install.py',
+              'clean_install_control.py admit',
+              '--command-comment-id "${COMMENT_ID}"',
+              '--expected-transaction-id "${TRANSACTION_ID}"',
+              'Revalidate semantic admission inside global mutation lock',
               'group: production-phone-global-mutation',
               'cancel-in-progress: false',
               'queue: max',
               'runs-on: [self-hosted, Linux, X64, android-production]',
-              '--transaction-id "${TRANSACTION_ID}"',
-              '--request-ref "${REQUEST_REF}"',
+              'run_destructive_clean_install_v2.py',
               'Fail workflow unless exact replacement package terminal is proven',
-              'Legacy generation preservation required: false',
-              'Blind retry allowed: false',
           )
-          missing = [value for value in workflow_required if value not in workflow]
+          missing = [item for item in required_workflow if item not in workflow]
           if missing:
-              raise SystemExit('clean-install workflow invariant missing: ' + ', '.join(missing))
+              raise SystemExit('cursor-bound clean-install workflow invariant missing: ' + ', '.join(missing))
 
-          entrypoint_required = (
-              'OPERATION_ID = "android.clean-install-signing-generation.v1"',
-              'INTENT_HEADING = "## CONTROL APK CLEAN INSTALL INTENT"',
-              'TERMINAL_HEADING = "## CONTROL APK CLEAN INSTALL TERMINAL"',
-              'refuse_prior_transaction(token, args.transaction_id)',
-              'clean.prove_registered_device(serial)',
-              'intent_comment_id = post_control(token, INTENT_HEADING, intent)',
-              'clean.clean_install(',
-              '"blind_retry_allowed": False',
-              '"old_generation_preservation_required": False',
-              '"affected_domain_generations": {"domain/package": args.transaction_id}',
-              'INSTALLED_EXACT_CANDIDATE',
-              'PACKAGE_ABSENT_AFTER_FAILED_CLEAN_INSTALL',
-              'QUARANTINED_PACKAGE_STATE',
-              'UNKNOWN_EXECUTION_OUTCOME',
-              'terminal_comment_id = post_control(token, TERMINAL_HEADING, terminal)',
+          if workflow.count('group: production-phone-global-mutation') != 1:
+              raise SystemExit('clean-install must own exactly one global mutation lock at phone-job scope')
+          if workflow.index('Revalidate semantic admission inside global mutation lock') > workflow.index('Execute one durable destructive clean-install transaction'):
+              raise SystemExit('semantic admission recheck must run before destructive transaction')
+
+          required_control = (
+              'COMMAND_RE = re.compile',
+              'cursor=([1-9][0-9]*)',
+              'transaction_id = f"clean-install-cursor-{cursor_id}"',
+              'latest authoritative tracker checkpoint',
+              'duplicate semantic clean-install owner command is not the elected request',
+              'cursor transaction already has durable CONTROL evidence; blind retry forbidden',
+              'CONTROL_AUTHORIZED_OPERATION=',
+              'CONTROL_AUTHORIZED_CANONICAL_SHA=',
           )
-          missing = [value for value in entrypoint_required if value not in entrypoint]
+          missing = [item for item in required_control if item not in control]
           if missing:
-              raise SystemExit('clean-install entrypoint invariant missing: ' + ', '.join(missing))
+              raise SystemExit('clean-install semantic admission invariant missing: ' + ', '.join(missing))
 
-          execute_start = entrypoint.index('def execute(args: argparse.Namespace)')
-          refuse = entrypoint.index('refuse_prior_transaction(token, args.transaction_id)', execute_start)
-          preflight = entrypoint.index('clean.prove_registered_device(serial)', refuse)
-          intent = entrypoint.index('intent_comment_id = post_control(token, INTENT_HEADING, intent)', preflight)
-          dispatch = entrypoint.index('report = clean.clean_install(', intent)
-          terminal = entrypoint.index('terminal_comment_id = post_control(token, TERMINAL_HEADING, terminal)', dispatch)
-          if not (execute_start < refuse < preflight < intent < dispatch < terminal):
-              raise SystemExit('clean-install durable intent / dispatch / terminal ordering differs')
+          required_wrapper = (
+              'format_version": 2',
+              'semantic_request_key',
+              'control_cursor_id',
+              'failure_diagnostics',
+              'dispatch_failure_stage',
+              'observation_failure_stage',
+              'raw_error_text_recorded": False',
+              'blind_retry_allowed": False',
+          )
+          missing = [item for item in required_wrapper if item not in wrapper]
+          if missing:
+              raise SystemExit('clean-install bounded terminal diagnostic invariant missing: ' + ', '.join(missing))
 
           forbidden = (
-              'MIGRATION_HARD_BLOCKED',
               '/android-release-migrate ',
               'android.apk-install.v1',
               'adb install -r',
               'rollback_to_old_generation_available": True',
           )
-          present = [value for value in forbidden if value in workflow or value in entrypoint]
+          present = [item for item in forbidden if item in workflow or item in control or item in wrapper]
           if present:
               raise SystemExit('clean-install path reuses forbidden migration/same-lineage semantics: ' + ', '.join(present))
 
-          if workflow.count('group: production-phone-global-mutation') != 1:
-              raise SystemExit('clean-install must own exactly one global mutation lock at phone-job scope')
-          if workflow.index('Verify exact immutable bundle before phone access') > workflow.index('Execute one durable destructive clean-install transaction'):
-              raise SystemExit('clean-install bundle is not verified before phone execution')
-
-          print('destructive clean-install transaction policy: accepted')
+          print('cursor-bound destructive clean-install policy: accepted')
           PY
