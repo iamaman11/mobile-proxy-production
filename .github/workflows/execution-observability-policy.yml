@@ -162,7 +162,10 @@ jobs:
               raise SystemExit('target execution does not refresh durable recovery state after lock acquisition')
           if '.github/scripts/reconcile_recovery_mode.py' not in deployment:
               raise SystemExit('target execution does not invoke durable recovery reconciler')
-          recovery_assignments = [line for line in deployment.splitlines() if 'RECOVERY_ONLY:' in line]
+          recovery_assignments = [
+              line.strip() for line in deployment.splitlines()
+              if line.strip().startswith('RECOVERY_ONLY:')
+          ]
           if len(recovery_assignments) != 1 or 'steps.recovery.outputs.recovery_only' not in recovery_assignments[0]:
               raise SystemExit('physical runtime recovery mode is not sourced from post-lock durable reconciliation')
 
