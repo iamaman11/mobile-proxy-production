@@ -180,3 +180,145 @@ jobs:
               raise SystemExit('scratch Kernel ACCEPTED result lacks durable terminal reference')
           print('FILESYSTEM_SCRATCH_KERNEL_ACCEPTED')
           PY
+
+  recover-scratch-transaction:
+    name: Observe one durable UNKNOWN scratch transaction read-only
+    if: >-
+      inputs.operation == 'phone-filesystem-scratch-recovery-observation' &&
+      inputs.source_event_name == 'issue_comment' &&
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/phone-filesystem-recovery-observe issue-comment:')
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    env:
+      RECOVERY_KERNEL_SHA: 80cf8ff10e6c75658beabf5170f242a52357dbc3
+      RECOVERY_KERNEL_QUALITY_RUN_ID: '33812609204'
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out exact private recovery plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact accepted public recovery Kernel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: 80cf8ff10e6c75658beabf5170f242a52357dbc3
+          path: recovery-public
+          persist-credentials: false
+
+      - name: Verify recovery execution authority before read-only phone boundary
+        id: recovery-input
+        shell: bash
+        env:
+          CONTROL_REQUEST_JSON: ${{ inputs.control_request_json }}
+          COMMAND: ${{ inputs.command }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C recovery-public rev-parse HEAD)" = "${RECOVERY_KERNEL_SHA}"
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          command = os.environ['COMMAND']
+          match = re.fullmatch(r'/phone-filesystem-recovery-observe (issue-comment:[1-9][0-9]*)', command)
+          if match is None:
+              raise SystemExit('recovery command shape differs')
+          request = json.loads(os.environ['CONTROL_REQUEST_JSON'])
+          if (
+              request.get('schema') != 'production-control-request.v1'
+              or request.get('operation') != 'phone-filesystem-scratch-recovery-observation'
+              or request.get('mutating') is not False
+              or request.get('arguments') != [match.group(1)]
+          ):
+              raise SystemExit('recovery control request differs')
+          run_id = os.environ['RECOVERY_KERNEL_QUALITY_RUN_ID']
+          url = f'https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs/{run_id}'
+          req = urllib.request.Request(
+              url,
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'mobile-proxy-production-scratch-recovery',
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              run = json.load(response)
+          if (
+              run.get('name') != 'Quality'
+              or run.get('event') != 'push'
+              or run.get('head_branch') != 'main'
+              or run.get('head_sha') != os.environ['RECOVERY_KERNEL_SHA']
+              or run.get('status') != 'completed'
+              or run.get('conclusion') != 'success'
+          ):
+              raise SystemExit('exact recovery Kernel Quality authority is not accepted')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f"prior_terminal_ref={match.group(1)}\n")
+          PY
+
+      - name: Execute canonical read-only recovery observer
+        id: recovery
+        continue-on-error: true
+        shell: bash
+        env:
+          PRIOR_TERMINAL_REF: ${{ steps.recovery-input.outputs.prior_terminal_ref }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/run_filesystem_scratch_recovery.py \
+            --canonical-root recovery-public \
+            --recovery-kernel-sha "${RECOVERY_KERNEL_SHA}" \
+            --recovery-quality-run-id "${RECOVERY_KERNEL_QUALITY_RUN_ID}" \
+            --private-sha "${GITHUB_SHA}" \
+            --prior-terminal-ref "${PRIOR_TERMINAL_REF}" \
+            --output "${RUNNER_TEMP}/filesystem-scratch-recovery-result.json"
+
+      - name: Persist bounded recovery result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: filesystem-scratch-recovery-result-${{ github.run_id }}
+          path: ${{ runner.temp }}/filesystem-scratch-recovery-result.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Enforce bounded read-only recovery classification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'filesystem-scratch-recovery-result.json'
+          if not path.is_file():
+              raise SystemExit('scratch recovery result is unavailable')
+          result = json.loads(path.read_text(encoding='utf-8'))
+          if result.get('schema') != 'filesystem-scratch-recovery-result.v1':
+              raise SystemExit('scratch recovery result schema differs')
+          if result.get('recovery_kernel_sha') != os.environ['RECOVERY_KERNEL_SHA']:
+              raise SystemExit('scratch recovery Kernel SHA differs')
+          if result.get('recovery_kernel_quality_run_id') != int(os.environ['RECOVERY_KERNEL_QUALITY_RUN_ID']):
+              raise SystemExit('scratch recovery Kernel Quality differs')
+          if result.get('private_sha') != os.environ['GITHUB_SHA']:
+              raise SystemExit('scratch recovery private SHA differs')
+          for field in ('blind_retry_allowed', 'phone_mutation_performed', 'cleanup_performed', 'original_transaction_accepted', 'raw_device_identifier_recorded'):
+              if result.get(field) is not False:
+                  raise SystemExit(f'scratch recovery safety flag differs: {field}')
+          if result.get('state') not in ('RECOVERED', 'QUARANTINED', 'UNKNOWN_EXECUTION_OUTCOME'):
+              raise SystemExit('scratch recovery state is outside bounded classifier')
+          if result.get('state') == 'RECOVERED' and result.get('lifecycle_state') != 'QUARANTINED':
+              raise SystemExit('recovered scratch environment retroactively accepted original transaction')
+          if not result.get('recovery_terminal_ref'):
+              raise SystemExit('scratch recovery lacks durable recovery terminal')
+          print('FILESYSTEM_SCRATCH_RECOVERY_CLASSIFIED')
+          PY

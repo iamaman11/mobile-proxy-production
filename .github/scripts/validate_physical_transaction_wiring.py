@@ -276,8 +276,13 @@ def main(argv: list[str] | None = None) -> int:
     ports_text = (private_root / ".github/scripts/filesystem_scratch_transaction_ports.py").read_text(encoding="utf-8")
     if edge_text.count("subprocess.run(") != 1:
         fail("scratch edge must centralize controller->phone transport in one subprocess call site")
-    if "FilesystemScratchRoundtripBinding" not in entry_text or "TransactionRunner().run" not in entry_text:
-        fail("scratch entrypoint does not bind exact canonical operation through Universal Kernel")
+    if "FilesystemScratchRoundtripBinding" not in entry_text:
+        fail("scratch entrypoint does not bind exact canonical operation")
+    if not (
+        "runner = transaction.TransactionRunner()" in entry_text
+        and "runner.run(" in entry_text
+    ):
+        fail("scratch entrypoint does not invoke the Universal Kernel through the named runner")
     if "run_android_filesystem_certification.py" in entry_text:
         fail("scratch entrypoint references legacy composite certification")
     if "blind_retry_allowed\": False" not in ports_text and '"blind_retry_allowed": False' not in ports_text:
