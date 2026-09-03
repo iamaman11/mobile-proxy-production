@@ -22,6 +22,7 @@ jobs:
       operation: ${{ steps.route.outputs.operation }}
       request_id: ${{ steps.route.outputs.request_id }}
       request_json: ${{ steps.route.outputs.request_json }}
+      execution_id: ${{ steps.execution.outputs.execution_id }}
     steps:
       - name: Check out exact private execution revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -43,6 +44,37 @@ jobs:
             --comment-id "${{ github.event.comment.id }}" \
             --actor "${{ github.event.comment.user.login }}" \
             --owner "${{ github.repository_owner }}"
+
+      - name: Build bounded exact execution ACK
+        id: execution
+        shell: bash
+        env:
+          CONTROL_REQUEST_JSON: ${{ steps.route.outputs.request_json }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/control_execution.py \
+            --request-json "$CONTROL_REQUEST_JSON" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --private-sha "$GITHUB_SHA" \
+            --record-path "$RUNNER_TEMP/control-execution-ack.json" \
+            --body-path "$RUNNER_TEMP/control-execution-ack.md"
+          echo "execution_id=gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable exact execution ACK before any routed operation
+        uses: actions/github-script@v7
+        env:
+          ACK_BODY_PATH: ${{ runner.temp }}/control-execution-ack.md
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.ACK_BODY_PATH, 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
 
   op_android_release_build:
     name: Route android-release-build
