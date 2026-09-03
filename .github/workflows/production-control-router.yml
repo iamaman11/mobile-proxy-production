@@ -332,10 +332,27 @@ jobs:
       control_request_json: ${{ needs.route.outputs.request_json }}
     secrets: inherit
 
-  op_canonical_physical_transaction:
-    name: Route mutator through canonical physical transaction readiness
+  op_phone_filesystem_certification:
+    name: Route phone-filesystem-certification to first atomic scratch rehearsal
     needs: route
-    if: contains(fromJSON('["android-signing-migration","phone-clean-install","phone-filesystem-certification","phone-filesystem-quarantine-cleanup","phone-runtime-recovery","phone-runtime-binary-repair","runtime-reconstruction-execution"]'), needs.route.outputs.operation)
+    if: needs.route.outputs.operation == 'phone-filesystem-certification'
+    uses: ./.github/workflows/filesystem-scratch-kernel-rehearsal.yml
+    with:
+      operation: ${{ needs.route.outputs.operation }}
+      command: ${{ github.event.comment.body }}
+      source_event_name: issue_comment
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      control_request_id: ${{ needs.route.outputs.request_id }}
+      control_request_json: ${{ needs.route.outputs.request_json }}
+    secrets: inherit
+
+  op_canonical_physical_transaction:
+    name: Route remaining mutators through canonical physical transaction readiness
+    needs: route
+    if: contains(fromJSON('["android-signing-migration","phone-clean-install","phone-filesystem-quarantine-cleanup","phone-runtime-recovery","phone-runtime-binary-repair","runtime-reconstruction-execution"]'), needs.route.outputs.operation)
     uses: ./.github/workflows/physical-transaction-readiness.yml
     with:
       operation: ${{ needs.route.outputs.operation }}
