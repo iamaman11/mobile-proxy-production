@@ -31,9 +31,9 @@ jobs:
           text = bootstrap_path.read_text(encoding='utf-8')
 
           required = (
-              "github.event.issue.number == 1",
-              "github.event.comment.user.login == github.repository_owner",
-              "startsWith(github.event.comment.body, '/runner-rust-bootstrap ')",
+              "inputs.source_issue_number == 1",
+              "inputs.source_actor == github.repository_owner",
+              "startsWith(inputs.command, '/runner-rust-bootstrap ')",
               "re.fullmatch(r'/runner-rust-bootstrap ([0-9a-f]{40})', command)",
               "runs-on: [self-hosted, Linux, X64, android-production]",
               "group: production-runner-rust-bootstrap",

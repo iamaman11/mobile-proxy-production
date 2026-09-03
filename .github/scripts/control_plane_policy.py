@@ -337,8 +337,8 @@ def policy_quarantine_recovery() -> None:
     require_tokens(
         observe,
         (
-            "github.event.comment.user.login == github.repository_owner",
-            "startsWith(github.event.comment.body, '/phone-filesystem-quarantine-observe ')",
+            "inputs.source_actor == github.repository_owner",
+            "startsWith(inputs.command, '/phone-filesystem-quarantine-observe ')",
             "'run_android_filesystem_quarantine_recovery.py'",
             "'run_android_filesystem_certification.py'",
             "'run_private_phone_preflight.py'",
@@ -375,8 +375,8 @@ def policy_quarantine_recovery() -> None:
     require_tokens(
         cleanup,
         (
-            "github.event.comment.user.login == github.repository_owner",
-            "startsWith(github.event.comment.body, '/phone-filesystem-quarantine-clean ')",
+            "inputs.source_actor == github.repository_owner",
+            "startsWith(inputs.command, '/phone-filesystem-quarantine-clean ')",
             "observation_run_id = int(tokens[2])",
             "observation.get('name') != 'Production Android filesystem quarantine observation'",
             "artifact.get('expired') is not False",
