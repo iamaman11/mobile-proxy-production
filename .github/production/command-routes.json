@@ -38,6 +38,13 @@
       "workflow": "filesystem-scratch-kernel-rehearsal.yml"
     },
     {
+      "authority_cursor": "issue179-comment-5533040841",
+      "command": "/phone-filesystem-recovery-observe",
+      "mutating": false,
+      "operation": "phone-filesystem-scratch-recovery-observation",
+      "workflow": "filesystem-scratch-kernel-rehearsal.yml"
+    },
+    {
       "command": "/phone-filesystem-quarantine-clean",
       "mutating": true,
       "operation": "phone-filesystem-quarantine-cleanup",
