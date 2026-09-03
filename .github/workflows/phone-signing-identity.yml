@@ -95,7 +95,7 @@ jobs:
           path: canonical
           persist-credentials: false
 
-      - name: Build immutable canonical signing-observer bundle
+      - name: Build immutable canonical signing-observer and apksigner bundle
         shell: bash
         env:
           CANONICAL_SHA: ${{ steps.command.outputs.canonical_sha }}
@@ -103,6 +103,21 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C canonical rev-parse HEAD)" = "${CANONICAL_SHA}"
+
+          hosted_apksigner="$(command -v apksigner || true)"
+          if [[ -z "${hosted_apksigner}" ]]; then
+            echo "GitHub-hosted runner does not provide apksigner" >&2
+            exit 1
+          fi
+          hosted_apksigner="$(readlink -f "${hosted_apksigner}")"
+          hosted_apksigner_jar="$(dirname "${hosted_apksigner}")/lib/apksigner.jar"
+          if [[ ! -f "${hosted_apksigner_jar}" ]]; then
+            echo "GitHub-hosted apksigner.jar is unavailable" >&2
+            exit 1
+          fi
+          java -jar "${hosted_apksigner_jar}" version >/dev/null
+          export HOSTED_APKSIGNER_JAR="${hosted_apksigner_jar}"
+
           python3 - <<'PY'
           import hashlib
           import json
@@ -113,12 +128,12 @@ jobs:
           source_root = Path("canonical/scripts")
           bundle = Path(os.environ["RUNNER_TEMP"]) / "phone-signing-observer-source"
           bundle.mkdir(parents=True, exist_ok=False)
-          required = (
+          required_scripts = (
               "run_private_phone_preflight.py",
               "verify_android_installed_signer.py",
           )
           files = {}
-          for name in required:
+          for name in required_scripts:
               source = source_root / name
               if not source.is_file():
                   raise SystemExit(f"canonical signing observer source is missing: {name}")
@@ -126,12 +141,19 @@ jobs:
               shutil.copyfile(source, destination)
               files[name] = hashlib.sha256(destination.read_bytes()).hexdigest()
 
+          tool_dir = bundle / "tools"
+          tool_dir.mkdir()
+          tool_jar = tool_dir / "apksigner.jar"
+          shutil.copyfile(Path(os.environ["HOSTED_APKSIGNER_JAR"]), tool_jar)
+          files["tools/apksigner.jar"] = hashlib.sha256(tool_jar.read_bytes()).hexdigest()
+
           manifest = {
-              "format_version": 1,
+              "format_version": 2,
               "repository": "iamaman11/mobile-proxy",
               "canonical_sha": os.environ["CANONICAL_SHA"],
               "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
               "files": files,
+              "apksigner_transport": "same_run_hosted_digest_bound_jar",
           }
           (bundle / "source-manifest.json").write_text(
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -156,7 +178,7 @@ jobs:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
-      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+      ANDROID_TARGET_BINDING_KEY: mobile-proxy/android-production/target-binding/v1/public-nonsecret
     outputs:
       classification: ${{ steps.observe.outputs.classification }}
       observation_validated: ${{ steps.observe.outputs.observation_validated }}
@@ -225,7 +247,7 @@ jobs:
           test ! -e "${destination}"
           mv "${selected}" "${destination}"
 
-      - name: Verify immutable canonical source before phone access
+      - name: Verify immutable canonical source and apksigner before phone access
         shell: bash
         run: |
           set -euo pipefail
@@ -237,7 +259,7 @@ jobs:
 
           root = Path(os.environ["RUNNER_TEMP"]) / "phone-signing-observer-source"
           manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
-          if manifest.get("format_version") != 1:
+          if manifest.get("format_version") != 2:
               raise SystemExit("unsupported signing-observer source manifest")
           if manifest.get("repository") != "iamaman11/mobile-proxy":
               raise SystemExit("canonical source repository differs")
@@ -245,71 +267,48 @@ jobs:
               raise SystemExit("canonical source SHA differs")
           if manifest.get("quality_run_id") != int(os.environ["QUALITY_RUN_ID"]):
               raise SystemExit("canonical Quality authority differs")
+          if manifest.get("apksigner_transport") != "same_run_hosted_digest_bound_jar":
+              raise SystemExit("apksigner transport differs")
           expected = {
               "run_private_phone_preflight.py",
               "verify_android_installed_signer.py",
+              "tools/apksigner.jar",
           }
           files = manifest.get("files")
           if not isinstance(files, dict) or set(files) != expected:
-              raise SystemExit("canonical signing-observer source inventory differs")
+              raise SystemExit("canonical signing-observer source/tool inventory differs")
           for name in sorted(expected):
               path = root / name
               if not path.is_file():
-                  raise SystemExit("canonical signing-observer source file is missing")
+                  raise SystemExit("canonical signing-observer source/tool file is missing")
               if hashlib.sha256(path.read_bytes()).hexdigest() != files[name]:
-                  raise SystemExit("canonical signing-observer source digest differs")
+                  raise SystemExit("canonical signing-observer source/tool digest differs")
           PY
 
-      - name: Resolve existing apksigner tooling read-only
+      - name: Ensure Java signing runtime on production runner
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Activate same-run digest-bound apksigner tooling read-only
         id: tooling
         shell: bash
         run: |
           set -euo pipefail
-          if command -v apksigner >/dev/null 2>&1; then
-            echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          sdk_roots=()
-          [[ -n "${ANDROID_SDK_ROOT:-}" ]] && sdk_roots+=("${ANDROID_SDK_ROOT}")
-          [[ -n "${ANDROID_HOME:-}" ]] && sdk_roots+=("${ANDROID_HOME}")
-          sdk_roots+=("/opt/android-sdk" "/usr/local/lib/android/sdk")
-          adb_path="$(command -v adb || true)"
-          if [[ -n "${adb_path}" ]]; then
-            adb_dir="$(dirname "$(readlink -f "${adb_path}")")"
-            [[ "$(basename "${adb_dir}")" == "platform-tools" ]] && sdk_roots+=("$(dirname "${adb_dir}")")
-          fi
-
-          resolved=""
-          for root in "${sdk_roots[@]}"; do
-            [[ -d "${root}/build-tools" ]] || continue
-            resolved="$(find "${root}/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
-            [[ -n "${resolved}" ]] && break
-          done
-          if [[ -n "${resolved}" ]]; then
-            echo "$(dirname "${resolved}")" >> "$GITHUB_PATH"
-            echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          resolved_jar=""
-          for root in "${sdk_roots[@]}"; do
-            [[ -d "${root}/build-tools" ]] || continue
-            resolved_jar="$(find "${root}/build-tools" -mindepth 3 -maxdepth 3 -type f -path '*/lib/apksigner.jar' 2>/dev/null | sort -V | tail -n 1)"
-            [[ -n "${resolved_jar}" ]] && break
-          done
-          if [[ -z "${resolved_jar}" ]]; then
-            echo "apksigner is unavailable in PATH and registered Android SDK roots" >&2
-            exit 1
-          fi
-
-          cat > "${RUNNER_TEMP}/apksigner" <<'SH'
+          command -v java >/dev/null
+          command -v keytool >/dev/null
+          root="${RUNNER_TEMP}/phone-signing-observer-source"
+          jar="${root}/tools/apksigner.jar"
+          test -f "${jar}"
+          java -jar "${jar}" version >/dev/null
+          wrapper="${RUNNER_TEMP}/apksigner"
+          cat > "${wrapper}" <<SH
           #!/usr/bin/env bash
           set -euo pipefail
-          exec java -jar "${APKSIGNER_JAR}" "$@"
+          exec java -jar "${jar}" "\$@"
           SH
-          chmod 700 "${RUNNER_TEMP}/apksigner"
-          echo "APKSIGNER_JAR=${resolved_jar}" >> "$GITHUB_ENV"
+          chmod 700 "${wrapper}"
           echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
           echo "apksigner_ready=true" >> "$GITHUB_OUTPUT"
 
@@ -329,7 +328,7 @@ jobs:
           if not serial:
               raise SystemExit("registered production target binding is unavailable")
           if len(key) < 32 or key == serial:
-              raise SystemExit("independent target binding key is unavailable")
+              raise SystemExit("stable target binding rule is unavailable")
           target_binding_id = "tb-hmac-sha256:" + hmac.new(
               key.encode("utf-8"),
               b"android-production\0" + serial.encode("utf-8"),
