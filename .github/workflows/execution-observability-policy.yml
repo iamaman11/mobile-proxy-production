@@ -8,6 +8,8 @@ on:
       - '.github/workflows/execution-observability-policy.yml'
       - '.github/scripts/deployment_execution.py'
       - '.github/scripts/prepare_release_deployment.py'
+      - '.github/scripts/reconcile_recovery_mode.py'
+      - '.github/scripts/test_reconcile_recovery_mode.py'
       - '.github/scripts/run_phone_release_deployment.py'
       - '.github/controller/terminal_result.py'
       - '.github/controller/evidence_store.py'
@@ -20,6 +22,8 @@ on:
       - '.github/workflows/execution-observability-policy.yml'
       - '.github/scripts/deployment_execution.py'
       - '.github/scripts/prepare_release_deployment.py'
+      - '.github/scripts/reconcile_recovery_mode.py'
+      - '.github/scripts/test_reconcile_recovery_mode.py'
       - '.github/scripts/run_phone_release_deployment.py'
       - '.github/controller/terminal_result.py'
       - '.github/controller/evidence_store.py'
@@ -48,8 +52,11 @@ jobs:
             .github/controller/github_projection.py \
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
+            .github/scripts/reconcile_recovery_mode.py \
+            .github/scripts/test_reconcile_recovery_mode.py \
             .github/scripts/run_phone_release_deployment.py
           python3 .github/controller/tests/test_controller.py
+          PYTHONPATH=.github/scripts python3 .github/scripts/test_reconcile_recovery_mode.py
 
       - name: Enforce immediate ACK and canonical terminal invariants
         shell: bash
@@ -64,6 +71,7 @@ jobs:
           terminal = Path('.github/controller/terminal_result.py').read_text(encoding='utf-8')
           store = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
           runtime = Path('.github/scripts/run_phone_release_deployment.py').read_text(encoding='utf-8')
+          reconcile = Path('.github/scripts/reconcile_recovery_mode.py').read_text(encoding='utf-8')
           projection = Path('.github/controller/github_projection.py').read_text(encoding='utf-8')
 
           required_router = (
@@ -137,6 +145,27 @@ jobs:
           project_index = runtime.rfind('_project_terminal(')
           if persist_index < 0 or project_index < 0 or persist_index > project_index:
               raise SystemExit('public Deployment projection must follow durable private terminal')
+
+          required_reconcile = (
+              'Durable private evidence is authoritative',
+              'durable_intent_exists',
+              'durable_terminal_exists',
+              'admission_recovery_only',
+              'if durable_intent_exists:',
+              'if admission_recovery_only:',
+              'evidence.request_history',
+          )
+          for marker in required_reconcile:
+              if marker not in reconcile:
+                  raise SystemExit(f'missing recovery reconciliation invariant: {marker}')
+          if 'Reconcile recovery mode from durable private ledger' not in deployment:
+              raise SystemExit('target execution does not refresh durable recovery state after lock acquisition')
+          if '.github/scripts/reconcile_recovery_mode.py' not in deployment:
+              raise SystemExit('target execution does not invoke durable recovery reconciler')
+          recovery_assignments = [line for line in deployment.splitlines() if 'RECOVERY_ONLY:' in line]
+          if len(recovery_assignments) != 1 or 'steps.recovery.outputs.recovery_only' not in recovery_assignments[0]:
+              raise SystemExit('physical runtime recovery mode is not sourced from post-lock durable reconciliation')
+
           if 'PUBLIC_DEPLOYMENTS_TOKEN' not in deployment:
               raise SystemExit('public Deployment projection must use a separate credential')
           if 'issues' in projection.lower() or 'contents' in projection.lower():
