@@ -1,0 +1,31 @@
+name: Filesystem causal integration policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-filesystem-causal-integration:
+    name: Validate Stage C.0b.3 causal filesystem integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: private-control
+      - name: Check out current canonical source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: main
+          path: canonical
+          persist-credentials: false
+      - name: Validate causal generation and quarantine reuse semantics
+        working-directory: private-control
+        run: python3 .github/scripts/control_plane_policy.py --policy filesystem-causal-integration --canonical-root ../canonical
