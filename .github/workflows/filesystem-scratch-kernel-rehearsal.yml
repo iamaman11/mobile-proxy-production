@@ -194,6 +194,7 @@ jobs:
     env:
       RECOVERY_KERNEL_SHA: 80cf8ff10e6c75658beabf5170f242a52357dbc3
       RECOVERY_KERNEL_QUALITY_RUN_ID: '33812609204'
+      RECOVERY_AUTHORITY_CURSOR: issue179-comment-5533040841
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
       ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -236,6 +237,7 @@ jobs:
           if (
               request.get('schema') != 'production-control-request.v1'
               or request.get('operation') != 'phone-filesystem-scratch-recovery-observation'
+              or request.get('authority_cursor') != os.environ['RECOVERY_AUTHORITY_CURSOR']
               or request.get('mutating') is not False
               or request.get('arguments') != [match.group(1)]
           ):
