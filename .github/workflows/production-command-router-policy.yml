@@ -28,7 +28,7 @@ jobs:
             .github/scripts/test_production_command_router.py
           python3 .github/scripts/test_production_command_router.py
 
-      - name: Enforce one Issue #1 ingress and canonical mutator handoff
+      - name: Enforce one Issue #1 ingress and bounded canonical mutator handoff
         shell: bash
         run: |
           set -euo pipefail
@@ -73,7 +73,7 @@ jobs:
           registry = json.loads(registry_path.read_text(encoding='utf-8'))
           if registry.get('schema') != 'production-command-routes.v1':
               raise SystemExit('route registry schema differs')
-          if registry.get('authority_cursor') != 'issue179-comment-5531154097':
+          if registry.get('authority_cursor') != 'issue179-comment-5531491187':
               raise SystemExit('route registry authority cursor differs from accepted checkpoint')
           routes = registry.get('routes')
           if not isinstance(routes, list) or not routes:
@@ -89,28 +89,56 @@ jobs:
           wiring = json.loads(wiring_path.read_text(encoding='utf-8'))
           shared = wiring.get('shared_mutation_workflow')
           bindings = wiring.get('bindings')
+          rehearsal = wiring.get('authorized_rehearsal')
+          if not isinstance(rehearsal, dict):
+              raise SystemExit('authorized rehearsal binding is missing')
+          rehearsal_operation = rehearsal.get('semantic_operation')
+          rehearsal_workflow = rehearsal.get('workflow')
+          if rehearsal_operation != 'phone-filesystem-certification':
+              raise SystemExit('authorized rehearsal semantic operation differs')
+          if rehearsal_workflow != 'filesystem-scratch-kernel-rehearsal.yml':
+              raise SystemExit('authorized rehearsal workflow differs')
+          if rehearsal.get('phone_execution_enabled') is not True:
+              raise SystemExit('authorized rehearsal phone execution is not explicitly enabled')
+          if rehearsal.get('single_atomic_transaction') is not True:
+              raise SystemExit('authorized rehearsal is not constrained to one atomic transaction')
+          if rehearsal.get('continuation_authorized') is not False:
+              raise SystemExit('authorized rehearsal permits physical continuation')
+
           mutating_operations = {str(item['operation']) for item in bindings}
           routed_mutators = {
               str(route['operation']) for route in routes if route.get('mutating') is True
           }
           if routed_mutators != mutating_operations:
               raise SystemExit('router mutating operation set differs from physical wiring')
-          if any(
-              route.get('workflow') != shared
-              for route in routes if route.get('mutating') is True
-          ):
-              raise SystemExit('every mutating route must hand off to shared canonical readiness')
-          if any(
-              route.get('workflow') == shared
-              for route in routes if route.get('mutating') is not True
-          ):
-              raise SystemExit('non-mutating route points at canonical mutation readiness')
+
+          for route in routes:
+              if route.get('mutating') is not True:
+                  if route.get('workflow') in {shared, rehearsal_workflow}:
+                      raise SystemExit('non-mutating route points at a mutation workflow')
+                  continue
+              operation = str(route['operation'])
+              expected = rehearsal_workflow if operation == rehearsal_operation else shared
+              if route.get('workflow') != expected:
+                  raise SystemExit(
+                      f'mutating route {operation} must hand off to {expected}, got {route.get("workflow")}'
+                  )
 
           if router.count(f'uses: ./.github/workflows/{shared}') != 1:
               raise SystemExit('router must call shared canonical readiness exactly once')
-          for operation in sorted(mutating_operations):
+          if router.count(f'uses: ./.github/workflows/{rehearsal_workflow}') != 1:
+              raise SystemExit('router must call scratch rehearsal exactly once')
+          for operation in sorted(mutating_operations - {rehearsal_operation}):
               if operation not in router:
                   raise SystemExit(f'shared router selector missing mutator: {operation}')
+          rehearsal_job = 'op_' + re.sub(r'[^A-Za-z0-9_]', '_', str(rehearsal_operation))
+          if f'  {rehearsal_job}:' not in router:
+              raise SystemExit('router scratch rehearsal job is missing')
+          if 'secrets: inherit' not in re.search(
+              rf'(?ms)^  {re.escape(rehearsal_job)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)',
+              router,
+          ).group('body'):
+              raise SystemExit('scratch rehearsal router job must receive registered target bindings')
 
           for route in routes:
               name = str(route['workflow'])
@@ -137,19 +165,20 @@ jobs:
               mutation_policy,
           )
           if block is None:
-              raise SystemExit('unable to read legacy physical mutator inventory')
+              raise SystemExit('unable to read physical mutator inventory')
           classified_mutators = set(re.findall(r"'([^']+\.yml)'\s*:", block.group('body')))
           bound_legacy = {str(item['legacy_workflow']) for item in bindings}
-          if classified_mutators != bound_legacy:
+          expected_classified = bound_legacy | {str(rehearsal_workflow)}
+          if classified_mutators != expected_classified:
               raise SystemExit(
-                  'legacy mutation-policy inventory differs from canonical wiring: '
+                  'mutation-policy inventory differs from canonical wiring + rehearsal: '
                   + str(sorted(classified_mutators))
                   + ' vs '
-                  + str(sorted(bound_legacy))
+                  + str(sorted(expected_classified))
               )
 
           print(
               f'COMMAND_ROUTER_POLICY_OK routes={len(routes)} '
-              f'mutators={len(routed_mutators)} shared={shared}'
+              f'mutators={len(routed_mutators)} shared={shared} rehearsal={rehearsal_workflow}'
           )
           PY
