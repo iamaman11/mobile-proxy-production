@@ -1,0 +1,180 @@
+name: Post-migration observer transport policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-post-migration-observer-transport:
+    name: Validate immutable observer transport and physical-fact boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enforce immutable observer source and result semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/phone-post-migration-diagnostic.yml')
+          if not path.is_file():
+              raise SystemExit('post-migration diagnostic workflow is missing')
+          text = path.read_text(encoding='utf-8')
+          lines = text.splitlines()
+
+          required = (
+              'Validate exact command, current canonical main, and Quality',
+              'Checkout exact canonical observer dependency on hosted runner',
+              'Build immutable post-migration observer source bundle',
+              'script_sha256',
+              'private_execution_sha',
+              'Upload immutable post-migration observer source',
+              'Download immutable post-migration observer source (attempt 1)',
+              'Download immutable post-migration observer source (attempt 2)',
+              'Download immutable post-migration observer source (attempt 3)',
+              'Back off before immutable observer source retry 2',
+              'Back off before immutable observer source retry 3',
+              'Promote one successfully downloaded immutable observer bundle',
+              'Verify immutable observer bundle before phone access',
+              'Record bounded post-migration state',
+              'Record bounded observer attempt outcome',
+              'TRANSPORT_FAILED',
+              'SOURCE_AUTHORITY_FAILED',
+              'PHYSICAL_OBSERVED',
+              'PHYSICAL_OBSERVATION_FAILED',
+              'physical_fact_emitted',
+              'physical_observation_performed',
+              'phone_mutation_performed": False',
+              'apk_mutation_performed": False',
+              'phone_reboot_performed": False',
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+          )
+          missing = [item for item in required if item not in text]
+          if missing:
+              raise SystemExit('post-migration observer transport contract missing: ' + ', '.join(missing))
+
+          if 'raw.githubusercontent.com' in text:
+              raise SystemExit('self-hosted observer must not fetch canonical source from raw.githubusercontent.com')
+          if 'production-phone-global-mutation' in text:
+              raise SystemExit('read-only post-migration observer must stay outside mutation lock')
+
+          def step_blocks(prefix):
+              blocks = []
+              for index, line in enumerate(lines):
+                  if line.strip().startswith(f'- name: {prefix}'):
+                      end = index + 1
+                      while end < len(lines) and not lines[end].startswith('      - name: '):
+                          end += 1
+                      blocks.append(lines[index:end])
+              return blocks
+
+          downloads = step_blocks('Download immutable post-migration observer source (attempt ')
+          if len(downloads) != 3:
+              raise SystemExit('post-migration observer must have exactly three bounded source download attempts')
+          artifact_names = []
+          artifact_paths = []
+          for attempt, block in enumerate(downloads, start=1):
+              block_text = '\n'.join(block)
+              if block_text.count('uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093') != 1:
+                  raise SystemExit(f'observer source attempt {attempt} must use the pinned download-artifact action exactly once')
+              if block_text.count('continue-on-error: true') != 1:
+                  raise SystemExit(f'observer source attempt {attempt} must expose transport failure for bounded retry')
+              names = [line.strip() for line in block if line.strip().startswith('name: phone-post-migration-source-')]
+              paths = [line.strip() for line in block if line.strip().startswith('path: ') and 'source-attempt-' in line]
+              if len(names) != 1 or len(paths) != 1:
+                  raise SystemExit(f'observer source attempt {attempt} has ambiguous artifact identity or isolated path')
+              artifact_names.append(names[0])
+              artifact_paths.append(paths[0])
+              if not paths[0].endswith(f'phone-post-migration-source-attempt-{attempt}'):
+                  raise SystemExit(f'observer source attempt {attempt} must use isolated state')
+          if len(set(artifact_names)) != 1:
+              raise SystemExit('all observer retries must request the same immutable artifact identity')
+          if len(set(artifact_paths)) != 3:
+              raise SystemExit('observer retries must use isolated temporary paths')
+
+          if text.count('run: sleep 3') != 1 or text.count('run: sleep 6') != 1:
+              raise SystemExit('observer source transport backoff must be bounded to two retries')
+
+          promote = step_blocks('Promote one successfully downloaded immutable observer bundle')
+          verify = step_blocks('Verify immutable observer bundle before phone access')
+          observe = step_blocks('Record bounded post-migration state')
+          outcome = step_blocks('Record bounded observer attempt outcome')
+          if not (len(promote) == len(verify) == len(observe) == len(outcome) == 1):
+              raise SystemExit('observer must retain exactly one promotion, verification, physical observation and attempt-outcome step')
+
+          promote_text = '\n'.join(promote[0])
+          if 'continue-on-error: true' in promote_text or 'if: always()' in promote_text:
+              raise SystemExit('source promotion must fail closed before phone access')
+          for token in (
+              'SOURCE_DOWNLOAD_1_OUTCOME',
+              'SOURCE_DOWNLOAD_2_OUTCOME',
+              'SOURCE_DOWNLOAD_3_OUTCOME',
+              'no immutable post-migration observer source download attempt succeeded',
+              'immutable post-migration observer source destination already exists',
+          ):
+              if token not in promote_text:
+                  raise SystemExit('source promotion contract missing: ' + token)
+
+          verify_text = '\n'.join(verify[0])
+          if 'continue-on-error: true' in verify_text or 'if: always()' in verify_text:
+              raise SystemExit('source authority verification must fail closed before phone access')
+          for token in ('canonical_sha', 'quality_run_id', 'private_execution_sha', 'script_sha256'):
+              if token not in verify_text:
+                  raise SystemExit('source authority verification missing: ' + token)
+
+          observe_text = '\n'.join(observe[0])
+          if observe_text.count('preflight.prove_registered_device(serial)') != 1:
+              raise SystemExit('registered device proof must occur exactly once in physical observation step')
+          if 'physical_observation_performed": True' not in observe_text:
+              raise SystemExit('physical state artifact must identify successful observation explicitly')
+
+          outcome_text = '\n'.join(outcome[0])
+          if 'if: always()' not in outcome_text:
+              raise SystemExit('bounded attempt outcome must be emitted for transport/authority/physical failures')
+          if 'physical_fact_emitted": snapshot == "success"' not in outcome_text:
+              raise SystemExit('physical fact emission must be equivalent to successful snapshot')
+          if 'physical_observation_performed": snapshot == "success"' not in outcome_text:
+              raise SystemExit('physical observation flag must be equivalent to successful snapshot')
+
+          promote_index = text.index('Promote one successfully downloaded immutable observer bundle')
+          verify_index = text.index('Verify immutable observer bundle before phone access')
+          observe_index = text.index('Record bounded post-migration state')
+          outcome_index = text.index('Record bounded observer attempt outcome')
+          if not promote_index < verify_index < observe_index < outcome_index:
+              raise SystemExit('transport and authority gates must precede physical observation; outcome follows observation')
+
+          def classify(transport, verify_state, snapshot):
+              if transport != 'success':
+                  return 'TRANSPORT_FAILED', False
+              if verify_state != 'success':
+                  return 'SOURCE_AUTHORITY_FAILED', False
+              if snapshot == 'success':
+                  return 'PHYSICAL_OBSERVED', True
+              return 'PHYSICAL_OBSERVATION_FAILED', False
+
+          truth_table = (
+              (('failure', 'skipped', 'skipped'), ('TRANSPORT_FAILED', False)),
+              (('success', 'failure', 'skipped'), ('SOURCE_AUTHORITY_FAILED', False)),
+              (('success', 'success', 'success'), ('PHYSICAL_OBSERVED', True)),
+              (('success', 'success', 'failure'), ('PHYSICAL_OBSERVATION_FAILED', False)),
+          )
+          for inputs, expected in truth_table:
+              actual = classify(*inputs)
+              if actual != expected:
+                  raise SystemExit(f'observer outcome truth table differs: {inputs} -> {actual}, expected {expected}')
+
+          print('post-migration observer transport policy: accepted')
+          print('source_download_attempts=3')
+          print('direct_raw_github_fetch=forbidden')
+          print('physical_fact_requires_successful_snapshot=true')
+          print('phone_mutation_performed=false')
+          PY
