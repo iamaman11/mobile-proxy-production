@@ -1,0 +1,110 @@
+name: Execution observability policy
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/production-control-router.yml'
+      - '.github/workflows/phone-preflight.yml'
+      - '.github/workflows/execution-observability-policy.yml'
+      - '.github/scripts/control_execution.py'
+      - '.github/scripts/test_control_execution.py'
+      - '.github/scripts/production_command_router.py'
+      - '.github/scripts/control_request.py'
+      - '.github/production/command-routes.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-control-router.yml'
+      - '.github/workflows/phone-preflight.yml'
+      - '.github/workflows/execution-observability-policy.yml'
+      - '.github/scripts/control_execution.py'
+      - '.github/scripts/test_control_execution.py'
+      - '.github/scripts/production_command_router.py'
+      - '.github/scripts/control_request.py'
+      - '.github/production/command-routes.json'
+
+permissions:
+  contents: read
+
+jobs:
+  execution-observability-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Compile and test execution identity contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/control_request.py \
+            .github/scripts/production_command_router.py \
+            .github/scripts/control_execution.py \
+            .github/scripts/test_control_execution.py
+          PYTHONPATH=.github/scripts python3 .github/scripts/test_control_execution.py
+          PYTHONPATH=.github/scripts python3 .github/scripts/test_production_command_router.py
+
+      - name: Enforce immediate correlation and terminal evidence invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
+          preflight = Path('.github/workflows/phone-preflight.yml').read_text(encoding='utf-8')
+          helper = Path('.github/scripts/control_execution.py').read_text(encoding='utf-8')
+
+          required_router = (
+              'Build bounded exact execution ACK',
+              'Publish immutable exact execution ACK before any routed operation',
+              '--run-id "$GITHUB_RUN_ID"',
+              '--run-attempt "$GITHUB_RUN_ATTEMPT"',
+              '--private-sha "$GITHUB_SHA"',
+              'execution_id: ${{ steps.execution.outputs.execution_id }}',
+          )
+          for marker in required_router:
+              if marker not in router:
+                  raise SystemExit(f'missing router execution-correlation invariant: {marker}')
+          classify = router.index('Strictly classify command and build semantic request envelope')
+          publish = router.index('Publish immutable exact execution ACK before any routed operation')
+          first_route = router.index('\n  op_')
+          if not classify < publish < first_route:
+              raise SystemExit('execution ACK must be published after classification and before all routed jobs')
+          if '/actions/runs?' in router or 'workflow_runs' in router:
+              raise SystemExit('router must not search run history to discover its own execution')
+
+          required_helper = (
+              'control-execution-ack.v1',
+              'gh-run:{run}:{attempt}',
+              'requested_canonical_sha',
+              'request_authority_cursor',
+              '"state": "ROUTED"',
+              '"terminal": False',
+              'physical_transaction_id',
+          )
+          for marker in required_helper:
+              if marker not in helper:
+                  raise SystemExit(f'missing execution ACK contract marker: {marker}')
+
+          required_terminal = (
+              'control-execution-terminal.v1',
+              'workflow_run_attempt',
+              'physical_job_id',
+              'raw_artifact_id',
+              'promoted_fact_artifact_id',
+              "terminal_state",
+              "'UNKNOWN'",
+              "mutation_performed: `false`",
+              '/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
+              '/actions/runs/{run_id}/artifacts',
+          )
+          for marker in required_terminal:
+              if marker not in preflight:
+                  raise SystemExit(f'missing phone-preflight terminal correlation invariant: {marker}')
+          if 'ANDROID_PRODUCTION_SERIAL' in preflight[preflight.index('  report:'):]:
+              raise SystemExit('terminal reporter must not receive raw production device identity')
+          if 'ANDROID_TARGET_BINDING_KEY' in preflight[preflight.index('  report:'):]:
+              raise SystemExit('terminal reporter must not receive target-binding credentials')
+          PY
