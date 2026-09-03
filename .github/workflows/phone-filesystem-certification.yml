@@ -279,6 +279,81 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Journal durable CONTROL mutation intent before adapter invocation
+        id: intent-journal
+        uses: actions/github-script@v7
+        env:
+          INTENT_PATH: ${{ runner.temp }}/filesystem-mutation-dispatch-intent.json
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = JSON.parse(fs.readFileSync(process.env.INTENT_PATH, 'utf8'));
+            const expectedGeneration = marker.operation_transaction_id;
+            if (
+              marker.format_version !== 1 ||
+              marker.evidence_type !== 'MUTATION_DISPATCH_INTENT' ||
+              marker.authority !== 'CONTROL' ||
+              marker.lifecycle !== 'CURRENT' ||
+              marker.private_repository !== process.env.GITHUB_REPOSITORY ||
+              marker.private_sha !== process.env.GITHUB_SHA ||
+              marker.workflow_run_id !== context.runId ||
+              marker.workflow_run_attempt !== Number(process.env.GITHUB_RUN_ATTEMPT) ||
+              marker.operation_id !== 'android.filesystem-certification.v1' ||
+              marker.operation_transaction_id !== process.env.TRANSACTION_ID ||
+              marker.target !== 'android-production' ||
+              typeof marker.target_binding_id !== 'string' ||
+              !marker.target_binding_id.startsWith('tb-hmac-sha256:') ||
+              marker.affected_domain_generations?.['domain/filesystem'] !== expectedGeneration ||
+              marker.dispatch_may_reach_target !== true ||
+              marker.adapter_invocation_allowed_only_after_persistence !== true ||
+              marker.blind_retry_allowed !== false ||
+              marker.raw_device_identifier_recorded !== false ||
+              marker.phone_mutation_performed !== false
+            ) {
+              throw new Error('filesystem certification dispatch intent is not journal-admissible');
+            }
+            const journal = {
+              format_version: 1,
+              journal_type: 'FILESYSTEM_MUTATION_INTENT',
+              evidence_type: marker.evidence_type,
+              authority: marker.authority,
+              lifecycle: marker.lifecycle,
+              private_repository: marker.private_repository,
+              private_sha: marker.private_sha,
+              canonical_repository: marker.canonical_repository,
+              canonical_sha: marker.canonical_sha,
+              canonical_quality_run_id: marker.canonical_quality_run_id,
+              workflow_run_id: marker.workflow_run_id,
+              workflow_run_attempt: marker.workflow_run_attempt,
+              operation_id: marker.operation_id,
+              operation_transaction_id: marker.operation_transaction_id,
+              target: marker.target,
+              target_binding_id: marker.target_binding_id,
+              affected_domain_generations: marker.affected_domain_generations,
+              dispatch_intent_artifact_persisted: true,
+              journaled_before_adapter_invocation: true,
+              dispatch_may_reach_target: true,
+              blind_retry_allowed: false,
+              raw_device_identifier_recorded: false,
+            };
+            const body = [
+              '## CONTROL FILESYSTEM MUTATION INTENT',
+              '',
+              '```json',
+              JSON.stringify(journal),
+              '```',
+            ].join('\n');
+            const response = await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1,
+              body,
+            });
+            if (!response?.data?.id) {
+              throw new Error('durable filesystem mutation intent journal comment was not created');
+            }
+            core.setOutput('journal_comment_id', String(response.data.id));
+
       - name: Run bounded filesystem mutation transaction
         id: certify
         shell: bash
