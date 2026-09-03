@@ -34,7 +34,7 @@ def fixture() -> tuple[dict[str, object], dict[str, object], dict[str, object], 
         "tag_name": TAG,
         "draft": False,
         "prerelease": False,
-        "immutable": False,
+        "immutable": True,
         "assets": [
             asset(APK, 1, APK_DIGEST),
             asset("release-manifest.json", 2, MANIFEST_DIGEST),
@@ -100,29 +100,19 @@ def expect_refused(mutator) -> None:
     raise AssertionError("invalid Release unexpectedly admitted")
 
 
-def test_valid_v2_release() -> None:
+def test_valid_v2_immutable_release() -> None:
     value = admitted()
     assert value.identity.tag == TAG
     assert value.identity.artifact_digest == APK_DIGEST
+    assert value.identity.immutable is True
     assert value.android_package == "com.example.mobileproxy"
     assert value.android_version_name == "0.1.4"
     assert value.android_version_code == 14
-    assert value.immutability_control == "annotated-tag+github-asset-digest+manifest+provenance"
-
-
-def test_github_immutable_release_preferred() -> None:
-    release, manifest, provenance, checksums = fixture()
-    release["immutable"] = True
-    value = resolve_payload(
-        tag=TAG,
-        target="phone-production",
-        release=release,
-        source_sha=SOURCE,
-        manifest=manifest,
-        provenance=provenance,
-        checksums=checksums,
-    )
     assert value.immutability_control == "github-immutable-release"
+
+
+def test_mutable_release_refused() -> None:
+    expect_refused(lambda release, *_: release.__setitem__("immutable", False))
 
 
 def test_missing_apk_refused() -> None:
