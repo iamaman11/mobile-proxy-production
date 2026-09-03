@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import pathlib
 import subprocess
 import sys
@@ -14,6 +15,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import filesystem_scratch_edges as edges
+import filesystem_scratch_transaction_ports as scratch_ports
 
 
 class FakeTransaction:
@@ -28,6 +30,43 @@ class FakeTransaction:
         def __init__(self, passed: bool, source_ref: str) -> None:
             self.passed = passed
             self.source_ref = source_ref
+
+
+@dataclass(frozen=True)
+class FakePhaseEvidence:
+    step_id: str
+    status: str
+    transaction_id: str
+    source_ref: str
+    authority: str = "CONTROL"
+    lifecycle: str = "CURRENT"
+
+
+class FakeOperation:
+    PASSED = "PASSED"
+    DISPATCHED = "DISPATCHED"
+    PhaseEvidence = FakePhaseEvidence
+
+
+class MemoryComments:
+    def __init__(self) -> None:
+        self.comments: list[dict[str, object]] = []
+        self.next_id = 1001
+
+    def list_comments(self):
+        return list(self.comments)
+
+    def create_comment(self, body: str) -> int:
+        comment_id = self.next_id
+        self.next_id += 1
+        self.comments.append(
+            {
+                "id": comment_id,
+                "body": body,
+                "user": {"login": "github-actions[bot]"},
+            }
+        )
+        return comment_id
 
 
 def request():
@@ -104,6 +143,76 @@ def test_present_namespace_fails_postcondition_without_mutation() -> None:
     require(proof.passed is False, "present scratch namespace must fail postcondition")
 
 
+def test_durable_intent_reconstructs_may_have_dispatched_state() -> None:
+    comments = MemoryComments()
+    control_request_id = "req-sha256:" + "c" * 64
+    desired_generation = "gen-sha256:" + "d" * 64
+    transaction_id = (
+        "physical-tx-v1:"
+        + "c" * 64
+        + ":android.filesystem-scratch-roundtrip.v1:"
+        + "d" * 64
+    )
+    scratch_ref = "/data/local/tmp/mobile-proxy-kernel-" + "e" * 32
+    context = scratch_ports.ScratchTransactionContext(
+        canonical_sha="a" * 40,
+        canonical_quality_run_id=1,
+        private_sha="b" * 40,
+        request_ref="https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-1",
+        control_request_id=control_request_id,
+        authority_cursor="issue179-comment-5531491187",
+        desired_generation=desired_generation,
+        transaction_id=transaction_id,
+        scratch_ref=scratch_ref,
+        payload_ref="payload/" + desired_generation,
+        serial="registered-device",
+        target_binding_key="k" * 32,
+        workflow_run_id=1,
+        workflow_run_attempt=1,
+    )
+    ports = scratch_ports.PrivateScratchTransactionPorts(
+        transaction_module=SimpleNamespace(),
+        operation_module=FakeOperation,
+        control_module=SimpleNamespace(),
+        preflight_module=SimpleNamespace(),
+        comments=comments,
+        context=context,
+    )
+    intent = SimpleNamespace(
+        operation_id=scratch_ports.OPERATION_ID,
+        target=scratch_ports.TARGET,
+        transaction_id=transaction_id,
+        dispatch_step_id="scratch_roundtrip",
+        mutation_subject_ref=scratch_ref,
+        affected_domain_generations={scratch_ports.FILESYSTEM_DOMAIN: transaction_id},
+        control_request_id=control_request_id,
+        authority_cursor=context.authority_cursor,
+        desired_generation=desired_generation,
+        preflight_observation_refs=("issue-comment:999",),
+    )
+
+    intent_ref = ports.persist_mutation_intent(intent)
+    evidence = ports.load_existing_evidence()
+
+    require(intent_ref == "issue-comment:1001", "durable intent reference differs")
+    require(len(comments.comments) == 1, "intent persistence must create exactly one durable CONTROL record")
+    require(
+        [(item.step_id, item.status) for item in evidence]
+        == [
+            ("resolve_authority", "PASSED"),
+            ("mutation_scope", "PASSED"),
+            ("phone_access_boundary", "PASSED"),
+            ("mutation_intent", "PASSED"),
+            ("scratch_roundtrip", "DISPATCHED"),
+        ],
+        "intent-only recovery must conservatively reconstruct may-have-dispatched evidence",
+    )
+    require(
+        all(item.source_ref == intent_ref for item in evidence),
+        "reconstructed may-have-dispatched evidence must point to durable intent",
+    )
+
+
 def test_static_kernel_only_path() -> None:
     entry = (HERE / "run_filesystem_scratch_transaction.py").read_text(encoding="utf-8")
     ports = (HERE / "filesystem_scratch_transaction_ports.py").read_text(encoding="utf-8")
@@ -123,6 +232,7 @@ def main() -> int:
     test_dispatch_timeout_is_unknown()
     test_observer_is_independent_and_read_only()
     test_present_namespace_fails_postcondition_without_mutation()
+    test_durable_intent_reconstructs_may_have_dispatched_state()
     test_static_kernel_only_path()
     print("FILESYSTEM_SCRATCH_TRANSACTION_TESTS_OK")
     return 0
