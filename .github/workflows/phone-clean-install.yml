@@ -18,6 +18,10 @@ jobs:
       startsWith(github.event.comment.body, '/phone-clean-install ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      COMMAND: ${{ github.event.comment.body }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      GH_TOKEN: ${{ github.token }}
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
       quality_run_id: ${{ steps.command.outputs.quality_run_id }}
@@ -26,9 +30,6 @@ jobs:
       - name: Validate owner command, exact mains, Quality, and no prior destructive intent
         id: command
         shell: bash
-        env:
-          COMMAND: ${{ github.event.comment.body }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -38,17 +39,17 @@ jobs:
           import urllib.parse
           import urllib.request
 
-          command = os.environ.get('COMMAND', '').strip()
-          match = re.fullmatch(r'/phone-clean-install ([0-9a-f]{40})', command)
+          match = re.fullmatch(
+              r'/phone-clean-install ([0-9a-f]{40})',
+              os.environ.get('COMMAND', '').strip(),
+          )
           if match is None:
               raise SystemExit('invalid destructive clean-install command')
           requested_sha = match.group(1)
-          transaction_id = f"clean-install-comment-{os.environ['GITHUB_EVENT_COMMENT_ID']}"
-
-          token = os.environ['GH_TOKEN']
+          transaction_id = f"clean-install-comment-{os.environ['COMMENT_ID']}"
           headers = {
               'Accept': 'application/vnd.github+json',
-              'Authorization': f'Bearer {token}',
+              'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
               'User-Agent': 'mobile-proxy-production-clean-install-gate',
               'X-GitHub-Api-Version': '2022-11-28',
           }
@@ -58,16 +59,9 @@ jobs:
               with urllib.request.urlopen(request, timeout=20) as response:
                   return json.load(response)
 
-          public_main = get_json(
-              'https://api.github.com/repos/iamaman11/mobile-proxy/commits/main'
-          ).get('sha')
-          if requested_sha != public_main:
+          if get_json('https://api.github.com/repos/iamaman11/mobile-proxy/commits/main').get('sha') != requested_sha:
               raise SystemExit('requested SHA is not current canonical public main')
-
-          private_main = get_json(
-              'https://api.github.com/repos/iamaman11/mobile-proxy-production/commits/main'
-          ).get('sha')
-          if private_main != os.environ['GITHUB_SHA']:
+          if get_json('https://api.github.com/repos/iamaman11/mobile-proxy-production/commits/main').get('sha') != os.environ['GITHUB_SHA']:
               raise SystemExit('workflow execution SHA is not current private main')
 
           query = urllib.parse.urlencode(
@@ -85,48 +79,40 @@ jobs:
           ]
           if not quality:
               raise SystemExit('current canonical SHA has no exact successful main Quality run')
-          quality.sort(
-              key=lambda run: (run.get('run_attempt', 0), run.get('id', 0)),
-              reverse=True,
-          )
+          quality.sort(key=lambda run: (run.get('run_attempt', 0), run.get('id', 0)), reverse=True)
 
-          headings = {
+          headings = (
               '## CONTROL APK CLEAN INSTALL INTENT',
               '## CONTROL APK CLEAN INSTALL TERMINAL',
-          }
-          page = 1
-          while True:
+          )
+          for page in range(1, 51):
               comments = get_json(
-                  f"https://api.github.com/repos/iamaman11/mobile-proxy-production/issues/1/comments?per_page=100&page={page}"
+                  f'https://api.github.com/repos/iamaman11/mobile-proxy-production/issues/1/comments?per_page=100&page={page}'
               )
               for comment in comments:
-                  user = comment.get('user') or {}
-                  if user.get('login') != 'github-actions[bot]':
+                  if (comment.get('user') or {}).get('login') != 'github-actions[bot]':
                       continue
                   body = comment.get('body') or ''
-                  heading = next((value for value in headings if body.startswith(value + '\n\n```json\n')), None)
-                  if heading is None or not body.endswith('\n```'):
-                      continue
-                  raw = body[len(heading + '\n\n```json\n'):-4]
-                  try:
-                      payload = json.loads(raw)
-                  except json.JSONDecodeError:
-                      continue
-                  if payload.get('transaction_id') == transaction_id:
-                      raise SystemExit('transaction already has durable CONTROL evidence; blind retry forbidden')
+                  for heading in headings:
+                      prefix = heading + '\n\n```json\n'
+                      if not body.startswith(prefix) or not body.endswith('\n```'):
+                          continue
+                      try:
+                          payload = json.loads(body[len(prefix):-4])
+                      except json.JSONDecodeError:
+                          continue
+                      if payload.get('transaction_id') == transaction_id:
+                          raise SystemExit('transaction already has durable CONTROL evidence; blind retry forbidden')
               if len(comments) < 100:
                   break
-              page += 1
-              if page > 50:
-                  raise SystemExit('CONTROL evidence pagination exceeded bound')
+          else:
+              raise SystemExit('CONTROL evidence pagination exceeded bound')
 
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
               handle.write(f'canonical_sha={requested_sha}\n')
               handle.write(f"quality_run_id={quality[0]['id']}\n")
               handle.write(f'transaction_id={transaction_id}\n')
           PY
-        env:
-          GITHUB_EVENT_COMMENT_ID: ${{ github.event.comment.id }}
 
   build-candidate:
     name: Build exact current-source signed replacement candidate off-phone
@@ -187,8 +173,7 @@ jobs:
           import os
           import sys
 
-          with open(sys.argv[1], 'r', encoding='utf-8') as handle:
-              evidence = json.load(handle)
+          evidence = json.load(open(sys.argv[1], encoding='utf-8'))
           expected = {
               'format_version': 1,
               'repository': 'iamaman11/mobile-proxy',
@@ -223,9 +208,8 @@ jobs:
           set -euo pipefail
           cargo build --manifest-path canonical/Cargo.toml --locked --release \
             -p operator-cli --bin android-artifact-digest
-          tool="canonical/target/release/android-artifact-digest"
-          test -x "${tool}"
-          echo "path=${tool}" >> "$GITHUB_OUTPUT"
+          test -x canonical/target/release/android-artifact-digest
+          echo "path=canonical/target/release/android-artifact-digest" >> "$GITHUB_OUTPUT"
 
       - name: Assemble immutable same-run clean-install bundle
         shell: bash
@@ -274,8 +258,7 @@ jobs:
               'files_sha256': digests,
           }
           (root / 'bundle-manifest.json').write_text(
-              json.dumps(manifest, indent=2, sort_keys=True) + '\n',
-              encoding='utf-8',
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8'
           )
           PY
 
@@ -312,64 +295,16 @@ jobs:
       accepted: ${{ steps.result.outputs.accepted }}
       terminal_comment_id: ${{ steps.result.outputs.terminal_comment_id }}
     steps:
-      - name: Download immutable clean-install bundle attempt 1
-        id: bundle-download-1
-        continue-on-error: true
+      - name: Download immutable same-run clean-install bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: phone-clean-install-${{ env.CANONICAL_SHA }}-${{ env.TRANSACTION_ID }}
-          path: ${{ runner.temp }}/phone-clean-install-attempt-1
+          path: ${{ runner.temp }}/phone-clean-install-bundle
 
-      - name: Back off before bundle retry 2
-        if: steps.bundle-download-1.outcome == 'failure'
+      - name: Verify exact immutable bundle before phone access
         shell: bash
-        run: sleep 3
-
-      - name: Download immutable clean-install bundle attempt 2
-        id: bundle-download-2
-        if: steps.bundle-download-1.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: phone-clean-install-${{ env.CANONICAL_SHA }}-${{ env.TRANSACTION_ID }}
-          path: ${{ runner.temp }}/phone-clean-install-attempt-2
-
-      - name: Back off before bundle retry 3
-        if: steps.bundle-download-1.outcome == 'failure' && steps.bundle-download-2.outcome == 'failure'
-        shell: bash
-        run: sleep 6
-
-      - name: Download immutable clean-install bundle attempt 3
-        id: bundle-download-3
-        if: steps.bundle-download-1.outcome == 'failure' && steps.bundle-download-2.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: phone-clean-install-${{ env.CANONICAL_SHA }}-${{ env.TRANSACTION_ID }}
-          path: ${{ runner.temp }}/phone-clean-install-attempt-3
-
-      - name: Promote and verify exact immutable bundle before phone access
-        shell: bash
-        env:
-          OUTCOME_1: ${{ steps.bundle-download-1.outcome }}
-          OUTCOME_2: ${{ steps.bundle-download-2.outcome }}
-          OUTCOME_3: ${{ steps.bundle-download-3.outcome }}
         run: |
           set -euo pipefail
-          selected=""
-          if [ "${OUTCOME_1}" = success ]; then
-            selected="${RUNNER_TEMP}/phone-clean-install-attempt-1"
-          elif [ "${OUTCOME_2}" = success ]; then
-            selected="${RUNNER_TEMP}/phone-clean-install-attempt-2"
-          elif [ "${OUTCOME_3}" = success ]; then
-            selected="${RUNNER_TEMP}/phone-clean-install-attempt-3"
-          else
-            echo "no immutable clean-install bundle download succeeded" >&2
-            exit 1
-          fi
-          destination="${RUNNER_TEMP}/phone-clean-install-bundle"
-          test ! -e "${destination}"
-          mv "${selected}" "${destination}"
           python3 - <<'PY'
           import hashlib
           import json
@@ -378,7 +313,7 @@ jobs:
 
           root = Path(os.environ['RUNNER_TEMP']) / 'phone-clean-install-bundle'
           manifest = json.loads((root / 'bundle-manifest.json').read_text(encoding='utf-8'))
-          expected_meta = {
+          expected = {
               'format_version': 1,
               'canonical_repository': 'iamaman11/mobile-proxy',
               'canonical_sha': os.environ['CANONICAL_SHA'],
@@ -389,7 +324,7 @@ jobs:
               'expected_version_name': os.environ['EXPECTED_VERSION_NAME'],
               'expected_version_code': int(os.environ['EXPECTED_VERSION_CODE']),
           }
-          for key, value in expected_meta.items():
+          for key, value in expected.items():
               if manifest.get(key) != value:
                   raise SystemExit(f'clean-install bundle authority differs: {key}')
           expected_files = {
@@ -406,13 +341,11 @@ jobs:
               raise SystemExit('clean-install bundle file inventory differs')
           for name in sorted(expected_files):
               path = root / name
-              if not path.is_file():
-                  raise SystemExit(f'clean-install bundle file missing: {name}')
-              if hashlib.sha256(path.read_bytes()).hexdigest() != digests[name]:
+              if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digests[name]:
                   raise SystemExit(f'clean-install bundle digest differs: {name}')
           PY
-          chmod 700 "${destination}/run_destructive_clean_install.py"
-          chmod 700 "${destination}/android-artifact-digest"
+          chmod 700 "${RUNNER_TEMP}/phone-clean-install-bundle/run_destructive_clean_install.py"
+          chmod 700 "${RUNNER_TEMP}/phone-clean-install-bundle/android-artifact-digest"
 
       - name: Execute one durable destructive clean-install transaction
         id: execute
@@ -453,36 +386,32 @@ jobs:
           from pathlib import Path
 
           path = Path(os.environ['RUNNER_TEMP']) / 'phone-clean-install-result.json'
-          if not path.is_file():
-              values = {
-                  'state': 'NO_DURABLE_TERMINAL_OUTPUT',
-                  'accepted': False,
-                  'terminal_comment_id': '',
-              }
-          else:
+          if path.is_file():
               result = json.loads(path.read_text(encoding='utf-8'))
-              allowed = {
-                  'INSTALLED_EXACT_CANDIDATE',
-                  'INSTALLED_EXACT_CANDIDATE_RECOVERED_POSTCONDITION',
-                  'PACKAGE_ABSENT_AFTER_FAILED_CLEAN_INSTALL',
-                  'QUARANTINED_PACKAGE_STATE',
-                  'UNKNOWN_EXECUTION_OUTCOME',
-              }
               state = result.get('state')
-              if state not in allowed:
-                  raise SystemExit('clean-install terminal state is invalid')
-              values = {
-                  'state': state,
-                  'accepted': result.get('accepted') is True,
-                  'terminal_comment_id': result.get('terminal_comment_id', ''),
-              }
+              accepted = result.get('accepted') is True
+              terminal = result.get('terminal_comment_id', '')
+          else:
+              state = 'NO_DURABLE_TERMINAL_OUTPUT'
+              accepted = False
+              terminal = ''
+          allowed = {
+              'INSTALLED_EXACT_CANDIDATE',
+              'INSTALLED_EXACT_CANDIDATE_RECOVERED_POSTCONDITION',
+              'PACKAGE_ABSENT_AFTER_FAILED_CLEAN_INSTALL',
+              'QUARANTINED_PACKAGE_STATE',
+              'UNKNOWN_EXECUTION_OUTCOME',
+              'NO_DURABLE_TERMINAL_OUTPUT',
+          }
+          if state not in allowed:
+              raise SystemExit('clean-install terminal state is invalid')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
-              handle.write(f"state={values['state']}\n")
-              handle.write(f"accepted={'true' if values['accepted'] else 'false'}\n")
-              handle.write(f"terminal_comment_id={values['terminal_comment_id']}\n")
+              handle.write(f'state={state}\n')
+              handle.write(f"accepted={'true' if accepted else 'false'}\n")
+              handle.write(f'terminal_comment_id={terminal}\n')
           PY
 
-      - name: Upload bounded terminal result without changing mutation truth
+      - name: Retain bounded terminal result without changing mutation truth
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
