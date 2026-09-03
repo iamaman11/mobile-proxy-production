@@ -1,8 +1,32 @@
 name: Production phone sanitized runtime error context
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -11,9 +35,9 @@ permissions:
 jobs:
   command-gate:
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/phone-runtime-error-context ')
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/phone-runtime-error-context ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -22,7 +46,7 @@ jobs:
       - id: command
         shell: bash
         env:
-          COMMAND: ${{ github.event.comment.body }}
+          COMMAND: ${{ inputs.command }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -126,7 +150,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
           REPOSITORY: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ inputs.source_issue_number }}
           CANONICAL_SHA_SAFE: ${{ env.CANONICAL_SHA }}
         run: |
           set -euo pipefail

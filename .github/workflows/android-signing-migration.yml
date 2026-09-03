@@ -1,8 +1,32 @@
 name: Production Android 0.1.4 signing-generation migration
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_event_name:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      control_request_id:
+        required: true
+        type: string
+      control_request_json:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,14 +36,14 @@ jobs:
   command-gate:
     name: Bind migration to execution binding and proved retained build
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/android-release-migrate ')
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/android-release-migrate ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       MIGRATION_HARD_BLOCKED: "true"
-      COMMAND: ${{ github.event.comment.body }}
+      COMMAND: ${{ inputs.command }}
       GH_TOKEN: ${{ github.token }}
     outputs:
       canonical_sha: ${{ steps.command.outputs.canonical_sha }}
