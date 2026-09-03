@@ -44,7 +44,14 @@ jobs:
               'source-manifest.json',
               'hashlib.sha256(path.read_bytes()).hexdigest() != files[name]',
               'runs-on: [self-hosted, Linux, X64, android-production]',
-              'ANDROID_TARGET_BINDING_KEY',
+              'actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3',
+              "java-version: '17'",
+              'android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407',
+              'cmdline-tools-version: 12266719',
+              "packages: 'build-tools;35.0.0'",
+              'build-tools/35.0.0/apksigner',
+              'mobile-proxy/android-production/target-binding/v1',
+              'tb-hmac-sha256:',
               'android.package-signing-continuity-observer.v1',
               'SIGNING_CONTINUITY_PROVEN',
               'SIGNING_CONTINUITY_MISMATCH',
@@ -66,8 +73,11 @@ jobs:
               )
 
           forbidden = (
+              'ANDROID_TARGET_BINDING_KEY',
               'PINNED_CANONICAL_SHA',
               '20702dda4df3b539cac4402503f7a107a20ef38b',
+              'android-actions/setup-android@v',
+              'actions/setup-java@v',
               'adb install',
               'adb uninstall',
               'pm install',
@@ -81,15 +91,24 @@ jobs:
           present = [fragment for fragment in forbidden if fragment in text]
           if present:
               raise SystemExit(
-                  'phone-signing-identity read-only contract contains forbidden mutation/pinning: '
+                  'phone-signing-identity read-only contract contains forbidden mutation/pinning/secret dependency: '
                   + ', '.join(present)
               )
 
+          if text.count('build-tools;35.0.0') != 1:
+              raise SystemExit('signing observer must provision exactly one pinned Android build-tools package')
+          if text.count('build-tools/35.0.0/apksigner') != 1:
+              raise SystemExit('signing observer must resolve apksigner from the exact pinned build-tools path')
+          if 'shutil.which("apksigner")' in text or 'command -v apksigner' in text:
+              raise SystemExit('signing observer must not depend on ambient runner apksigner state')
+
           source_verify = text.index('Verify immutable canonical source before phone access')
-          tooling = text.index('Resolve existing apksigner tooling read-only')
+          java = text.index('Set up pinned JDK 17 for Android signing tools')
+          provision = text.index('Provision pinned Android build-tools for apksigner')
+          tooling = text.index('Resolve exact pinned apksigner tooling read-only')
           context = text.index('Derive bounded causal signing-observation context')
           observe = text.index('Observe installed signer continuity with exact canonical verifier')
-          if not (source_verify < tooling < context < observe):
+          if not (source_verify < java < provision < tooling < context < observe):
               raise SystemExit('signing observer ordering allows phone observation before source/tool/context admission')
 
           if text.count('uses: actions/upload-artifact@v4') < 2:
