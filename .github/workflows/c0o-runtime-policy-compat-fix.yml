@@ -1,0 +1,52 @@
+name: C.0o branch-only reconstruction policy compatibility fixer
+
+on:
+  push:
+    branches: [agent/c0o-command-plane-convergence]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out C.0o branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: agent/c0o-command-plane-convergence
+
+      - name: Replace only legacy reconstruction ingress assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/runtime-reconstruction-execution-policy.yml')
+          text = path.read_text(encoding='utf-8')
+          rules = (
+              ("'  issue_comment:', 'types: [created]'", "'  workflow_call:', '      control_request_id:'"),
+              ("'github.event.issue.number == 1'", "'inputs.source_issue_number == 1'"),
+              ("'github.event.comment.user.login == github.repository_owner'", "'inputs.source_actor == github.repository_owner'"),
+              ("\"startsWith(github.event.comment.body, '/runtime-reconstruction-execute ')\"", "\"startsWith(inputs.command, '/runtime-reconstruction-execute ')\""),
+          )
+          for old, new in rules:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one occurrence of {old!r}, found {count}')
+              text = text.replace(old, new)
+          path.write_text(text, encoding='utf-8')
+          print('C0O_RECONSTRUCTION_POLICY_COMPAT_OK')
+          PY
+
+      - name: Commit exact policy diff and attempt branch ref update
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/runtime-reconstruction-execution-policy.yml
+          git commit -m 'control: align reconstruction policy with routed inputs'
+          git push origin HEAD:agent/c0o-command-plane-convergence
