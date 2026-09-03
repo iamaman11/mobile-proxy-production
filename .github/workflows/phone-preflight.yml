@@ -634,22 +634,24 @@ jobs:
             const rawPersisted = process.env.RAW_EVIDENCE_PERSISTED === 'true';
             const promotedPersisted = process.env.PROMOTED_FACT_PERSISTED === 'true';
             const artifactPersisted = process.env.ARTIFACT_PERSISTED === 'true';
-            const accepted =
-              process.env.PHONE_JOB_RESULT === 'success' &&
-              phoneJob.conclusion === 'success' &&
-              probeAccepted &&
-              causalFactValidated &&
-              rawPersisted &&
-              promotedPersisted &&
-              artifactPersisted &&
-              rawArtifact !== null &&
-              promotedArtifact !== null;
-            const terminalState = accepted ? 'ACCEPTED' : probeAccepted ? 'UNKNOWN' : 'REFUSED';
-            const classification = accepted
+            const proven = probeAccepted && artifactPersisted;
+            const classification = proven
               ? 'PHONE_ACCESS_PROVEN'
               : probeAccepted
                 ? 'PHONE_ACCESS_OBSERVED_UNPERSISTED'
                 : 'PHONE_ACCESS_UNOBSERVED';
+            const routedJobConclusion = process.env.PHONE_JOB_RESULT;
+            const executionJobSucceeded = routedJobConclusion === 'success';
+            const accepted =
+              executionJobSucceeded &&
+              phoneJob.conclusion === 'success' &&
+              proven &&
+              causalFactValidated &&
+              rawPersisted &&
+              promotedPersisted &&
+              rawArtifact !== null &&
+              promotedArtifact !== null;
+            const terminalState = accepted ? 'ACCEPTED' : probeAccepted ? 'UNKNOWN' : 'REFUSED';
             const requestedCanonicalSha =
               Array.isArray(request.arguments) && /^[0-9a-f]{40}$/.test(request.arguments[0] || '')
                 ? request.arguments[0]
@@ -699,6 +701,9 @@ jobs:
               `- runner: \`${terminal.runner || 'unassigned'}\``,
               `- canonical_sha: \`${terminal.canonical_sha || 'unavailable'}\``,
               `- quality_run_id: \`${process.env.QUALITY_RUN_ID || 'unavailable'}\``,
+              `- phone_job_result: \`${process.env.PHONE_JOB_RESULT}\``,
+              `- probe_accepted: \`${probeAccepted}\``,
+              `- artifact_persisted: \`${process.env.ARTIFACT_PERSISTED || 'false'}\``,
               `- registered_device_match: \`${terminal.registered_device_match}\``,
               `- adb_state: \`${terminal.adb_state}\``,
               `- shell_probe: \`${terminal.shell_probe}\``,
