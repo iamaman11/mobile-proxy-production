@@ -26,13 +26,55 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import ast
+          import json
+          import re
           from pathlib import Path
 
-          workflow = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
-          router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
+          workflows = Path('.github/workflows')
+          workflow = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
+          router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
+          registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
           runtime = Path('.github/scripts/run_phone_release_deployment.py')
           adapter_path = Path('.github/controller/android_target.py')
           adapter = adapter_path.read_text(encoding='utf-8')
+
+          direct_ingress = sorted(
+              path.name
+              for path in workflows.glob('*.yml')
+              if re.search(r'(?m)^  issue_comment:\s*$', path.read_text(encoding='utf-8'))
+          )
+          if direct_ingress != ['production-control-router.yml']:
+              raise SystemExit('exactly one private Issue #1 ingress is required: ' + repr(direct_ingress))
+
+          deploy_routes = [
+              item for item in registry.get('routes', [])
+              if isinstance(item, dict)
+              and item.get('id') == 'deploy-product-release'
+              and item.get('enabled') is True
+          ]
+          if len(deploy_routes) != 1:
+              raise SystemExit('exactly one enabled deployment route is required')
+          deploy_contract = deploy_routes[0]
+          expected_contract = {
+              'handler': 'deployment',
+              'workflow': '.github/workflows/release-deployment.yml',
+              'ref': 'main',
+              'operation': 'deploy-product-release',
+              'operation_class': 'DEPLOY',
+              'read_only': False,
+              'destructive': True,
+              'allowed_targets': ['phone-production', 'vm-production'],
+              'semantic_identity_policy': 'existing-deployment-request-v2',
+              'idempotency_policy': 'durable-semantic-ledger',
+              'concurrency_domain': 'target-global-mutation',
+              'recovery_policy': 'UNKNOWN-read-only-reconcile-no-blind-retry',
+          }
+          for field, expected in expected_contract.items():
+              if deploy_contract.get(field) != expected:
+                  raise SystemExit(f'deployment route contract drifted: {field}')
+          expected_pattern = r'^/deploy (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\.[0-9]+\.[0-9]+)$'
+          if deploy_contract.get('pattern') != expected_pattern:
+              raise SystemExit('deployment route syntax drifted')
 
           required = (
               'runs-on: [self-hosted, Linux, X64, android-production]',
@@ -91,12 +133,28 @@ jobs:
           present = [item for item in legacy_routes if item in router]
           if present:
               raise SystemExit('legacy phone mutator remains reachable from production Issue #1: ' + ', '.join(present))
-          if "startsWith(github.event.comment.body, '/deploy ')" not in router:
-              raise SystemExit('Release deployment is not the sole v2 Issue #1 ingress')
+
+          router_required = (
+              "github.event.repository.full_name == 'iamaman11/mobile-proxy-production'",
+              'github.event.issue.number == 1',
+              'github.event.comment.user.login == github.repository_owner',
+              "needs.route.outputs.route_id == 'deploy-product-release'",
+              "needs.route.outputs.operation == 'deploy-product-release'",
+              "needs.route.outputs.destructive == 'true'",
+              'uses: ./.github/workflows/release-deployment.yml',
+              'secrets: inherit',
+          )
+          router_missing = [item for item in router_required if item not in router]
+          if router_missing:
+              raise SystemExit('registry-gated Release deployment route incomplete: ' + ', '.join(router_missing))
+          if "startsWith(github.event.comment.body, '/deploy ')" in router:
+              raise SystemExit('deployment bypassed the declarative command classifier')
 
           recovery = Path('.github/controller/deployment_state_machine.py').read_text(encoding='utf-8')
           if 'def recover_unknown' not in recovery or 'raise TransitionError("recovery is strictly read-only")' not in recovery:
               raise SystemExit('UNKNOWN recovery is not structurally read-only')
 
           print('CONTROLLER_OWNED_PHONE_MUTATION_POLICY_OK')
+          print('sole_issue_ingress=true')
+          print('deployment_registry_gate=true')
           PY
