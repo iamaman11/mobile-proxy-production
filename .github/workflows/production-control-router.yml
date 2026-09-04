@@ -19,12 +19,11 @@ jobs:
     outputs:
       route_id: ${{ steps.route.outputs.route_id }}
       handler: ${{ steps.route.outputs.handler }}
-      workflow: ${{ steps.route.outputs.workflow }}
-      ref: ${{ steps.route.outputs.ref }}
       operation: ${{ steps.route.outputs.operation }}
       operation_class: ${{ steps.route.outputs.operation_class }}
       read_only: ${{ steps.route.outputs.read_only }}
       destructive: ${{ steps.route.outputs.destructive }}
+      arguments_json: ${{ steps.route.outputs.arguments_json }}
       target: ${{ steps.route.outputs.target }}
       release_tag: ${{ steps.route.outputs.release_tag }}
       canonical_sha: ${{ steps.route.outputs.canonical_sha }}
@@ -130,39 +129,37 @@ jobs:
               body,
             });
 
-  observe-public-deployment-projection:
-    name: Dispatch the one allowlisted hosted public-projection observer
+  dispatch-hosted-read-only:
+    name: Dispatch one registry-allowlisted hosted read-only workflow
     needs: route
-    if: needs.route.outputs.route_id == 'observe-public-deployment-projection' && needs.route.outputs.read_only == 'true'
+    if: >-
+      needs.route.outputs.handler == 'dispatch_workflow' &&
+      needs.route.outputs.read_only == 'true' &&
+      needs.route.outputs.destructive == 'false'
     permissions:
       contents: read
       actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Revalidate exact current controller revision before dispatch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ROUTE_WORKFLOW: ${{ needs.route.outputs.workflow }}
-          ROUTE_REF: ${{ needs.route.outputs.ref }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$ROUTE_WORKFLOW" = '.github/workflows/public-deployment-projection-observer.yml'
-          test "$ROUTE_REF" = 'main'
-          current_main_sha="$(gh api --method GET \
-            repos/iamaman11/mobile-proxy-production/commits/main --jq '.sha')"
-          test "$current_main_sha" = "$GITHUB_SHA"
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Dispatch literal observer workflow on literal main ref
+      - name: Revalidate registry and dispatch without user-supplied workflow or ref
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ROUTE_ID: ${{ needs.route.outputs.route_id }}
+          ROUTE_ARGUMENTS_JSON: ${{ needs.route.outputs.arguments_json }}
         shell: bash
         run: |
           set -euo pipefail
-          gh api --method POST \
-            repos/iamaman11/mobile-proxy-production/actions/workflows/public-deployment-projection-observer.yml/dispatches \
-            -f ref=main
+          python3 .github/scripts/dispatch_allowlisted_workflow.py \
+            --route-id "$ROUTE_ID" \
+            --arguments-json "$ROUTE_ARGUMENTS_JSON" \
+            --expected-controller-sha "$GITHUB_SHA"
 
   android-build-tools-bootstrap:
     name: Route exact bounded Android Build Tools bootstrap contract
