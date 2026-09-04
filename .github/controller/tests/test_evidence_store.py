@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import sys
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -10,9 +12,11 @@ sys.path.insert(0, str(ROOT))
 from evidence_store import (  # noqa: E402
     EvidenceError,
     EvidenceRecord,
+    EvidenceTransportError,
     EvidenceWriteAmbiguous,
     INTENT_HEADING,
     IssueEvidenceStore,
+    READ_TRANSPORT_RETRY_DELAYS_SECONDS,
     TERMINAL_HEADING,
     evidence_identity,
 )
@@ -51,6 +55,17 @@ class FakeStore(IssueEvidenceStore):
         return record
 
 
+class FakeResponse:
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 def terminal_payload(*, state: str = "REFUSED") -> dict[str, object]:
     return {
         "schema": "production-deployment-terminal.v2",
@@ -66,6 +81,85 @@ def test_terminal_identity_is_deterministic() -> None:
     reordered = dict(reversed(list(first.items())))
     assert evidence_identity(TERMINAL_HEADING, first) == evidence_identity(TERMINAL_HEADING, reordered)
     assert evidence_identity(TERMINAL_HEADING, first) != evidence_identity(INTENT_HEADING, first)
+
+
+def test_transient_get_transport_failure_recovers_with_bounded_retry() -> None:
+    outcomes: list[object] = [
+        urllib.error.URLError("transient-1"),
+        urllib.error.URLError("transient-2"),
+        FakeResponse(),
+    ]
+
+    def fake_urlopen(*args, **kwargs):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    sleeps: list[float] = []
+    store = IssueEvidenceStore("test-token")
+    with patch("evidence_store.urllib.request.urlopen", side_effect=fake_urlopen) as opened:
+        with patch("evidence_store.time.sleep", side_effect=sleeps.append):
+            response = store._open("https://api.github.test/read")
+    assert isinstance(response, FakeResponse)
+    assert opened.call_count == 3
+    assert sleeps == list(READ_TRANSPORT_RETRY_DELAYS_SECONDS[:2])
+
+
+def test_exhausted_get_transport_retries_fail_closed() -> None:
+    sleeps: list[float] = []
+    store = IssueEvidenceStore("test-token")
+    with patch(
+        "evidence_store.urllib.request.urlopen",
+        side_effect=urllib.error.URLError("still-offline"),
+    ) as opened:
+        with patch("evidence_store.time.sleep", side_effect=sleeps.append):
+            try:
+                store._open("https://api.github.test/read")
+            except EvidenceTransportError as exc:
+                assert "transport failed" in str(exc)
+            else:
+                raise AssertionError("exhausted GET transport retries unexpectedly succeeded")
+    assert opened.call_count == len(READ_TRANSPORT_RETRY_DELAYS_SECONDS) + 1
+    assert sleeps == list(READ_TRANSPORT_RETRY_DELAYS_SECONDS)
+
+
+def test_http_rejection_is_not_retried() -> None:
+    store = IssueEvidenceStore("test-token")
+    error = urllib.error.HTTPError(
+        "https://api.github.test/read",
+        403,
+        "forbidden",
+        hdrs=None,
+        fp=None,
+    )
+    with patch("evidence_store.urllib.request.urlopen", side_effect=error) as opened:
+        with patch("evidence_store.time.sleep") as slept:
+            try:
+                store._open("https://api.github.test/read")
+            except EvidenceError as exc:
+                assert "HTTP 403" in str(exc)
+            else:
+                raise AssertionError("HTTP rejection unexpectedly succeeded")
+    assert opened.call_count == 1
+    slept.assert_not_called()
+
+
+def test_post_transport_ambiguity_is_not_blindly_retried_by_open() -> None:
+    store = IssueEvidenceStore("test-token")
+    with patch(
+        "evidence_store.urllib.request.urlopen",
+        side_effect=urllib.error.URLError("write-response-unknown"),
+    ) as opened:
+        with patch("evidence_store.time.sleep") as slept:
+            try:
+                store.create(TERMINAL_HEADING, terminal_payload())
+            except EvidenceWriteAmbiguous as exc:
+                assert "write outcome is ambiguous" in str(exc)
+            else:
+                raise AssertionError("ambiguous POST unexpectedly succeeded")
+    assert opened.call_count == 1
+    slept.assert_not_called()
 
 
 def test_normal_terminal_write_success() -> None:
