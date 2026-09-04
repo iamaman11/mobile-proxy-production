@@ -48,7 +48,7 @@ jobs:
               'ANDROID_BUILD_TOOLS_VERSION = "36.0.0"',
               'Path(".local/share/mobile-proxy/android-sdk")',
               'def resolve_android_build_tools(',
-              'build_tools / "aapt2"' if False else 'build_root / "aapt2"',
+              'build_root / "aapt2"',
               'build_root / "apksigner"',
               'tools = build_tools if build_tools is not None else resolve_android_build_tools()',
               '"build_tools_identity": tools.identity',
@@ -104,7 +104,9 @@ jobs:
           job_runner_lines = [line.strip() for line in workflow.splitlines() if line.startswith('    runs-on:')]
           if job_runner_lines != ['runs-on: ubuntu-latest']:
               raise SystemExit('code-only prerequisite acceptance must remain GitHub-hosted only')
-          if 'secrets.' in workflow or 'environment: phone-production' in workflow:
+          secret_reference_marker = 'secrets' + '.'
+          production_environment_marker = 'environment' + ': phone-production'
+          if secret_reference_marker in workflow or production_environment_marker in workflow:
               raise SystemExit('code-only prerequisite acceptance crossed production credential/environment boundary')
 
           print('DEPLOYMENT_PREREQUISITE_HARDENING_POLICY_OK')
