@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from evidence_store import (  # noqa: E402
+    ADMISSION_HEADING,
     EvidenceError,
     EvidenceRecord,
     EvidenceTransportError,
@@ -66,10 +67,33 @@ class FakeResponse:
         return False
 
 
+def request_id() -> str:
+    return "req-sha256:" + "a" * 64
+
+
+def admission_payload(*, execution_id: str = "gh-run:123:1", deployment_id: int = 77) -> dict[str, object]:
+    return {
+        "schema": "production-deployment-admission.v2",
+        "semantic_request_id": request_id(),
+        "execution_id": execution_id,
+        "controller_revision": "b" * 40,
+        "target": "phone-production",
+        "product_release": "v0.1.4",
+        "release_id": 382429107,
+        "release_source_sha": "c" * 40,
+        "artifact_digest": "b3:" + "d" * 64,
+        "deployment_id": deployment_id,
+        "initial_projection_state": "queued",
+        "mutation_authority": False,
+        "dispatch_authority": False,
+        "mutation_performed": False,
+    }
+
+
 def terminal_payload(*, state: str = "REFUSED") -> dict[str, object]:
     return {
         "schema": "production-deployment-terminal.v2",
-        "semantic_request_id": "req-sha256:" + "a" * 64,
+        "semantic_request_id": request_id(),
         "execution_id": "gh-run:123:1",
         "state": state,
         "mutation_performed": False,
@@ -160,6 +184,64 @@ def test_post_transport_ambiguity_is_not_blindly_retried_by_open() -> None:
                 raise AssertionError("ambiguous POST unexpectedly succeeded")
     assert opened.call_count == 1
     slept.assert_not_called()
+
+
+def test_admission_is_non_mutating_and_idempotent_for_one_execution() -> None:
+    store = FakeStore()
+    payload = admission_payload()
+    first = store.persist_admission(payload)
+    second = store.persist_admission(dict(payload))
+    assert first.comment_id == second.comment_id
+    assert first.heading == ADMISSION_HEADING
+    assert first.payload["mutation_authority"] is False
+    assert first.payload["dispatch_authority"] is False
+    assert store.create_calls == 1
+
+
+def test_admission_can_link_later_execution_to_same_public_deployment() -> None:
+    store = FakeStore()
+    first = store.persist_admission(admission_payload(execution_id="gh-run:123:1"))
+    second = store.persist_admission(admission_payload(execution_id="gh-run:124:1"))
+    reusable = store.reusable_admission(request_id())
+    assert first.comment_id != second.comment_id
+    assert reusable is not None
+    assert reusable.payload["deployment_id"] == 77
+    assert store.create_calls == 2
+
+
+def test_conflicting_admission_public_deployment_fails_closed() -> None:
+    store = FakeStore()
+    store.persist_admission(admission_payload(deployment_id=77))
+    try:
+        store.persist_admission(admission_payload(execution_id="gh-run:124:1", deployment_id=78))
+    except EvidenceError as exc:
+        assert "different public Deployment admission" in str(exc) or "conflicting durable deployment admissions" in str(exc)
+    else:
+        raise AssertionError("conflicting public Deployment admission was unexpectedly accepted")
+    assert store.create_calls == 1
+
+
+def test_admission_cannot_grant_dispatch_authority() -> None:
+    store = FakeStore()
+    payload = admission_payload()
+    payload["dispatch_authority"] = True
+    try:
+        store.persist_admission(payload)
+    except EvidenceError as exc:
+        assert "must not grant dispatch authority" in str(exc)
+    else:
+        raise AssertionError("dispatch-authorizing admission was unexpectedly accepted")
+    assert store.create_calls == 0
+
+
+def test_admission_response_loss_reconciles_without_duplicate_write() -> None:
+    store = FakeStore(create_outcomes=["response_loss"])
+    payload = admission_payload()
+    record = store.persist_admission(payload)
+    assert record.identity == evidence_identity(ADMISSION_HEADING, payload)
+    assert store.create_calls == 1
+    admissions = [item for item in store.records if item.heading == ADMISSION_HEADING]
+    assert len(admissions) == 1
 
 
 def test_normal_terminal_write_success() -> None:
