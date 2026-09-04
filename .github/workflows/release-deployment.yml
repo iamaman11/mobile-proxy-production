@@ -38,6 +38,7 @@ jobs:
       recovery_only: ${{ steps.admit.outputs.recovery_only }}
       admitted_release_json: ${{ steps.admit.outputs.admitted_release_json }}
       deployment_id: ${{ steps.admit.outputs.deployment_id }}
+      admission_ref: ${{ steps.admit.outputs.admission_ref }}
       canonical_terminal_ref: ${{ steps.admit.outputs.canonical_terminal_ref }}
     steps:
       - name: Check out exact controller revision
@@ -46,7 +47,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Resolve Release and create queued public Deployment
+      - name: Resolve Release, create/reuse public Deployment, and persist durable admission
         id: admit
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -147,6 +148,34 @@ jobs:
               raise SystemExit('ACCEPTED deployment projection differs')
           print('PHONE_RELEASE_DEPLOYMENT_ACCEPTED')
           PY
+
+  finalize-phone-projection:
+    name: Reconcile public Deployment projection from canonical private state
+    needs: [admit, execute-phone]
+    if: ${{ always() && needs.admit.outputs.admitted == 'true' && inputs.target == 'phone-production' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Reconcile projection without synthesizing canonical state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PUBLIC_DEPLOYMENTS_TOKEN: ${{ secrets.PUBLIC_DEPLOYMENTS_TOKEN }}
+          CONTROL_REQUEST_JSON: ${{ inputs.request_json }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+          TARGET_JOB_RESULT: ${{ needs.execute-phone.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/finalize_deployment_projection.py \
+            --request-json "$CONTROL_REQUEST_JSON" \
+            --execution-id "$EXECUTION_ID" \
+            --target-job-result "$TARGET_JOB_RESULT"
 
   refuse-vm-before-adapter:
     name: Keep VM target fail-closed until phone proof
