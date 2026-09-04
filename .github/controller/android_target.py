@@ -6,12 +6,14 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 _PACKAGE = "com.example.mobileproxy"
 _VERSION_CODE = re.compile(r"versionCode=([0-9]+)")
 _VERSION_NAME = re.compile(r"versionName=([^\s]+)")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 ANDROID_BUILD_TOOLS_VERSION = "36.0.0"
 _ANDROID_SDK_USER_RELATIVE_ROOT = Path(".local/share/mobile-proxy/android-sdk")
 
@@ -45,6 +47,8 @@ class AndroidObservation:
     version_name: str | None
     version_code: int | None
     desired: bool
+    artifact_sha256: str | None = None
+    exact_artifact_verified: bool = False
     mode: str = "read_only"
     raw_device_identifier_recorded: bool = False
 
@@ -138,17 +142,70 @@ def _adb_read(serial: str, arguments: list[str], *, timeout: int = 30) -> subpro
     return _run([adb, "-s", serial, *arguments], timeout=timeout)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise AndroidArtifactRefused("Android artifact bytes are unreadable") from exc
+    return digest.hexdigest()
+
+
+def verify_local_artifact_bytes(*, apk: Path, expected_sha256: str) -> str:
+    """Prove the local APK still equals the exact admitted Release asset bytes."""
+    if _SHA256.fullmatch(expected_sha256) is None:
+        raise AndroidArtifactRefused("Android Release transport digest is invalid")
+    if not apk.is_file() or apk.stat().st_size <= 0:
+        raise AndroidArtifactRefused("admitted Android artifact is unavailable")
+    actual = _sha256_file(apk)
+    if not hmac.compare_digest(actual, expected_sha256):
+        raise AndroidArtifactRefused("local Android artifact bytes differ from admitted Release")
+    return actual
+
+
+def _installed_apk_path(output: str) -> str | None:
+    paths: list[str] = []
+    for line in output.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        prefix, separator, path = value.partition(":")
+        if prefix != "package" or separator != ":" or not path.startswith("/"):
+            raise AndroidObservationUnavailable("installed APK path observation is invalid")
+        paths.append(path)
+    if not paths:
+        return None
+    if len(paths) != 1:
+        raise AndroidObservationUnavailable("installed APK path observation is ambiguous")
+    return paths[0]
+
+
 def observe(
     *,
     serial: str,
     binding_key: str,
     expected_version_name: str,
     expected_version_code: int,
+    expected_artifact_sha256: str,
 ) -> AndroidObservation:
+    if _SHA256.fullmatch(expected_artifact_sha256) is None:
+        raise AndroidObservationUnavailable("admitted Android artifact identity is invalid")
     binding = target_binding_id(serial, binding_key)
     package_path = _adb_read(serial, ["shell", "pm", "path", _PACKAGE])
-    output = package_path.stdout.strip()
-    if package_path.returncode != 0 or not output.startswith("package:"):
+    if package_path.returncode != 0:
+        return AndroidObservation(
+            target="phone-production",
+            target_binding_id=binding,
+            package_name=_PACKAGE,
+            installed=False,
+            version_name=None,
+            version_code=None,
+            desired=False,
+        )
+    remote_path = _installed_apk_path(package_path.stdout)
+    if remote_path is None:
         return AndroidObservation(
             target="phone-production",
             target_binding_id=binding,
@@ -167,6 +224,18 @@ def observe(
         raise AndroidObservationUnavailable("installed package version metadata is unavailable")
     code = int(code_match.group(1))
     name = name_match.group(1)
+
+    with tempfile.TemporaryDirectory(prefix="mobile-proxy-installed-apk-") as raw:
+        local = Path(raw) / "installed-base.apk"
+        pull = _adb_read(serial, ["pull", remote_path, str(local)], timeout=120)
+        if pull.returncode != 0 or not local.is_file() or local.stat().st_size <= 0:
+            raise AndroidObservationUnavailable("installed APK capture is unavailable")
+        try:
+            observed_sha256 = _sha256_file(local)
+        except AndroidArtifactRefused as exc:
+            raise AndroidObservationUnavailable("installed APK content observation failed") from exc
+
+    exact_artifact_verified = hmac.compare_digest(observed_sha256, expected_artifact_sha256)
     return AndroidObservation(
         target="phone-production",
         target_binding_id=binding,
@@ -174,7 +243,13 @@ def observe(
         installed=True,
         version_name=name,
         version_code=code,
-        desired=name == expected_version_name and code == expected_version_code,
+        desired=(
+            name == expected_version_name
+            and code == expected_version_code
+            and exact_artifact_verified
+        ),
+        artifact_sha256=observed_sha256,
+        exact_artifact_verified=exact_artifact_verified,
     )
 
 
@@ -186,11 +261,7 @@ def verify_artifact(
     expected_version_code: int,
     build_tools: AndroidBuildTools | None = None,
 ) -> dict[str, object]:
-    if not apk.is_file():
-        raise AndroidArtifactRefused("admitted Android artifact is unavailable")
-    actual = hashlib.sha256(apk.read_bytes()).hexdigest()
-    if actual != expected_sha256:
-        raise AndroidArtifactRefused("downloaded Android artifact digest differs")
+    actual = verify_local_artifact_bytes(apk=apk, expected_sha256=expected_sha256)
     tools = build_tools if build_tools is not None else resolve_android_build_tools()
     if tools.version != ANDROID_BUILD_TOOLS_VERSION:
         raise AndroidArtifactRefused("Android verifier build-tools identity differs")

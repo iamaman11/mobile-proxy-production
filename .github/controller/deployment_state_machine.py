@@ -86,6 +86,18 @@ def reduce_state(current: DeploymentState, event: str, *, reason: str | None = N
         if current.dispatch_attempted:
             raise TransitionError("dispatch already attempted before intent")
         return replace(current, state=DISPATCH, current_step=DISPATCH, intent_persisted=True)
+    if event == "dispatch_refused":
+        _only(current, DISPATCH)
+        if not current.intent_persisted or current.dispatch_attempted:
+            raise TransitionError("pre-dispatch refusal invariant violated")
+        return replace(
+            current,
+            state=REFUSED,
+            current_step=DISPATCH,
+            dispatch_attempted=False,
+            mutation_performed=False,
+            blocking_predicates=((reason or "dispatch_precondition_refused"),),
+        )
     if event == "dispatch_confirmed":
         _only(current, DISPATCH)
         if not current.intent_persisted or current.dispatch_attempted:
