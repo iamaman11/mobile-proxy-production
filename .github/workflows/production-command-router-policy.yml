@@ -36,10 +36,12 @@ jobs:
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
             .github/scripts/finalize_deployment_projection.py \
+            .github/scripts/observe_public_deployment_projection.py \
             .github/scripts/run_phone_release_deployment.py
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_evidence_store.py
           python3 .github/controller/tests/test_projection_reconciler.py
+          python3 .github/controller/tests/test_public_projection_observer.py
           python3 .github/controller/tests/test_release_resolver.py
 
       - name: Prove accepted public Product Release v0.1.4 resolves off-device
@@ -94,6 +96,7 @@ jobs:
               Path('.github/scripts/deployment_execution.py'),
               Path('.github/scripts/prepare_release_deployment.py'),
               Path('.github/scripts/finalize_deployment_projection.py'),
+              Path('.github/scripts/observe_public_deployment_projection.py'),
               Path('.github/scripts/run_phone_release_deployment.py'),
           ]
 
@@ -173,6 +176,30 @@ jobs:
           for required in ('## DEPLOYMENT ADMISSION V2', 'mutation_authority', 'dispatch_authority', 'persist_admission'):
               if required not in admission_source:
                   raise SystemExit('durable non-mutation admission contract incomplete: ' + required)
+
+          observer_workflow = (workflows / 'public-deployment-projection-observer.yml').read_text(encoding='utf-8')
+          observer_script = Path('.github/scripts/observe_public_deployment_projection.py').read_text(encoding='utf-8')
+          observer_required = (
+              'workflow_dispatch:',
+              'if: github.actor == github.repository_owner',
+              'runs-on: ubuntu-latest',
+              'contents: read',
+              'PUBLIC_DEPLOYMENTS_TOKEN',
+              '.github/scripts/observe_public_deployment_projection.py',
+          )
+          missing_observer = [item for item in observer_required if item not in observer_workflow]
+          if missing_observer:
+              raise SystemExit('hosted public projection observer contract incomplete: ' + ', '.join(missing_observer))
+          forbidden_observer_workflow = ('self-hosted', 'android-production', 'issue_comment:', '/deploy ', 'issues: write', 'deployments: write', 'adb ')
+          present_observer_workflow = [item for item in forbidden_observer_workflow if item in observer_workflow]
+          if present_observer_workflow:
+              raise SystemExit('hosted public projection observer workflow gained forbidden capability: ' + ', '.join(present_observer_workflow))
+          forbidden_observer_script = ('.create(', '.status(', 'IssueEvidenceStore', 'persist_terminal(', 'persist_intent(', 'persist_admission(', 'dispatch_install_once(', 'android_target', 'subprocess')
+          present_observer_script = [item for item in forbidden_observer_script if item in observer_script]
+          if present_observer_script:
+              raise SystemExit('hosted public projection observer script gained write/physical capability: ' + ', '.join(present_observer_script))
+          if 'projection.find_exact(' not in observer_script:
+              raise SystemExit('hosted public projection observer does not use exact read-only projection lookup')
 
           run_path = Path('.github/scripts/run_phone_release_deployment.py')
           tree = ast.parse(run_path.read_text(encoding='utf-8'))
