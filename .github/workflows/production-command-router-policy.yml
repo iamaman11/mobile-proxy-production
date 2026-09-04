@@ -35,9 +35,11 @@ jobs:
             .github/scripts/deployment_command_router.py \
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
+            .github/scripts/finalize_deployment_projection.py \
             .github/scripts/run_phone_release_deployment.py
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_evidence_store.py
+          python3 .github/controller/tests/test_projection_reconciler.py
           python3 .github/controller/tests/test_release_resolver.py
 
       - name: Prove accepted public Product Release v0.1.4 resolves off-device
@@ -91,6 +93,7 @@ jobs:
               Path('.github/scripts/deployment_command_router.py'),
               Path('.github/scripts/deployment_execution.py'),
               Path('.github/scripts/prepare_release_deployment.py'),
+              Path('.github/scripts/finalize_deployment_projection.py'),
               Path('.github/scripts/run_phone_release_deployment.py'),
           ]
 
@@ -138,6 +141,37 @@ jobs:
               raise SystemExit('phone target global mutation serialization is missing')
           if 'runs-on: [self-hosted, Linux, X64, android-production]' not in deployment:
               raise SystemExit('Android physical adapter is not confined to registered target runner')
+
+          projection_required = (
+              'admission_ref:',
+              'persist durable admission',
+              'finalize-phone-projection:',
+              'needs: [admit, execute-phone]',
+              'always() && needs.admit.outputs.admitted',
+              'runs-on: ubuntu-latest',
+              '.github/scripts/finalize_deployment_projection.py',
+              'TARGET_JOB_RESULT: ${{ needs.execute-phone.result }}',
+          )
+          missing_projection = [item for item in projection_required if item not in deployment]
+          if missing_projection:
+              raise SystemExit('durable public projection lifecycle contract incomplete: ' + ', '.join(missing_projection))
+
+          finalizer = Path('.github/controller/projection_reconciler.py').read_text(encoding='utf-8')
+          if 'state="error"' not in finalizer or 'canonical_terminal=False' not in finalizer:
+              raise SystemExit('pre-terminal projection finalizer does not fail closed to public error')
+          if 'payload.get("state") != "ACCEPTED"' not in finalizer:
+              raise SystemExit('public success is not guarded by canonical ACCEPTED terminal')
+          if 'projection.status(' not in finalizer:
+              raise SystemExit('public projection reconciler status call is missing')
+          forbidden_finalizer = ('persist_terminal(', 'persist_intent(', 'persist_admission(', 'dispatch_install_once(', 'observe(')
+          present_finalizer = [item for item in forbidden_finalizer if item in finalizer]
+          if present_finalizer:
+              raise SystemExit('hosted projection finalizer can mutate canonical/physical state: ' + ', '.join(present_finalizer))
+
+          admission_source = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
+          for required in ('## DEPLOYMENT ADMISSION V2', 'mutation_authority', 'dispatch_authority', 'persist_admission'):
+              if required not in admission_source:
+                  raise SystemExit('durable non-mutation admission contract incomplete: ' + required)
 
           run_path = Path('.github/scripts/run_phone_release_deployment.py')
           tree = ast.parse(run_path.read_text(encoding='utf-8'))
