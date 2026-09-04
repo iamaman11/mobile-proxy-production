@@ -174,16 +174,11 @@ def main() -> int:
 
     try:
         projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
-        deployment_id = projection.create(
+        deployment_id, _reused = projection.reconcile_or_create(
             source_sha=identity.source_sha,
             environment=str(request["target"]),
             release_tag=identity.tag,
             release_id=identity.release_id,
-        )
-        projection.status(
-            deployment_id=deployment_id,
-            state="queued",
-            description=f"{identity.tag} admitted by production controller",
         )
     except ProjectionError as exc:
         state = reduce_state(state, "authorize_refused", reason=str(exc))
