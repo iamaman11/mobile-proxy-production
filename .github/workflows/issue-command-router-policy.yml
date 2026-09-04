@@ -1,0 +1,29 @@
+name: Issue command router policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-issue-command-router:
+    name: Validate bounded Issue #1 workflow dispatch boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private deployment controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run pure allowlist and non-mutation policy tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/issue_command_router.py \
+            .github/controller/tests/test_issue_command_router.py
+          python3 .github/controller/tests/test_issue_command_router.py

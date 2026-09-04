@@ -33,12 +33,14 @@ jobs:
             .github/controller/*.py \
             .github/controller/tests/*.py \
             .github/scripts/deployment_command_router.py \
+            .github/scripts/issue_command_router.py \
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
             .github/scripts/finalize_deployment_projection.py \
             .github/scripts/run_phone_release_deployment.py
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_evidence_store.py
+          python3 .github/controller/tests/test_issue_command_router.py
           python3 .github/controller/tests/test_projection_reconciler.py
           python3 .github/controller/tests/test_release_resolver.py
 
@@ -102,8 +104,8 @@ jobs:
               for path in workflows.glob('*.yml')
               if re.search(r'(?m)^  issue_comment:\s*$', path.read_text(encoding='utf-8'))
           )
-          if direct_ingress != ['production-control-router.yml']:
-              raise SystemExit('exactly one private Issue command ingress is required: ' + repr(direct_ingress))
+          if direct_ingress != ['issue-command-router.yml', 'production-control-router.yml']:
+              raise SystemExit('exactly two bounded private Issue command ingresses are required: ' + repr(direct_ingress))
 
           required_router = (
               "github.event.issue.number == 1",

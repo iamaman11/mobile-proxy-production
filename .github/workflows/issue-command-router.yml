@@ -1,0 +1,55 @@
+name: Issue #1 bounded command router
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: read
+  actions: write
+
+jobs:
+  route-observe-public-deployment-projection:
+    name: Dispatch one allowlisted read-only observer
+    if: github.event.repository.full_name == 'iamaman11/mobile-proxy-production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out comment-event private revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Admit exact command only if private main has not drifted
+        id: route
+        env:
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_AUTHOR: ${{ github.event.comment.user.login }}
+          EVENT_COMMAND: ${{ github.event.comment.body }}
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_main_sha="$(gh api --method GET \
+            repos/iamaman11/mobile-proxy-production/commits/main --jq '.sha')"
+          python3 .github/scripts/issue_command_router.py \
+            --repository "$EVENT_REPOSITORY" \
+            --issue-number "$EVENT_ISSUE_NUMBER" \
+            --author "$EVENT_AUTHOR" \
+            --command "$EVENT_COMMAND" \
+            --event-sha "$EVENT_SHA" \
+            --current-main-sha "$current_main_sha"
+
+      - name: Dispatch exact observer on authoritative main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            repos/iamaman11/mobile-proxy-production/actions/workflows/public-deployment-projection-observer.yml/dispatches \
+            -f ref=main
