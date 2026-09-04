@@ -81,13 +81,14 @@ jobs:
       CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
       ANDROID_BUILD_TOOLS_VERSION: '36.0.0'
       ANDROID_BUILD_TOOLS_ARCHIVE_URL: 'https://dl.google.com/android/repository/build-tools_r36_linux.zip'
+      ANDROID_BUILD_TOOLS_ARCHIVE_SHA1: 'b0b6376977657e8ad9b969bacf4093601da2c6fb'
       ANDROID_BUILD_TOOLS_ARCHIVE_SHA256: '5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b'
     steps:
       - name: Fail closed unless bounded user-local bootstrap prerequisites are available
         shell: bash
         run: |
           set -euo pipefail
-          for tool in curl sha256sum python3 java diff cp mv; do
+          for tool in curl sha1sum sha256sum python3 java diff cp mv; do
             command -v "$tool" >/dev/null 2>&1 || {
               echo "required runner bootstrap prerequisite unavailable: $tool" >&2
               exit 1
@@ -122,6 +123,7 @@ jobs:
           curl --fail --location --silent --show-error \
             --proto '=https' --tlsv1.2 \
             "$ANDROID_BUILD_TOOLS_ARCHIVE_URL" -o "$archive"
+          printf '%s  %s\n' "$ANDROID_BUILD_TOOLS_ARCHIVE_SHA1" "$archive" | sha1sum -c -
           printf '%s  %s\n' "$ANDROID_BUILD_TOOLS_ARCHIVE_SHA256" "$archive" | sha256sum -c -
           ARCHIVE="$archive" STAGING="$staging" python3 - <<'PY'
           import json
@@ -171,6 +173,7 @@ jobs:
               staging / 'apksigner',
               staging / 'lib' / 'apksigner.jar',
               staging / 'NOTICE.txt',
+              staging / 'source.properties',
           )
           if any(not path.is_file() for path in required):
               raise SystemExit('Android Build Tools archive lacks required verifier files')
@@ -184,6 +187,7 @@ jobs:
               'tooling': 'android-build-tools',
               'version': os.environ['ANDROID_BUILD_TOOLS_VERSION'],
               'archive_url': os.environ['ANDROID_BUILD_TOOLS_ARCHIVE_URL'],
+              'archive_sha1': os.environ['ANDROID_BUILD_TOOLS_ARCHIVE_SHA1'],
               'archive_sha256': os.environ['ANDROID_BUILD_TOOLS_ARCHIVE_SHA256'],
           }
           (staging / '.mobile-proxy-source.json').write_text(
@@ -195,6 +199,7 @@ jobs:
           printf 'ANDROID_BUILD_TOOLS_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
           echo 'android_build_tools_archive_verified=true'
           echo 'official_distribution=true'
+          echo 'official_repository_sha1_verified=true'
           echo 'archive_sha256_verified=true'
           echo 'phone_access=false'
 
@@ -208,8 +213,8 @@ jobs:
           case "$install_stage" in "${parent}/."*) ;; *) echo 'Android Build Tools install stage escaped parent' >&2; exit 1 ;; esac
           mkdir -p "$parent"
           test ! -e "$install_stage"
-          cp -a "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage"
           printf 'ANDROID_BUILD_TOOLS_INSTALL_STAGING=%s\n' "$install_stage" >> "$GITHUB_ENV"
+          cp -a "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage"
           diff -qr "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage" >/dev/null
           if [ -e "$ANDROID_BUILD_TOOLS_DIR" ]; then
             test -d "$ANDROID_BUILD_TOOLS_DIR"
@@ -242,21 +247,34 @@ jobs:
           test -x "$ANDROID_BUILD_TOOLS_DIR/apksigner"
           test -f "$ANDROID_BUILD_TOOLS_DIR/lib/apksigner.jar"
           test -f "$ANDROID_BUILD_TOOLS_DIR/NOTICE.txt"
+          test -f "$ANDROID_BUILD_TOOLS_DIR/source.properties"
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          marker = json.loads((Path(os.environ['ANDROID_BUILD_TOOLS_DIR']) / '.mobile-proxy-source.json').read_text(encoding='utf-8'))
+          root = Path(os.environ['ANDROID_BUILD_TOOLS_DIR'])
+          marker = json.loads((root / '.mobile-proxy-source.json').read_text(encoding='utf-8'))
           expected = {
               'schema': 'mobile-proxy-runner-tooling.v1',
               'tooling': 'android-build-tools',
               'version': '36.0.0',
               'archive_url': 'https://dl.google.com/android/repository/build-tools_r36_linux.zip',
+              'archive_sha1': 'b0b6376977657e8ad9b969bacf4093601da2c6fb',
               'archive_sha256': '5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b',
           }
           if marker != expected:
               raise SystemExit('persisted Android Build Tools source marker differs')
+
+          properties = {}
+          for raw in (root / 'source.properties').read_text(encoding='utf-8').splitlines():
+              line = raw.strip()
+              if not line or line.startswith('#') or '=' not in line:
+                  continue
+              key, value = line.split('=', 1)
+              properties[key.strip()] = value.strip()
+          if properties.get('Pkg.Revision') != '36.0.0':
+              raise SystemExit('persisted Android Build Tools package revision differs')
           PY
           "$ANDROID_BUILD_TOOLS_DIR/aapt2" version >/dev/null
           "$ANDROID_BUILD_TOOLS_DIR/apksigner" version >/dev/null
@@ -284,7 +302,7 @@ jobs:
             case "$ANDROID_BUILD_TOOLS_STAGING" in "${RUNNER_TEMP}/"*) rm -rf "$ANDROID_BUILD_TOOLS_STAGING" ;; *) exit 1 ;; esac
           fi
           if [ -n "${ANDROID_BUILD_TOOLS_INSTALL_STAGING:-}" ] && [ -e "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" ]; then
-            expected_prefix="${HOME}/.local/share/mobile-proxy/android-sdk/build-tools/.36.0.0.stage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            test "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" = "$expected_prefix"
+            expected_stage="${HOME}/.local/share/mobile-proxy/android-sdk/build-tools/.36.0.0.stage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" = "$expected_stage"
             rm -rf "$ANDROID_BUILD_TOOLS_INSTALL_STAGING"
           fi
