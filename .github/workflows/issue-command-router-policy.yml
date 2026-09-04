@@ -126,9 +126,15 @@ jobs:
           missing = [item for item in required_router if item not in router]
           if missing:
               raise SystemExit('sole router contract incomplete: ' + ', '.join(missing))
+          expression_open = '$' + '{{'
           forbidden_router = (
-              'actions/workflows/${{', '-f ref=${{', 'secrets.',
-              'runs-on: [self-hosted', ' adb ', 'authority_cursor', 'issue179-comment-',
+              'actions/workflows/' + expression_open,
+              '-f ref=' + expression_open,
+              'secrets.',
+              'runs-on: [self-hosted',
+              ' adb ',
+              'authority_cursor',
+              'issue179-comment-',
           )
           present = [item for item in forbidden_router if item in router]
           if present:
