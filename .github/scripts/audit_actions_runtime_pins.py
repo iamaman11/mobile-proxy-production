@@ -4,11 +4,14 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 WORKFLOWS = Path('.github/workflows')
 REGISTRY = Path('.github/production/command-control-registry.json')
+NONAUTHORITY_CLASSIFICATION = Path(
+    '.github/production/non-authority-action-runtime-classification.json'
+)
 
 # Exact immutable action commits independently verified to declare
 # runs.using=node24 in upstream action metadata. Multiple immutable Node24
@@ -33,12 +36,26 @@ APPROVED_NODE24_PINS = {
     },
 }
 
+ALLOWED_NONAUTHORITY_CLASSES = {
+    'retired/historical',
+    'rehearsal-only',
+    'independently manual/diagnostic',
+}
+EXPECTED_STARTING_INVENTORY = {
+    'source_stage': '2AF',
+    'source_private_main': '92413eab76503fbc440964031a829c9914ab975a',
+    'source_scanner_run_id': 33925743186,
+    'source_scanner_job_id': 101193752503,
+    'workflow_count': 23,
+    'legacy_action_ref_count': 86,
+}
+
 USES_RE = re.compile(
-    r'^\s*(?:-\s*)?uses:\s*["\']?(?P<action>actions/[A-Za-z0-9_.-]+)@(?P<ref>[^\s#"\']+)',
+    r"^\s*(?:-\s*)?uses:\s*[\"']?(?P<action>actions/[A-Za-z0-9_.-]+)@(?P<ref>[^\s#\"']+)",
     re.MULTILINE,
 )
 LOCAL_WORKFLOW_RE = re.compile(
-    r'^\s*(?:-\s*)?uses:\s*["\']?(?P<path>\./\.github/workflows/[^\s#"\']+)',
+    r"^\s*(?:-\s*)?uses:\s*[\"']?(?P<path>\./\.github/workflows/[^\s#\"']+)",
     re.MULTILINE,
 )
 POLICY_TRIGGER_RE = re.compile(r'(?m)^  (?:push|pull_request):(?:\s|$)')
@@ -104,6 +121,70 @@ def current_authority_workflows(paths: list[Path], texts: dict[Path, str]) -> se
     return authority
 
 
+def load_nonauthority_classification(
+    path_by_posix: dict[str, Path],
+) -> tuple[dict[str, dict[str, object]], dict[str, Counter[str]]]:
+    if not NONAUTHORITY_CLASSIFICATION.is_file():
+        raise SystemExit('non-authority Action runtime classification missing')
+
+    try:
+        document = json.loads(NONAUTHORITY_CLASSIFICATION.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f'non-authority Action runtime classification is invalid JSON: {error}') from error
+
+    if document.get('schema') != 'non-authority-action-runtime-classification.v1':
+        raise SystemExit('non-authority Action runtime classification schema mismatch')
+    if document.get('starting_inventory') != EXPECTED_STARTING_INVENTORY:
+        raise SystemExit('Stage 2AF non-authority starting inventory metadata mismatch')
+
+    entries = document.get('workflows')
+    if not isinstance(entries, dict):
+        raise SystemExit('non-authority Action runtime classifications are unavailable')
+
+    by_path: dict[str, dict[str, object]] = {}
+    baseline_refs_by_path: dict[str, Counter[str]] = {}
+    for workflow, entry in entries.items():
+        if not isinstance(workflow, str) or workflow not in path_by_posix:
+            raise SystemExit(f'classified non-authority workflow missing from repository: {workflow!r}')
+        if not isinstance(entry, dict):
+            raise SystemExit(f'classification for {workflow} must be an object')
+        classification = entry.get('classification')
+        baseline_refs = entry.get('stage_2af_legacy_refs')
+        rationale = entry.get('rationale')
+        if classification not in ALLOWED_NONAUTHORITY_CLASSES:
+            raise SystemExit(
+                f'invalid non-authority workflow classification for {workflow}: {classification!r}'
+            )
+        if not isinstance(baseline_refs, dict) or not baseline_refs:
+            raise SystemExit(f'Stage 2AF legacy Action refs missing for {workflow}')
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise SystemExit(f'non-authority workflow rationale missing: {workflow}')
+
+        counter: Counter[str] = Counter()
+        for ref, count in baseline_refs.items():
+            if not isinstance(ref, str) or not ref.startswith('actions/') or '@' not in ref:
+                raise SystemExit(f'invalid Stage 2AF legacy Action ref for {workflow}: {ref!r}')
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                raise SystemExit(
+                    f'invalid Stage 2AF legacy Action ref count for {workflow}: {count!r}'
+                )
+            counter[ref] = count
+
+        by_path[workflow] = entry
+        baseline_refs_by_path[workflow] = counter
+
+    if len(by_path) != EXPECTED_STARTING_INVENTORY['workflow_count']:
+        raise SystemExit(
+            'non-authority classified workflow count differs from Stage 2AF starting inventory'
+        )
+    baseline_total = sum(sum(counter.values()) for counter in baseline_refs_by_path.values())
+    if baseline_total != EXPECTED_STARTING_INVENTORY['legacy_action_ref_count']:
+        raise SystemExit(
+            'classified Stage 2AF legacy Action refs differ from the exact starting inventory'
+        )
+    return by_path, baseline_refs_by_path
+
+
 def main() -> int:
     if not WORKFLOWS.is_dir():
         print('workflow directory missing', file=sys.stderr)
@@ -114,11 +195,16 @@ def main() -> int:
 
     paths = sorted([*WORKFLOWS.glob('*.yml'), *WORKFLOWS.glob('*.yaml')])
     texts = {path: path.read_text(encoding='utf-8') for path in paths}
+    path_by_posix = {path.as_posix(): path for path in paths}
     authority = current_authority_workflows(paths, texts)
+    classification_by_path, baseline_refs_by_path = load_nonauthority_classification(
+        path_by_posix
+    )
 
     inventory: list[tuple[Path, int, str, str]] = []
     authority_violations: list[str] = []
     nonauthority_debt: list[str] = []
+    nonauthority_debt_refs_by_path: dict[str, Counter[str]] = defaultdict(Counter)
 
     for path in paths:
         text = texts[path]
@@ -135,6 +221,52 @@ def main() -> int:
                 authority_violations.append(record)
             else:
                 nonauthority_debt.append(record)
+                nonauthority_debt_refs_by_path[path.as_posix()][f'{action}@{ref}'] += 1
+
+    classification_violations: list[str] = []
+    authority_paths = {path.as_posix() for path in authority}
+    classified_paths = set(classification_by_path)
+    current_debt_paths = {
+        workflow for workflow, refs in nonauthority_debt_refs_by_path.items() if refs
+    }
+
+    # Classified legacy workflows are a fail-closed admission boundary: none may
+    # silently enter the current Issue #1/current-authority closure.
+    for workflow in sorted(classified_paths & authority_paths):
+        classification_violations.append(
+            f'classified non-authority workflow entered current authority: {workflow}'
+        )
+
+    # New non-authority legacy debt must be classified explicitly.
+    for workflow in sorted(current_debt_paths - classified_paths):
+        classification_violations.append(
+            f'non-authority legacy Action debt lacks classification: {workflow}'
+        )
+
+    # Stage 2AF is the immutable upper bound. Targeted future remediation may
+    # remove old refs, but no new legacy ref or occurrence may be added silently.
+    for workflow in sorted(classified_paths):
+        baseline = baseline_refs_by_path[workflow]
+        current = nonauthority_debt_refs_by_path.get(workflow, Counter())
+        for ref, count in sorted(current.items()):
+            baseline_count = baseline.get(ref, 0)
+            if count > baseline_count:
+                classification_violations.append(
+                    f'classified legacy Action debt expanded for {workflow}: '
+                    f'{ref} baseline={baseline_count} current={count}'
+                )
+
+    class_workflows = Counter(
+        str(entry['classification']) for entry in classification_by_path.values()
+    )
+    class_baseline_debt: Counter[str] = Counter()
+    class_current_debt: Counter[str] = Counter()
+    for workflow, entry in classification_by_path.items():
+        classification = str(entry['classification'])
+        class_baseline_debt[classification] += sum(baseline_refs_by_path[workflow].values())
+        class_current_debt[classification] += sum(
+            nonauthority_debt_refs_by_path.get(workflow, Counter()).values()
+        )
 
     counts = Counter(action for _, _, action, _ in inventory)
     authority_refs = sum(1 for path, _, _, _ in inventory if path in authority)
@@ -157,18 +289,51 @@ def main() -> int:
     for item in nonauthority_debt:
         print(f'NONAUTHORITY_DEBT {item}')
 
-    if authority_violations:
+    print(
+        'ACTION_RUNTIME_NONAUTHORITY_CLASSIFICATION '
+        f'workflows={len(classification_by_path)} '
+        f"baseline_debt={EXPECTED_STARTING_INVENTORY['legacy_action_ref_count']} "
+        f'current_debt={len(nonauthority_debt)} '
+        f"retired_historical_workflows={class_workflows['retired/historical']} "
+        f"retired_historical_baseline_refs={class_baseline_debt['retired/historical']} "
+        f"retired_historical_current_refs={class_current_debt['retired/historical']} "
+        f"rehearsal_only_workflows={class_workflows['rehearsal-only']} "
+        f"rehearsal_only_baseline_refs={class_baseline_debt['rehearsal-only']} "
+        f"rehearsal_only_current_refs={class_current_debt['rehearsal-only']} "
+        'independently_manual_diagnostic_workflows='
+        f"{class_workflows['independently manual/diagnostic']} "
+        'independently_manual_diagnostic_baseline_refs='
+        f"{class_baseline_debt['independently manual/diagnostic']} "
+        'independently_manual_diagnostic_current_refs='
+        f"{class_current_debt['independently manual/diagnostic']}"
+    )
+    for workflow in sorted(classification_by_path):
+        entry = classification_by_path[workflow]
         print(
-            f'ACTION_RUNTIME_PIN_AUDIT_FAIL authority_violations={len(authority_violations)}',
+            'ACTION_RUNTIME_NONAUTHORITY_WORKFLOW '
+            f"classification={entry['classification']} path={workflow} "
+            f'baseline_legacy_refs={sum(baseline_refs_by_path[workflow].values())} '
+            f'current_legacy_refs={sum(nonauthority_debt_refs_by_path.get(workflow, Counter()).values())} '
+            f'current_authority={str(workflow in authority_paths).lower()}'
+        )
+
+    if authority_violations or classification_violations:
+        print(
+            'ACTION_RUNTIME_PIN_AUDIT_FAIL '
+            f'authority_violations={len(authority_violations)} '
+            f'classification_violations={len(classification_violations)}',
             file=sys.stderr,
         )
         for violation in authority_violations:
             print(f'AUTHORITY_VIOLATION {violation}', file=sys.stderr)
+        for violation in classification_violations:
+            print(f'CLASSIFICATION_VIOLATION {violation}', file=sys.stderr)
         return 1
 
     print(
         'ACTION_RUNTIME_PIN_AUDIT_OK '
-        f'authority_refs={authority_refs} nonauthority_debt={len(nonauthority_debt)}'
+        f'authority_refs={authority_refs} nonauthority_debt={len(nonauthority_debt)} '
+        f'classified_nonauthority_workflows={len(classification_by_path)}'
     )
     return 0
 
