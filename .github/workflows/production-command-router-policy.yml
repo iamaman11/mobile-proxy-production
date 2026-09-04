@@ -38,6 +38,7 @@ jobs:
             .github/scripts/run_phone_release_deployment.py
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_release_resolver.py
+          python3 .github/controller/tests/test_evidence_store.py
 
       - name: Prove accepted public Product Release v0.1.4 resolves off-device
         shell: bash
