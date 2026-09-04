@@ -13,7 +13,7 @@ sys.path.insert(0, str(CONTROLLER))
 
 from deployment_request import validate_deployment_request  # noqa: E402
 from deployment_state_machine import DeploymentState, reduce_state  # noqa: E402
-from evidence_store import IssueEvidenceStore  # noqa: E402
+from evidence_store import EvidenceError, IssueEvidenceStore  # noqa: E402
 from github_projection import ProjectionError, PublicDeploymentProjection  # noqa: E402
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
 from terminal_result import DeploymentTerminal, validate_terminal  # noqa: E402
@@ -75,6 +75,33 @@ def _pre_release_refusal(*, request: dict[str, object], execution_id: str, contr
     return terminal
 
 
+def _admission_payload(
+    *,
+    request: dict[str, object],
+    execution_id: str,
+    controller_revision: str,
+    admitted: object,
+    deployment_id: int,
+) -> dict[str, object]:
+    identity = admitted.identity
+    return {
+        "schema": "production-deployment-admission.v2",
+        "semantic_request_id": request["request_id"],
+        "execution_id": execution_id,
+        "controller_revision": controller_revision,
+        "target": request["target"],
+        "product_release": identity.tag,
+        "release_id": identity.release_id,
+        "release_source_sha": identity.source_sha,
+        "artifact_digest": identity.artifact_digest,
+        "deployment_id": deployment_id,
+        "initial_projection_state": "queued",
+        "mutation_authority": False,
+        "dispatch_authority": False,
+        "mutation_performed": False,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request-json", required=True)
@@ -108,6 +135,7 @@ def main() -> int:
         _output("duplicate", True)
         _output("recovery_only", False)
         _output("canonical_terminal_ref", existing_terminal.ref)
+        _output("admission_ref", "")
         return 0
 
     # VM support is deliberately not prebuilt. Until the Android controller path is
@@ -125,6 +153,7 @@ def main() -> int:
         _output("duplicate", False)
         _output("recovery_only", False)
         _output("canonical_terminal_ref", record.ref)
+        _output("admission_ref", "")
         return 0
 
     state = reduce_state(DeploymentState(), "request_received")
@@ -145,6 +174,7 @@ def main() -> int:
         _output("duplicate", False)
         _output("recovery_only", False)
         _output("canonical_terminal_ref", record.ref)
+        _output("admission_ref", "")
         return 0
 
     admitted_payload = admitted.to_dict()
@@ -164,27 +194,52 @@ def main() -> int:
         deployment_id = payload.get("deployment_id")
         if not isinstance(deployment_id, int) or deployment_id <= 0:
             raise SystemExit("existing mutation intent lacks public Deployment id")
+        admission = evidence.reusable_admission(str(request["request_id"]))
         _output("admitted", True)
         _output("duplicate", False)
         _output("recovery_only", True)
         _output("admitted_release_json", admitted_payload)
         _output("deployment_id", deployment_id)
         _output("canonical_terminal_ref", "")
+        _output("admission_ref", admission.ref if admission is not None else "")
         return 0
 
+    projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
+    deployment_id: int | None = None
+    reusable = evidence.reusable_admission(str(request["request_id"]))
     try:
-        projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
-        deployment_id = projection.create(
-            source_sha=identity.source_sha,
-            environment=str(request["target"]),
-            release_tag=identity.tag,
-            release_id=identity.release_id,
-        )
-        projection.status(
-            deployment_id=deployment_id,
-            state="queued",
-            description=f"{identity.tag} admitted by production controller",
-        )
+        if reusable is not None:
+            reusable_payload = reusable.payload
+            exact = (
+                reusable_payload.get("product_release") == identity.tag
+                and reusable_payload.get("release_id") == identity.release_id
+                and reusable_payload.get("release_source_sha") == identity.source_sha
+                and reusable_payload.get("artifact_digest") == identity.artifact_digest
+                and reusable_payload.get("target") == request["target"]
+            )
+            if not exact:
+                raise SystemExit("durable deployment admission conflicts with current immutable Release identity")
+            candidate_id = reusable_payload.get("deployment_id")
+            if not isinstance(candidate_id, int) or candidate_id <= 0:
+                raise SystemExit("durable deployment admission lacks public Deployment id")
+            deployment_id = candidate_id
+            projection.status(
+                deployment_id=deployment_id,
+                state="queued",
+                description=f"{identity.tag} readmitted by production controller",
+            )
+        else:
+            deployment_id = projection.create(
+                source_sha=identity.source_sha,
+                environment=str(request["target"]),
+                release_tag=identity.tag,
+                release_id=identity.release_id,
+            )
+            projection.status(
+                deployment_id=deployment_id,
+                state="queued",
+                description=f"{identity.tag} admitted by production controller",
+            )
     except ProjectionError as exc:
         state = reduce_state(state, "authorize_refused", reason=str(exc))
         terminal = DeploymentTerminal(
@@ -197,7 +252,7 @@ def main() -> int:
             release_id=identity.release_id,
             release_source_sha=identity.source_sha,
             artifact_digest=identity.artifact_digest,
-            deployment_id=None,
+            deployment_id=deployment_id,
             state=state.state,
             current_step=state.current_step,
             facts={"immutability_control": admitted.immutability_control},
@@ -214,7 +269,29 @@ def main() -> int:
         _output("duplicate", False)
         _output("recovery_only", False)
         _output("canonical_terminal_ref", record.ref)
+        _output("admission_ref", "")
         return 0
+
+    assert deployment_id is not None
+    admission_payload = _admission_payload(
+        request=request,
+        execution_id=args.execution_id,
+        controller_revision=args.controller_revision,
+        admitted=admitted,
+        deployment_id=deployment_id,
+    )
+    try:
+        admission = evidence.persist_admission(admission_payload)
+    except EvidenceError as exc:
+        try:
+            projection.status(
+                deployment_id=deployment_id,
+                state="error",
+                description="durable private deployment admission unavailable",
+            )
+        except ProjectionError:
+            pass
+        raise SystemExit("durable public Deployment admission could not be persisted") from exc
 
     _output("admitted", True)
     _output("duplicate", False)
@@ -222,6 +299,7 @@ def main() -> int:
     _output("admitted_release_json", admitted_payload)
     _output("deployment_id", deployment_id)
     _output("canonical_terminal_ref", "")
+    _output("admission_ref", admission.ref)
     return 0
 
 
