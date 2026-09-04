@@ -9,7 +9,7 @@ from deployment_state_machine import TERMINALS, deployment_projection
 
 SCHEMA = "production-deployment-terminal.v2"
 _SHA = re.compile(r"[0-9a-f]{40}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
+_TYPED_DIGEST = re.compile(r"b3:[0-9a-f]{64}")
 _REQUEST = re.compile(r"req-sha256:[0-9a-f]{64}")
 _EXECUTION = re.compile(r"gh-run:[1-9][0-9]*:[1-9][0-9]*")
 
@@ -75,7 +75,7 @@ def validate_terminal(value: Mapping[str, object]) -> None:
         isinstance(release_id, int)
         and release_id > 0
         and _SHA.fullmatch(str(source_sha or "")) is not None
-        and _SHA256.fullmatch(str(artifact_digest or "").removeprefix("sha256:")) is not None
+        and _TYPED_DIGEST.fullmatch(str(artifact_digest or "")) is not None
     )
     if state != "REFUSED" and not release_resolved:
         raise TerminalContractError("post-admission terminal requires exact Release identity")
