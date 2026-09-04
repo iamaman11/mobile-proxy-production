@@ -3,6 +3,7 @@
     "iamaman11"
   ],
   "extension_rules": {
+    "dispatch_workflow_must_be_read_only": true,
     "new_destructive_routes_require_concurrency_domain": true,
     "new_destructive_routes_require_idempotency_policy": true,
     "new_destructive_routes_require_recovery_policy": true,
@@ -17,8 +18,11 @@
   "routes": [
     {
       "allowed_targets": [],
+      "arguments": [],
+      "authority_policy": "private-issue1-owner+controller-main-exact",
       "concurrency_domain": "none",
       "destructive": false,
+      "dispatch_inputs": {},
       "enabled": true,
       "evidence_policy": "bounded-observer-output",
       "handler": "dispatch_workflow",
@@ -35,7 +39,8 @@
       "requires_phone": false,
       "requires_release": false,
       "requires_vm": false,
-      "semantic_identity_policy": "comment-id",
+      "semantic_identity_policy": "transport-event-once",
+      "target_capability_policy": "none",
       "workflow": ".github/workflows/public-deployment-projection-observer.yml"
     },
     {
@@ -43,8 +48,20 @@
         "phone-production",
         "vm-production"
       ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+release-admission",
       "concurrency_domain": "target-global-mutation",
       "destructive": true,
+      "dispatch_inputs": {},
       "enabled": true,
       "evidence_policy": "ACK+ADMISSION+INTENT+TERMINAL+POSTCONDITION",
       "handler": "deployment",
@@ -65,12 +82,21 @@
       "requires_release": true,
       "requires_vm": false,
       "semantic_identity_policy": "existing-deployment-request-v2",
+      "target_capability_policy": "selected-target-contract",
       "workflow": ".github/workflows/release-deployment.yml"
     },
     {
       "allowed_targets": [],
+      "arguments": [
+        {
+          "name": "canonical_sha",
+          "type": "git_sha"
+        }
+      ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+public-main-sha",
       "concurrency_domain": "production-runner-android-build-tools-bootstrap",
       "destructive": false,
+      "dispatch_inputs": {},
       "enabled": true,
       "evidence_policy": "workflow-terminal+tooling-marker",
       "handler": "workflow_call",
@@ -90,6 +116,7 @@
       "requires_release": false,
       "requires_vm": false,
       "semantic_identity_policy": "command-arguments",
+      "target_capability_policy": "runner-only",
       "workflow": ".github/workflows/production-runner-android-build-tools-bootstrap.yml"
     }
   ],
