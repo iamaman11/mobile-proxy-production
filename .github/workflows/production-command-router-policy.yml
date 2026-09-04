@@ -34,6 +34,7 @@ jobs:
             .github/controller/tests/*.py \
             .github/scripts/deployment_command_router.py \
             .github/scripts/issue_command_router.py \
+            .github/scripts/dispatch_allowlisted_workflow.py \
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
             .github/scripts/finalize_deployment_projection.py \
@@ -107,14 +108,16 @@ jobs:
               "github.event.issue.number == 1",
               "github.event.comment.user.login == github.repository_owner",
               '.github/scripts/issue_command_router.py',
+              '.github/scripts/dispatch_allowlisted_workflow.py',
               '.github/production/command-control-registry.json',
               '.github/production/targets.json',
               '.github/scripts/deployment_command_router.py',
               '.github/scripts/deployment_execution.py',
               './.github/workflows/release-deployment.yml',
               './.github/workflows/production-runner-android-build-tools-bootstrap.yml',
-              'repos/iamaman11/mobile-proxy-production/actions/workflows/public-deployment-projection-observer.yml/dispatches',
-              '-f ref=main',
+              "needs.route.outputs.handler == 'dispatch_workflow'",
+              "needs.route.outputs.read_only == 'true'",
+              "needs.route.outputs.destructive == 'false'",
           )
           missing = [item for item in required_router if item not in router]
           if missing:
@@ -134,7 +137,7 @@ jobs:
           )
           present = [item for item in forbidden_router if item in router]
           if present:
-              raise SystemExit('sole command router contains forbidden capability/dynamic route: ' + ', '.join(present))
+              raise SystemExit('sole command router contains forbidden capability/dynamic user route: ' + ', '.join(present))
 
           spec = importlib.util.spec_from_file_location('issue_command_router_policy', '.github/scripts/issue_command_router.py')
           if spec is None or spec.loader is None:
@@ -158,19 +161,38 @@ jobs:
           destructive = [item['id'] for item in active if item.get('destructive') is True]
           if destructive != ['deploy-product-release']:
               raise SystemExit('unexpected active destructive command set: ' + repr(destructive))
+
           for item in active:
               workflow = Path(item['workflow'])
               if not workflow.is_file():
                   raise SystemExit('command maps to missing static workflow: ' + item['id'])
               if item['ref'] != 'main':
                   raise SystemExit('active route ref differs from literal main: ' + item['id'])
+              if not item.get('authority_policy') or not item.get('target_capability_policy'):
+                  raise SystemExit('active route lacks authority/target capability metadata: ' + item['id'])
+              if item['handler'] == 'dispatch_workflow':
+                  if item['read_only'] is not True or item['destructive'] is not False:
+                      raise SystemExit('generic dispatch route is not read-only: ' + item['id'])
+                  source = workflow.read_text(encoding='utf-8')
+                  required = ('workflow_dispatch:', 'permissions:', 'contents: read', 'runs-on: ubuntu-latest')
+                  if any(token not in source for token in required):
+                      raise SystemExit('generic dispatch target is not hosted/read-only shaped: ' + item['id'])
+                  forbidden = ('issue_comment:', 'self-hosted', 'android-production', ' adb ', 'deployments: write')
+                  if any(token in source for token in forbidden):
+                      raise SystemExit('generic dispatch target gained forbidden capability: ' + item['id'])
 
-          observer = (workflows / 'public-deployment-projection-observer.yml').read_text(encoding='utf-8')
-          for forbidden in ('issue_comment:', 'self-hosted', 'android-production', 'adb', 'deployments: write'):
-              if forbidden in observer:
-                  raise SystemExit('observer gained forbidden capability: ' + forbidden)
-          if 'workflow_dispatch:' not in observer or 'contents: read' not in observer or 'runs-on: ubuntu-latest' not in observer:
-              raise SystemExit('observer read-only hosted contract differs')
+          dispatcher = Path('.github/scripts/dispatch_allowlisted_workflow.py').read_text(encoding='utf-8')
+          for required in (
+              'route.get("handler") != "dispatch_workflow"',
+              'route.get("read_only") is not True',
+              'route.get("destructive") is not False',
+              'controller main drifted before workflow dispatch',
+          ):
+              if required not in dispatcher:
+                  raise SystemExit('generic dispatch adapter guard missing: ' + required)
+          for forbidden in ('subprocess', 'os.system', 'shell=True', 'eval(', 'exec(', 'adb'):
+              if forbidden in dispatcher:
+                  raise SystemExit('generic dispatch adapter gained forbidden execution capability: ' + forbidden)
 
           if targets['phone-production'].get('active') is not True:
               raise SystemExit('phone-production target contract is not active')
