@@ -1,0 +1,116 @@
+name: Deployment prerequisite hardening policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-prerequisite-hardening:
+    name: Validate Android verifier and durable terminal hardening
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private deployment controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run bounded hosted fault-injection tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/controller/android_target.py \
+            .github/controller/evidence_store.py \
+            .github/controller/tests/test_android_target.py \
+            .github/controller/tests/test_evidence_store.py
+          python3 .github/controller/tests/test_android_target.py
+          python3 .github/controller/tests/test_evidence_store.py
+
+      - name: Enforce fail-closed prerequisite ordering and retry bounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          android = Path('.github/controller/android_target.py').read_text(encoding='utf-8')
+          evidence = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
+          execution = Path('.github/scripts/run_phone_release_deployment.py').read_text(encoding='utf-8')
+          tests = Path('.github/controller/tests/test_evidence_store.py').read_text(encoding='utf-8')
+          workflow = Path('.github/workflows/deployment-prerequisite-hardening-policy.yml').read_text(encoding='utf-8')
+
+          android_required = (
+              'ANDROID_BUILD_TOOLS_VERSION = "36.0.0"',
+              'Path(".local/share/mobile-proxy/android-sdk")',
+              'def resolve_android_build_tools(',
+              'build_tools / "aapt2"' if False else 'build_root / "aapt2"',
+              'build_root / "apksigner"',
+              'tools = build_tools if build_tools is not None else resolve_android_build_tools()',
+              '"build_tools_identity": tools.identity',
+              '"signature_verified": True',
+          )
+          missing = [item for item in android_required if item not in android]
+          if missing:
+              raise SystemExit('pinned Android verifier contract incomplete: ' + ' | '.join(missing))
+          ambient_forbidden = (
+              'shutil.which("aapt2")',
+              'shutil.which("aapt")',
+              'shutil.which("apksigner")',
+              'ANDROID_SDK_ROOT',
+              'ANDROID_HOME',
+          )
+          present = [item for item in ambient_forbidden if item in android]
+          if present:
+              raise SystemExit('Android verifier depends on ambient SDK/tool discovery: ' + ' | '.join(present))
+
+          verify = execution.index('artifact_fact = verify_artifact(')
+          observe = execution.index('pre = observe(', verify)
+          intent = execution.index('intent = evidence.persist_intent', observe)
+          dispatch = execution.index('dispatch = dispatch_install_once', intent)
+          if not verify < observe < intent < dispatch:
+              raise SystemExit('artifact readiness must fail closed before observe/intent/dispatch')
+
+          evidence_required = (
+              'class EvidenceWriteAmbiguous(EvidenceError):',
+              'def evidence_identity(',
+              'def _matching_terminal(',
+              'except EvidenceWriteAmbiguous as first_error:',
+              'reconciled = self._matching_terminal(payload)',
+              'except EvidenceWriteAmbiguous as second_error:',
+              'canonical terminal remains absent after bounded reconciliation',
+          )
+          missing = [item for item in evidence_required if item not in evidence]
+          if missing:
+              raise SystemExit('terminal ambiguity reconciliation contract incomplete: ' + ' | '.join(missing))
+          if evidence.count('return self.create(TERMINAL_HEADING, payload)') != 2:
+              raise SystemExit('terminal persistence must permit exactly one initial write and one bounded retry')
+
+          fault_cases = (
+              'test_normal_terminal_write_success',
+              'test_pre_commit_transport_failure_reconciles_before_bounded_retry',
+              'test_post_commit_response_loss_accepts_matching_existing_terminal_without_second_write',
+              'test_matching_existing_terminal_is_idempotent',
+              'test_conflicting_existing_terminal_fails_closed',
+          )
+          missing = [item for item in fault_cases if item not in tests]
+          if missing:
+              raise SystemExit('required evidence fault injection missing: ' + ' | '.join(missing))
+
+          job_runner_lines = [line.strip() for line in workflow.splitlines() if line.startswith('    runs-on:')]
+          if job_runner_lines != ['runs-on: ubuntu-latest']:
+              raise SystemExit('code-only prerequisite acceptance must remain GitHub-hosted only')
+          if 'secrets.' in workflow or 'environment: phone-production' in workflow:
+              raise SystemExit('code-only prerequisite acceptance crossed production credential/environment boundary')
+
+          print('DEPLOYMENT_PREREQUISITE_HARDENING_POLICY_OK')
+          print('android_build_tools_version=36.0.0')
+          print('ambient_android_tool_discovery=false')
+          print('terminal_write_retry_bound=1')
+          print('phone_access=false')
+          print('self_hosted_acceptance=false')
+          PY
