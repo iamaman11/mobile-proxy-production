@@ -8,8 +8,10 @@ from pathlib import Path
 
 WORKFLOWS = Path('.github/workflows')
 
-# Exact action commits independently verified during Stage 2AE to declare
-# runs.using=node24 in their upstream action metadata.
+# Exact immutable action commits independently verified to declare
+# runs.using=node24 in upstream action metadata. Multiple immutable Node24
+# commits are permitted where the repository already uses one safely; the audit
+# is about runtime class + immutability, not forcing unrelated version churn.
 APPROVED_NODE24_PINS = {
     'actions/checkout': {
         '3d3c42e5aac5ba805825da76410c181273ba90b1',  # v7.0.1
@@ -22,6 +24,10 @@ APPROVED_NODE24_PINS = {
     },
     'actions/setup-java': {
         'dd06d9cba3e5552c54d9f8ea23572deb30010f7c',  # v6.0.0
+        'b6effb05e454b25005698d916606bdc6ffcbf961',  # verified node24 immutable commit
+    },
+    'actions/github-script': {
+        'ed597411d8f924073f98dfc5c65a23a2325f34cd',  # v8, node24
     },
 }
 
@@ -62,7 +68,7 @@ def main() -> int:
                 continue
             if ref not in approved:
                 violations.append(
-                    f'{path}:{line}: action pin is not the verified Node24 commit: {action}@{ref}'
+                    f'{path}:{line}: immutable action pin is not a verified Node24 commit: {action}@{ref}'
                 )
 
     counts = Counter(action for _, _, action, _ in inventory)
