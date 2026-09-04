@@ -132,3 +132,139 @@ jobs:
           print('provider_access=false')
           print('secret_access=false')
           PY
+
+  validate-runner-android-build-tools-bootstrap:
+    name: Validate bounded production runner Android Build Tools bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private execution wrappers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Enforce Android Build Tools bootstrap authority and filesystem invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflows = Path('.github/workflows')
+          bootstrap_path = workflows / 'production-runner-android-build-tools-bootstrap.yml'
+          router_path = workflows / 'production-control-router.yml'
+          controller_path = Path('.github/controller/android_target.py')
+          if not bootstrap_path.is_file() or not router_path.is_file() or not controller_path.is_file():
+              raise SystemExit('Android Build Tools bootstrap contract files are incomplete')
+
+          bootstrap = bootstrap_path.read_text(encoding='utf-8')
+          router = router_path.read_text(encoding='utf-8')
+          controller = controller_path.read_text(encoding='utf-8')
+
+          required = (
+              'workflow_call:',
+              "inputs.source_issue_number == 1",
+              "inputs.source_actor == github.repository_owner",
+              "startsWith(inputs.command, '/runner-android-build-tools-bootstrap ')",
+              "re.fullmatch(r'/runner-android-build-tools-bootstrap ([0-9a-f]{40})', command)",
+              "'https://api.github.com/repos/iamaman11/mobile-proxy/commits/main'",
+              "runs-on: [self-hosted, Linux, X64, android-production]",
+              'group: production-runner-android-build-tools-bootstrap',
+              'cancel-in-progress: false',
+              "ANDROID_BUILD_TOOLS_VERSION: '36.0.0'",
+              "ANDROID_BUILD_TOOLS_ARCHIVE_URL: 'https://dl.google.com/android/repository/build-tools_r36_linux.zip'",
+              "ANDROID_BUILD_TOOLS_ARCHIVE_SHA256: '5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b'",
+              'ANDROID_SDK_ROOT="${HOME}/.local/share/mobile-proxy/android-sdk"',
+              'ANDROID_BUILD_TOOLS_DIR="${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"',
+              "zipfile.ZipFile(archive)",
+              "stat.S_ISLNK(unix_mode)",
+              "'.mobile-proxy-source.json'",
+              'cp -a "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage"',
+              'diff -qr "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage"',
+              'mv "$install_stage" "$ANDROID_BUILD_TOOLS_DIR"',
+              'android_build_tools_install=created_exact_atomic',
+              '"$ANDROID_BUILD_TOOLS_DIR/aapt2" version',
+              '"$ANDROID_BUILD_TOOLS_DIR/apksigner" version',
+              'android_build_tools_identity=android-build-tools:36.0.0:user-local-v1',
+              'runner_tooling_mutation=true',
+              'user_local_tooling=true',
+              'system_path_mutation=false',
+              'phone_access=false',
+              'phone_mutation=false',
+              'provider_access=false',
+              'config_rendered=false',
+              'secret_access=false',
+          )
+          missing = [snippet for snippet in required if snippet not in bootstrap]
+          if missing:
+              raise SystemExit('Android Build Tools bootstrap invariant missing: ' + ' | '.join(missing))
+
+          forbidden = (
+              'workflow_dispatch:',
+              'issue_comment:',
+              'secrets.',
+              'ANDROID_PRODUCTION_SERIAL',
+              'ANDROID_TARGET_BINDING_KEY',
+              'PUBLIC_DEPLOYMENTS_TOKEN',
+              'production-phone-global-mutation',
+              '/data/adb/',
+              ' adb ',
+              "['adb'",
+              'pm install',
+              'pm uninstall',
+              'sudo ',
+              '/usr/local/bin',
+              'VULTR_API',
+              'GOOGLE_APPLICATION_CREDENTIALS',
+              'gcloud ',
+              'runtime-reconstruction-execute',
+              'package-device-release',
+              'verify-release-integrity',
+          )
+          present = [snippet for snippet in forbidden if snippet in bootstrap]
+          if present:
+              raise SystemExit('Android Build Tools bootstrap crossed a forbidden boundary: ' + ' | '.join(present))
+
+          if bootstrap.count('runs-on: [self-hosted, Linux, X64, android-production]') != 1:
+              raise SystemExit('Android Build Tools bootstrap must have exactly one production self-hosted job')
+          if bootstrap.count('/runner-android-build-tools-bootstrap ') != 2:
+              raise SystemExit('Android Build Tools bootstrap command surface drifted')
+
+          route_start = router.index('  android-build-tools-bootstrap:')
+          route_end = router.index('\n  deploy:', route_start)
+          route = router[route_start:route_end]
+          route_required = (
+              'github.event.issue.number == 1',
+              'github.event.comment.user.login == github.repository_owner',
+              "startsWith(github.event.comment.body, '/runner-android-build-tools-bootstrap ')",
+              'uses: ./.github/workflows/production-runner-android-build-tools-bootstrap.yml',
+              'command: ${{ github.event.comment.body }}',
+          )
+          route_missing = [snippet for snippet in route_required if snippet not in route]
+          if route_missing:
+              raise SystemExit('Android Build Tools Issue #1 route incomplete: ' + ' | '.join(route_missing))
+          if 'secrets:' in route or 'environment:' in route or 'runs-on:' in route:
+              raise SystemExit('Android Build Tools router job crossed reusable-workflow boundary')
+
+          controller_required = (
+              'ANDROID_BUILD_TOOLS_VERSION = "36.0.0"',
+              '_ANDROID_SDK_USER_RELATIVE_ROOT = Path(".local/share/mobile-proxy/android-sdk")',
+              'build_root = sdk_root / "build-tools" / ANDROID_BUILD_TOOLS_VERSION',
+              'aapt2 = build_root / "aapt2"',
+              'apksigner = build_root / "apksigner"',
+              'return f"android-build-tools:{self.version}:user-local-v1"',
+          )
+          controller_missing = [snippet for snippet in controller_required if snippet not in controller]
+          if controller_missing:
+              raise SystemExit('deployment verifier path differs from bootstrap contract: ' + ' | '.join(controller_missing))
+
+          print('PRODUCTION_ANDROID_BUILD_TOOLS_BOOTSTRAP_POLICY_OK')
+          print('android_build_tools_version=36.0.0')
+          print('archive_sha256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b')
+          print('official_distribution=true')
+          print('canonical_sha_gate=true')
+          print('atomic_user_local_publish=true')
+          print('phone_access=false')
+          print('secret_access=false')
+          print('provider_access=false')
+          PY
