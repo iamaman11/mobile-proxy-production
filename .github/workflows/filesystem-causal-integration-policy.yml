@@ -30,6 +30,9 @@ jobs:
       - name: Enforce repository-wide immutable Node24 action pins
         working-directory: private-control
         run: python3 .github/scripts/audit_actions_runtime_pins.py
+      - name: Enforce retired historical execution surface
+        working-directory: private-control
+        run: python3 .github/scripts/audit_retired_workflow_execution_surface.py
       - name: Validate causal generation and quarantine reuse semantics
         working-directory: private-control
         run: python3 .github/scripts/control_plane_policy.py --policy filesystem-causal-integration --canonical-root ../canonical
