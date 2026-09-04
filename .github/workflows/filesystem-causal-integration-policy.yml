@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: private-control
+          persist-credentials: false
       - name: Check out current canonical source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -26,6 +27,9 @@ jobs:
           ref: main
           path: canonical
           persist-credentials: false
+      - name: Enforce repository-wide immutable Node24 action pins
+        working-directory: private-control
+        run: python3 .github/scripts/audit_actions_runtime_pins.py
       - name: Validate causal generation and quarantine reuse semantics
         working-directory: private-control
         run: python3 .github/scripts/control_plane_policy.py --policy filesystem-causal-integration --canonical-root ../canonical
