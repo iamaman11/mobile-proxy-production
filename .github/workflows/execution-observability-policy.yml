@@ -6,6 +6,8 @@ on:
       - '.github/workflows/production-control-router.yml'
       - '.github/workflows/release-deployment.yml'
       - '.github/workflows/execution-observability-policy.yml'
+      - '.github/production/command-control-registry.json'
+      - '.github/scripts/issue_command_router.py'
       - '.github/scripts/deployment_execution.py'
       - '.github/scripts/prepare_release_deployment.py'
       - '.github/scripts/reconcile_recovery_mode.py'
@@ -20,6 +22,8 @@ on:
       - '.github/workflows/production-control-router.yml'
       - '.github/workflows/release-deployment.yml'
       - '.github/workflows/execution-observability-policy.yml'
+      - '.github/production/command-control-registry.json'
+      - '.github/scripts/issue_command_router.py'
       - '.github/scripts/deployment_execution.py'
       - '.github/scripts/prepare_release_deployment.py'
       - '.github/scripts/reconcile_recovery_mode.py'
@@ -50,6 +54,7 @@ jobs:
             .github/controller/terminal_result.py \
             .github/controller/evidence_store.py \
             .github/controller/github_projection.py \
+            .github/scripts/issue_command_router.py \
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
             .github/scripts/reconcile_recovery_mode.py \
@@ -63,10 +68,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import json
           from pathlib import Path
 
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
           deployment = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
+          registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
           ack = Path('.github/scripts/deployment_execution.py').read_text(encoding='utf-8')
           terminal = Path('.github/controller/terminal_result.py').read_text(encoding='utf-8')
           store = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
@@ -74,20 +81,51 @@ jobs:
           reconcile = Path('.github/scripts/reconcile_recovery_mode.py').read_text(encoding='utf-8')
           projection = Path('.github/controller/github_projection.py').read_text(encoding='utf-8')
 
+          deploy_routes = [
+              item for item in registry.get('routes', [])
+              if isinstance(item, dict)
+              and item.get('id') == 'deploy-product-release'
+              and item.get('enabled') is True
+          ]
+          if len(deploy_routes) != 1:
+              raise SystemExit('exactly one enabled deployment command contract is required')
+          deploy_contract = deploy_routes[0]
+          expected_contract = {
+              'handler': 'deployment',
+              'workflow': '.github/workflows/release-deployment.yml',
+              'ref': 'main',
+              'operation': 'deploy-product-release',
+              'operation_class': 'DEPLOY',
+              'read_only': False,
+              'destructive': True,
+              'semantic_identity_policy': 'existing-deployment-request-v2',
+              'idempotency_policy': 'durable-semantic-ledger',
+              'recovery_policy': 'UNKNOWN-read-only-reconcile-no-blind-retry',
+          }
+          for field, expected in expected_contract.items():
+              if deploy_contract.get(field) != expected:
+                  raise SystemExit(f'deployment command contract drifted: {field}')
+          expected_pattern = r'^/deploy (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\.[0-9]+\.[0-9]+)$'
+          if deploy_contract.get('pattern') != expected_pattern:
+              raise SystemExit('deployment command syntax drifted')
+
           required_router = (
-              'Build cursor-free semantic deployment request',
+              'Build existing cursor-free semantic deployment request',
               'Build exact controller execution ACK',
               'Publish immediate immutable execution ACK',
               '--run-id "$GITHUB_RUN_ID"',
               '--run-attempt "$GITHUB_RUN_ATTEMPT"',
               '--controller-revision "$GITHUB_SHA"',
               'execution_id: ${{ steps.execution.outputs.execution_id }}',
+              "needs.route.outputs.handler == 'deployment'",
+              "needs.route.outputs.route_id == 'deploy-product-release'",
+              "needs.route.outputs.destructive == 'true'",
               './.github/workflows/release-deployment.yml',
           )
           for marker in required_router:
               if marker not in router:
                   raise SystemExit(f'missing v2 router execution-correlation invariant: {marker}')
-          classify = router.index('Build cursor-free semantic deployment request')
+          classify = router.index('Build existing cursor-free semantic deployment request')
           publish = router.index('Publish immediate immutable execution ACK')
           deploy_job = router.index('\n  deploy:')
           if not classify < publish < deploy_job:

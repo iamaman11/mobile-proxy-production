@@ -1,0 +1,32 @@
+{
+  "schema": "production-target-registry.v1",
+  "targets": {
+    "phone-production": {
+      "active": true,
+      "adapter": "android-target-v2",
+      "allowed_operations": [
+        "deploy-product-release"
+      ],
+      "physical_domains": [
+        "android-package",
+        "runtime"
+      ],
+      "required_postcondition": "independent-android-postcondition",
+      "serialization_domain": "production-target-phone-production",
+      "target_type": "android-phone"
+    },
+    "vm-production": {
+      "active": false,
+      "adapter": "deferred",
+      "allowed_operations": [
+        "deploy-product-release"
+      ],
+      "physical_domains": [
+        "vm-runtime"
+      ],
+      "required_postcondition": "deferred-until-adapter-accepted",
+      "serialization_domain": "production-target-vm-production",
+      "target_type": "vm"
+    }
+  }
+}

@@ -1,4 +1,4 @@
-name: Production control — Issue #1 deployment controller
+name: Production control — sole Issue #1 command ingress
 
 on:
   issue_comment:
@@ -6,35 +6,85 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   route:
-    name: Parse one exact deployment command and ACK it
+    name: Classify one exact owner command from declarative contracts
     if: >-
+      github.event.repository.full_name == 'iamaman11/mobile-proxy-production' &&
       github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/deploy ')
+      github.event.comment.user.login == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      route_id: ${{ steps.route.outputs.route_id }}
+      handler: ${{ steps.route.outputs.handler }}
       operation: ${{ steps.route.outputs.operation }}
+      operation_class: ${{ steps.route.outputs.operation_class }}
+      read_only: ${{ steps.route.outputs.read_only }}
+      destructive: ${{ steps.route.outputs.destructive }}
+      arguments_json: ${{ steps.route.outputs.arguments_json }}
       target: ${{ steps.route.outputs.target }}
       release_tag: ${{ steps.route.outputs.release_tag }}
-      request_id: ${{ steps.route.outputs.request_id }}
-      request_json: ${{ steps.route.outputs.request_json }}
-      execution_id: ${{ steps.execution.outputs.execution_id }}
+      canonical_sha: ${{ steps.route.outputs.canonical_sha }}
     steps:
-      - name: Check out exact private controller revision
+      - name: Check out exact comment-event controller revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Build cursor-free semantic deployment request
+      - name: Validate registries and admit exactly one static route
         id: route
         env:
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_AUTHOR: ${{ github.event.comment.user.login }}
+          EVENT_COMMAND: ${{ github.event.comment.body }}
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .github/production/command-control-registry.json
+          test -f .github/production/targets.json
+          current_main_sha="$(gh api --method GET \
+            repos/iamaman11/mobile-proxy-production/commits/main --jq '.sha')"
+          python3 .github/scripts/issue_command_router.py \
+            --repository "$EVENT_REPOSITORY" \
+            --issue-number "$EVENT_ISSUE_NUMBER" \
+            --author "$EVENT_AUTHOR" \
+            --command "$EVENT_COMMAND" \
+            --event-sha "$EVENT_SHA" \
+            --current-main-sha "$current_main_sha" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  deployment-ack:
+    name: Preserve existing semantic deployment request and immutable ACK
+    needs: route
+    if: needs.route.outputs.handler == 'deployment' && needs.route.outputs.route_id == 'deploy-product-release'
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      request_json: ${{ steps.command.outputs.request_json }}
+      execution_id: ${{ steps.execution.outputs.execution_id }}
+      target: ${{ steps.command.outputs.target }}
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build existing cursor-free semantic deployment request
+        id: command
+        env:
           COMMAND: ${{ github.event.comment.body }}
+          REGISTRY_TARGET: ${{ needs.route.outputs.target }}
+          REGISTRY_RELEASE: ${{ needs.route.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -45,11 +95,13 @@ jobs:
             --comment-id "${{ github.event.comment.id }}" \
             --actor "${{ github.event.comment.user.login }}" \
             --owner "${{ github.repository_owner }}"
+          test "${{ steps.command.outputs.target }}" = "$REGISTRY_TARGET"
+          test "${{ steps.command.outputs.release_tag }}" = "$REGISTRY_RELEASE"
 
       - name: Build exact controller execution ACK
         id: execution
         env:
-          CONTROL_REQUEST_JSON: ${{ steps.route.outputs.request_json }}
+          CONTROL_REQUEST_JSON: ${{ steps.command.outputs.request_json }}
         shell: bash
         run: |
           set -euo pipefail
@@ -77,12 +129,44 @@ jobs:
               body,
             });
 
-  android-build-tools-bootstrap:
-    name: Route exact owner Android Build Tools bootstrap command
+  dispatch-hosted-read-only:
+    name: Dispatch one registry-allowlisted hosted read-only workflow
+    needs: route
     if: >-
-      github.event.issue.number == 1 &&
-      github.event.comment.user.login == github.repository_owner &&
-      startsWith(github.event.comment.body, '/runner-android-build-tools-bootstrap ')
+      needs.route.outputs.handler == 'dispatch_workflow' &&
+      needs.route.outputs.read_only == 'true' &&
+      needs.route.outputs.destructive == 'false'
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Revalidate registry and dispatch without user-supplied workflow or ref
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ROUTE_ID: ${{ needs.route.outputs.route_id }}
+          ROUTE_ARGUMENTS_JSON: ${{ needs.route.outputs.arguments_json }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/dispatch_allowlisted_workflow.py \
+            --route-id "$ROUTE_ID" \
+            --arguments-json "$ROUTE_ARGUMENTS_JSON" \
+            --expected-controller-sha "$GITHUB_SHA"
+
+  android-build-tools-bootstrap:
+    name: Route exact bounded Android Build Tools bootstrap contract
+    needs: route
+    if: needs.route.outputs.route_id == 'runner-android-build-tools-bootstrap' && needs.route.outputs.destructive == 'false'
+    permissions:
+      contents: read
     uses: ./.github/workflows/production-runner-android-build-tools-bootstrap.yml
     with:
       command: ${{ github.event.comment.body }}
@@ -92,12 +176,18 @@ jobs:
       source_comment_url: ${{ github.event.comment.html_url }}
 
   deploy:
-    name: Run automatic deployment State Machine
-    needs: route
-    if: needs.route.outputs.operation == 'deploy-product-release'
+    name: Run existing automatic deployment State Machine
+    needs: [route, deployment-ack]
+    if: >-
+      needs.route.outputs.route_id == 'deploy-product-release' &&
+      needs.route.outputs.operation == 'deploy-product-release' &&
+      needs.route.outputs.destructive == 'true'
+    permissions:
+      contents: read
+      issues: write
     uses: ./.github/workflows/release-deployment.yml
     with:
-      request_json: ${{ needs.route.outputs.request_json }}
-      execution_id: ${{ needs.route.outputs.execution_id }}
-      target: ${{ needs.route.outputs.target }}
+      request_json: ${{ needs.deployment-ack.outputs.request_json }}
+      execution_id: ${{ needs.deployment-ack.outputs.execution_id }}
+      target: ${{ needs.deployment-ack.outputs.target }}
     secrets: inherit

@@ -148,18 +148,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import json
           from pathlib import Path
 
           workflows = Path('.github/workflows')
           bootstrap_path = workflows / 'production-runner-android-build-tools-bootstrap.yml'
           router_path = workflows / 'production-control-router.yml'
           controller_path = Path('.github/controller/android_target.py')
-          if not bootstrap_path.is_file() or not router_path.is_file() or not controller_path.is_file():
+          registry_path = Path('.github/production/command-control-registry.json')
+          if not bootstrap_path.is_file() or not router_path.is_file() or not controller_path.is_file() or not registry_path.is_file():
               raise SystemExit('Android Build Tools bootstrap contract files are incomplete')
 
           bootstrap = bootstrap_path.read_text(encoding='utf-8')
           router = router_path.read_text(encoding='utf-8')
           controller = controller_path.read_text(encoding='utf-8')
+          registry = json.loads(registry_path.read_text(encoding='utf-8'))
 
           required = (
               'workflow_call:',
@@ -230,21 +233,59 @@ jobs:
           if bootstrap.count('/runner-android-build-tools-bootstrap ') != 2:
               raise SystemExit('Android Build Tools bootstrap command surface drifted')
 
+          global_route_required = (
+              "github.event.repository.full_name == 'iamaman11/mobile-proxy-production'",
+              'github.event.issue.number == 1',
+              'github.event.comment.user.login == github.repository_owner',
+          )
+          global_route_missing = [snippet for snippet in global_route_required if snippet not in router]
+          if global_route_missing:
+              raise SystemExit('sole Issue #1 owner ingress incomplete: ' + ' | '.join(global_route_missing))
+
+          contracts = [
+              item for item in registry.get('routes', [])
+              if isinstance(item, dict)
+              and item.get('id') == 'runner-android-build-tools-bootstrap'
+              and item.get('enabled') is True
+          ]
+          if len(contracts) != 1:
+              raise SystemExit('exactly one enabled Android Build Tools command contract is required')
+          contract = contracts[0]
+          expected_contract = {
+              'handler': 'workflow_call',
+              'workflow': '.github/workflows/production-runner-android-build-tools-bootstrap.yml',
+              'ref': 'main',
+              'operation': 'production-runner-android-build-tools-bootstrap',
+              'operation_class': 'RUNNER_TOOLING',
+              'read_only': False,
+              'destructive': False,
+              'semantic_identity_policy': 'command-arguments',
+              'idempotency_policy': 'exact-package-noop-or-create',
+              'concurrency_domain': 'production-runner-android-build-tools-bootstrap',
+          }
+          for field, expected in expected_contract.items():
+              if contract.get(field) != expected:
+                  raise SystemExit(f'Android Build Tools registry contract drifted: {field}')
+          expected_pattern = r'^/runner-android-build-tools-bootstrap (?P<canonical_sha>[0-9a-f]{40})$'
+          if contract.get('pattern') != expected_pattern:
+              raise SystemExit('Android Build Tools registry syntax drifted')
+
           route_start = router.index('  android-build-tools-bootstrap:')
           route_end = router.index('\n  deploy:', route_start)
           route = router[route_start:route_end]
           route_required = (
-              'github.event.issue.number == 1',
-              'github.event.comment.user.login == github.repository_owner',
-              "startsWith(github.event.comment.body, '/runner-android-build-tools-bootstrap ')",
+              "needs.route.outputs.route_id == 'runner-android-build-tools-bootstrap'",
+              "needs.route.outputs.destructive == 'false'",
               'uses: ./.github/workflows/production-runner-android-build-tools-bootstrap.yml',
               'command: ${{ github.event.comment.body }}',
           )
           route_missing = [snippet for snippet in route_required if snippet not in route]
           if route_missing:
-              raise SystemExit('Android Build Tools Issue #1 route incomplete: ' + ' | '.join(route_missing))
+              raise SystemExit('Android Build Tools registry-gated Issue #1 route incomplete: ' + ' | '.join(route_missing))
           if 'secrets:' in route or 'environment:' in route or 'runs-on:' in route:
               raise SystemExit('Android Build Tools router job crossed reusable-workflow boundary')
+          if "startsWith(github.event.comment.body, '/runner-android-build-tools-bootstrap ')" in route:
+              raise SystemExit('Android Build Tools route bypassed the declarative classifier')
 
           controller_required = (
               'ANDROID_BUILD_TOOLS_VERSION = "36.0.0"',
@@ -263,6 +304,7 @@ jobs:
           print('archive_sha256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b')
           print('official_distribution=true')
           print('canonical_sha_gate=true')
+          print('registry_gate=true')
           print('atomic_user_local_publish=true')
           print('phone_access=false')
           print('secret_access=false')

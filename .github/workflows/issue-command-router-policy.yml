@@ -1,4 +1,4 @@
-name: Issue command router policy
+name: Issue command control policy
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-issue-command-router:
-    name: Validate bounded Issue #1 workflow dispatch boundary
+  validate-issue-command-control:
+    name: Validate sole Issue #1 ingress and declarative command contracts
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,11 +19,199 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run pure allowlist and non-mutation policy tests
+      - name: Compile command adapters, controller and registries
         shell: bash
         run: |
           set -euo pipefail
           python3 -m py_compile \
+            .github/controller/*.py \
+            .github/controller/tests/*.py \
+            .github/scripts/deployment_command_router.py \
             .github/scripts/issue_command_router.py \
-            .github/controller/tests/test_issue_command_router.py
+            .github/scripts/dispatch_allowlisted_workflow.py \
+            .github/scripts/deployment_execution.py \
+            .github/scripts/prepare_release_deployment.py \
+            .github/scripts/finalize_deployment_projection.py \
+            .github/scripts/run_phone_release_deployment.py
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in (
+              Path('.github/production/command-control-registry.json'),
+              Path('.github/production/targets.json'),
+          ):
+              value = json.loads(path.read_text(encoding='utf-8'))
+              if not isinstance(value, dict):
+                  raise SystemExit(f'{path} is not a JSON object')
+          print('COMMAND_CONTROL_REGISTRIES_JSON_OK')
+          PY
+
+      - name: Run fail-closed command-control and controller acceptance tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/controller/tests/test_controller.py
+          python3 .github/controller/tests/test_evidence_store.py
           python3 .github/controller/tests/test_issue_command_router.py
+          python3 .github/controller/tests/test_projection_reconciler.py
+          python3 .github/controller/tests/test_release_resolver.py
+          echo 'DEPLOYMENT_CONTROLLER_HOSTED_TESTS_OK'
+
+      - name: Prove immutable Product Release resolver off-device
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag='v0.1.4', target='phone-production')
+          identity = admitted.identity
+          if identity.release_id != 382429107:
+              raise SystemExit('v0.1.4 Release id differs')
+          if identity.source_sha != 'ff882e5ca5116fa90b80f15c6cc019f88e68ccfa':
+              raise SystemExit('v0.1.4 source SHA differs')
+          if identity.artifact_name != 'mobile-proxy-android-v0.1.4.apk':
+              raise SystemExit('v0.1.4 artifact name differs')
+          if re.fullmatch(r'b3:[0-9a-f]{64}', identity.artifact_digest) is None:
+              raise SystemExit('v0.1.4 content identity is not typed BLAKE3')
+          if re.fullmatch(r'[0-9a-f]{64}', admitted.artifact_transport_sha256) is None:
+              raise SystemExit('v0.1.4 transport sha256 is invalid')
+          if admitted.immutability_control != 'github-immutable-release':
+              raise SystemExit('v0.1.4 immutability control differs')
+          print('REAL_PRODUCT_RELEASE_V2_RESOLVER_OK tag=v0.1.4 target=phone-production')
+          PY
+
+      - name: Prove sole ingress and Deployment Controller safety invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ast
+          import importlib.util
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          workflows = Path('.github/workflows')
+          router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
+          deployment = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
+          registry_path = Path('.github/production/command-control-registry.json')
+          targets_path = Path('.github/production/targets.json')
+
+          direct_ingress = sorted(
+              path.name for path in workflows.glob('*.yml')
+              if re.search(r'(?m)^  issue_comment:\s*$', path.read_text(encoding='utf-8'))
+          )
+          if direct_ingress != ['production-control-router.yml']:
+              raise SystemExit('exactly one private Issue #1 ingress required: ' + repr(direct_ingress))
+
+          required_router = (
+              "github.event.repository.full_name == 'iamaman11/mobile-proxy-production'",
+              'github.event.issue.number == 1',
+              'github.event.comment.user.login == github.repository_owner',
+              '.github/scripts/issue_command_router.py',
+              '.github/scripts/dispatch_allowlisted_workflow.py',
+              "needs.route.outputs.handler == 'dispatch_workflow'",
+              "needs.route.outputs.read_only == 'true'",
+              "needs.route.outputs.destructive == 'false'",
+              "needs.route.outputs.route_id == 'deploy-product-release'",
+              'uses: ./.github/workflows/release-deployment.yml',
+          )
+          missing = [item for item in required_router if item not in router]
+          if missing:
+              raise SystemExit('sole router contract incomplete: ' + ', '.join(missing))
+          expression_open = '$' + '{{'
+          forbidden_router = (
+              'actions/workflows/' + expression_open,
+              '-f ref=' + expression_open,
+              'secrets.',
+              'runs-on: [self-hosted',
+              ' adb ',
+              'authority_cursor',
+              'issue179-comment-',
+          )
+          present = [item for item in forbidden_router if item in router]
+          if present:
+              raise SystemExit('router gained forbidden capability: ' + ', '.join(present))
+
+          spec = importlib.util.spec_from_file_location('issue_command_router_acceptance', '.github/scripts/issue_command_router.py')
+          if spec is None or spec.loader is None:
+              raise SystemExit('cannot load command classifier')
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+          targets = module.validate_target_registry(json.loads(targets_path.read_text(encoding='utf-8')))
+          routes = module.validate_registry(json.loads(registry_path.read_text(encoding='utf-8')), targets)
+          active = [item for item in routes if item.get('enabled') is True]
+          if {item['id'] for item in active} != {
+              'observe-public-deployment-projection',
+              'deploy-product-release',
+              'runner-android-build-tools-bootstrap',
+          }:
+              raise SystemExit('active route set differs')
+          destructive = [item for item in active if item.get('destructive') is True]
+          if len(destructive) != 1 or destructive[0].get('id') != 'deploy-product-release':
+              raise SystemExit('unexpected destructive route set')
+          deploy = destructive[0]
+          if deploy.get('semantic_identity_policy') != 'existing-deployment-request-v2':
+              raise SystemExit('deployment semantic identity drifted')
+          if deploy.get('idempotency_policy') != 'durable-semantic-ledger':
+              raise SystemExit('deployment idempotency drifted')
+          if deploy.get('recovery_policy') != 'UNKNOWN-read-only-reconcile-no-blind-retry':
+              raise SystemExit('deployment UNKNOWN recovery drifted')
+          if targets['phone-production'].get('active') is not True:
+              raise SystemExit('phone target is not active')
+          if targets['phone-production'].get('serialization_domain') != 'production-target-phone-production':
+              raise SystemExit('phone target serialization drifted')
+          if targets['vm-production'].get('active') is not False or targets['vm-production'].get('adapter') != 'deferred':
+              raise SystemExit('VM target is not fail-closed/deferred')
+
+          for required in (
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              'Reconcile recovery mode from durable private ledger',
+              'finalize-phone-projection:',
+          ):
+              if required not in deployment:
+                  raise SystemExit('deployment workflow invariant missing: ' + required)
+
+          evidence = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
+          for required in (
+              '## DEPLOYMENT ADMISSION V2',
+              '## DEPLOYMENT MUTATION INTENT V2',
+              '## DEPLOYMENT TERMINAL V2',
+              '## DEPLOYMENT DUPLICATE V2',
+          ):
+              if required not in evidence:
+                  raise SystemExit('durable evidence invariant missing: ' + required)
+
+          state_machine = Path('.github/controller/deployment_state_machine.py').read_text(encoding='utf-8')
+          for required in ('ACCEPTED', 'REFUSED', 'UNKNOWN', 'RECOVERED', 'QUARANTINED'):
+              if required not in state_machine:
+                  raise SystemExit('state machine terminal missing: ' + required)
+          if 'state in {UNKNOWN, RECOVERED}' not in state_machine:
+              raise SystemExit('UNKNOWN/RECOVERED projection fail-closed invariant missing')
+
+          run_path = Path('.github/scripts/run_phone_release_deployment.py')
+          tree = ast.parse(run_path.read_text(encoding='utf-8'))
+          dispatch_calls = [
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == 'dispatch_install_once'
+          ]
+          if len(dispatch_calls) != 1:
+              raise SystemExit(f'exactly one destructive dispatch callsite required; got {len(dispatch_calls)}')
+
+          print('SOLE_COMMAND_CONTROL_INGRESS_OK')
+          print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
+          print('VM_TARGET_DEFERRED_OK')
+          PY

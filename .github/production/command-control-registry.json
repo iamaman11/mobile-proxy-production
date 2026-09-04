@@ -1,0 +1,124 @@
+{
+  "allowed_authors": [
+    "iamaman11"
+  ],
+  "extension_rules": {
+    "dispatch_workflow_must_be_read_only": true,
+    "new_destructive_routes_require_concurrency_domain": true,
+    "new_destructive_routes_require_idempotency_policy": true,
+    "new_destructive_routes_require_recovery_policy": true,
+    "new_routes_require_tests": true,
+    "unknown_arguments": "refuse",
+    "unknown_commands": "refuse",
+    "user_supplied_ref": false,
+    "user_supplied_workflow": false
+  },
+  "issue_number": 1,
+  "repository": "iamaman11/mobile-proxy-production",
+  "routes": [
+    {
+      "allowed_targets": [],
+      "arguments": [],
+      "authority_policy": "private-issue1-owner+controller-main-exact",
+      "concurrency_domain": "none",
+      "destructive": false,
+      "dispatch_inputs": {},
+      "enabled": true,
+      "evidence_policy": "bounded-observer-output",
+      "handler": "dispatch_workflow",
+      "id": "observe-public-deployment-projection",
+      "idempotency_policy": "single-run-attempt",
+      "operation": "observe-public-deployment-projection",
+      "operation_class": "OBSERVE",
+      "pattern": "^/observe-public-deployment-projection$",
+      "physical_domains": [],
+      "read_only": true,
+      "recovery_policy": "fail-closed-on-ambiguous-observation",
+      "ref": "main",
+      "ref_policy": "controller-main-exact",
+      "requires_phone": false,
+      "requires_release": false,
+      "requires_vm": false,
+      "semantic_identity_policy": "transport-event-once",
+      "target_capability_policy": "none",
+      "workflow": ".github/workflows/public-deployment-projection-observer.yml"
+    },
+    {
+      "allowed_targets": [
+        "phone-production",
+        "vm-production"
+      ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+release-admission",
+      "concurrency_domain": "target-global-mutation",
+      "destructive": true,
+      "dispatch_inputs": {},
+      "enabled": true,
+      "evidence_policy": "ACK+ADMISSION+INTENT+TERMINAL+POSTCONDITION",
+      "handler": "deployment",
+      "id": "deploy-product-release",
+      "idempotency_policy": "durable-semantic-ledger",
+      "operation": "deploy-product-release",
+      "operation_class": "DEPLOY",
+      "pattern": "^/deploy (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\\.[0-9]+\\.[0-9]+)$",
+      "physical_domains": [
+        "target-runtime",
+        "application-installation"
+      ],
+      "read_only": false,
+      "recovery_policy": "UNKNOWN-read-only-reconcile-no-blind-retry",
+      "ref": "main",
+      "ref_policy": "controller-event-sha-exact",
+      "requires_phone": false,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "existing-deployment-request-v2",
+      "target_capability_policy": "selected-target-contract",
+      "workflow": ".github/workflows/release-deployment.yml"
+    },
+    {
+      "allowed_targets": [],
+      "arguments": [
+        {
+          "name": "canonical_sha",
+          "type": "git_sha"
+        }
+      ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+public-main-sha",
+      "concurrency_domain": "production-runner-android-build-tools-bootstrap",
+      "destructive": false,
+      "dispatch_inputs": {},
+      "enabled": true,
+      "evidence_policy": "workflow-terminal+tooling-marker",
+      "handler": "workflow_call",
+      "id": "runner-android-build-tools-bootstrap",
+      "idempotency_policy": "exact-package-noop-or-create",
+      "operation": "production-runner-android-build-tools-bootstrap",
+      "operation_class": "RUNNER_TOOLING",
+      "pattern": "^/runner-android-build-tools-bootstrap (?P<canonical_sha>[0-9a-f]{40})$",
+      "physical_domains": [
+        "runner-tooling"
+      ],
+      "read_only": false,
+      "recovery_policy": "fail-closed-without-phone-access",
+      "ref": "main",
+      "ref_policy": "controller-event-sha-exact",
+      "requires_phone": false,
+      "requires_release": false,
+      "requires_vm": false,
+      "semantic_identity_policy": "command-arguments",
+      "target_capability_policy": "runner-only",
+      "workflow": ".github/workflows/production-runner-android-build-tools-bootstrap.yml"
+    }
+  ],
+  "schema": "production-command-control-registry.v1"
+}
