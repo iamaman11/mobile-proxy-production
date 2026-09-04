@@ -77,6 +77,20 @@ jobs:
               body,
             });
 
+  android-build-tools-bootstrap:
+    name: Route exact owner Android Build Tools bootstrap command
+    if: >-
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/runner-android-build-tools-bootstrap ')
+    uses: ./.github/workflows/production-runner-android-build-tools-bootstrap.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+
   deploy:
     name: Run automatic deployment State Machine
     needs: route
