@@ -1,0 +1,29 @@
+name: Public Deployment projection observer policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-public-projection-observer:
+    name: Validate hosted read-only projection observer boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private deployment controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Compile and enforce observer read-only invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/observe_public_deployment_projection.py \
+            .github/controller/tests/test_projection_observer.py
+          python3 .github/controller/tests/test_projection_observer.py
