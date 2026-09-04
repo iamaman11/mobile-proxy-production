@@ -2,9 +2,9 @@
 
 ## Authority and ownership
 
-`iamaman11/mobile-proxy-production` owns the Deployment Controller. Private Issue #1 is the sole production command ingress. Public Issue #179 remains the migration/execution authority cursor during development and hardening.
+`iamaman11/mobile-proxy-production` owns the Deployment Controller. Private Issue #1 is the sole production command ingress. Public Issue #179 is the development/migration execution cursor; accepted production request identity remains cursor-free.
 
-The command ingress is not an arbitrary workflow runner. A comment is admissible only when the repository, Issue, owner, exact syntax, current controller revision, command contract, target contract and static handler mapping all agree. Any ambiguity fails closed before dispatch.
+A comment is admissible only when repository, Issue, owner, exact syntax, current controller revision, command contract, target contract and handler contract all agree. Any ambiguity fails closed before execution.
 
 ## Declarative control plane
 
@@ -12,118 +12,139 @@ The core classifier is `.github/scripts/issue_command_router.py`.
 
 Command contracts live in `.github/production/command-control-registry.json`. Target contracts live in `.github/production/targets.json`.
 
-A command contract declares at minimum:
+Each command contract declares:
 
-- exact anchored syntax;
+- exact anchored syntax and typed argument schema;
 - operation and operation class;
-- static handler, workflow and ref policy;
+- authority and target-capability policy;
+- handler, literal workflow mapping and ref policy;
 - read-only/destructive classification;
 - allowed targets and physical domains;
 - phone/VM/release capability requirements;
 - concurrency domain;
 - semantic identity and idempotency policy;
 - evidence policy;
-- recovery policy.
+- recovery policy;
+- optional typed `workflow_dispatch` input mapping for generic read-only routes.
 
-The classifier validates the registries before it accepts any command. Workflow names and refs are never supplied by Issue text and are never interpolated into dispatch endpoints.
+The classifier validates the complete registries before admitting any command. Issue text never supplies a workflow name, Git ref, path, URL, JSON payload or shell fragment.
+
+## One ingress, bounded handler classes
+
+`.github/workflows/production-control-router.yml` is the only `issue_comment` production ingress.
+
+It contains three bounded handler classes:
+
+1. `dispatch_workflow` — generic adapter for registry-allowlisted **read-only hosted** `workflow_dispatch` operations. The adapter re-loads and validates the registry, requires current private `main` to equal the comment-event controller SHA, derives the workflow/ref only from the trusted registry and dispatches through GitHub-native API. It cannot dispatch a destructive route.
+2. `deployment` — the existing Deployment Controller v2 path. It preserves `production-deployment-request.v2`, durable ACK/admission/intent/terminal evidence, target serialization, recovery and independent postcondition semantics.
+3. `workflow_call` — explicitly bounded reusable control workflows whose privilege/idempotency contract cannot be represented as generic read-only dispatch. Current use is the accepted Android Build Tools runner bootstrap.
+
+Adding another hosted read-only observer/diagnostic/verify route does **not** require modifying the core ingress: add the registry contract, target contract if needed, target workflow and tests. New privileged/mutating handler classes are never inferred automatically; they require an explicit controller design and policy change.
 
 ## Active routes
 
-Only these routes are currently enabled:
+Only these routes are enabled:
 
 1. `/observe-public-deployment-projection`
    - hosted read-only observation;
-   - literal `public-deployment-projection-observer.yml` dispatch on `main`;
-   - original router run attempt only, so rerunning the ingress cannot issue a second observer dispatch.
+   - registry maps it to `public-deployment-projection-observer.yml`, `ref=main`;
+   - only original ingress run attempt may dispatch, preventing rerun-created duplicate observation.
 
 2. `/deploy <target> <vX.Y.Z>`
-   - preserves the existing `production-deployment-request.v2` request builder and semantic identity;
-   - routes only to the existing Deployment State Machine in `release-deployment.yml`;
-   - `phone-production` is the accepted physical adapter;
-   - `vm-production` remains fail-closed until its adapter is explicitly accepted.
+   - preserves existing `production-deployment-request.v2` semantic identity;
+   - routes only to `release-deployment.yml`;
+   - `phone-production` is the active physical adapter;
+   - `vm-production` remains fail-closed/deferred until its adapter is separately accepted.
 
 3. `/runner-android-build-tools-bootstrap <exact-public-main-sha>`
-   - routes only to the existing bounded runner-tooling workflow;
-   - it is runner-tooling mutation, not phone mutation, and retains its own idempotent exact-package contract.
+   - routes only to the existing bounded runner-tooling reusable workflow;
+   - runner-tooling mutation is separate from phone mutation and retains its exact-package idempotency contract.
 
-No additional destructive command is activated by the registry framework.
+No new destructive command is activated by this framework.
 
-## Future command namespace
+## Typed arguments and extension surface
 
-The framework can represent operation classes such as `OBSERVE`, `DIAGNOSTIC`, `VERIFY`, `BUILD`, `RELEASE_VERIFY`, `DEPLOY`, `ROLLBACK`, `RECOVER`, `RECONCILE`, `STATUS` and bounded runner tooling.
+Supported registry argument types are intentionally bounded: target, semantic version, Git SHA, bounded identifier and explicit enum. The regex named captures must exactly equal the declared argument schema. Unknown captures, unnamed captures, unknown fields and unknown types are rejected.
 
-Names such as `/diagnose`, `/verify`, `/rollback`, `/recover`, `/reconcile` and `/status` are not automatically enabled. Each future route requires an explicit registry contract, a static handler/workflow mapping and permanent tests before activation. A registry entry alone must never grant a new physical capability accidentally.
+The framework recognizes operation classes such as `OBSERVE`, `DIAGNOSTIC`, `VERIFY`, `BUILD`, `RELEASE_VERIFY`, `DEPLOY`, `ROLLBACK`, `RECOVER`, `RECONCILE`, `STATUS` and bounded runner tooling. Names such as `/diagnose`, `/verify`, `/rollback`, `/recover`, `/reconcile` and `/status` are not enabled merely because the class exists.
+
+Generic `dispatch_workflow` routes are permanently constrained to read-only/non-destructive operation contracts. A new physical/destructive operation cannot be smuggled through the generic dispatcher.
 
 ## Product and controller identity
 
-Product identity and controller identity are independent:
+Product and controller identity are independent:
 
 - `product_release = vX.Y.Z` identifies an immutable public Product Release;
-- `controller_revision = exact private Git SHA` identifies the Deployment Controller revision executing the operation;
-- `target` identifies the physical serving target.
+- `controller_revision = exact private Git SHA` identifies the executing Deployment Controller revision;
+- `target` identifies the serving/physical target.
 
-A deployment command never means “build and deploy current HEAD”. It resolves the immutable Product Release contract for the requested version.
+`/deploy phone-production v0.1.4` never means “deploy current HEAD”. It resolves the immutable `v0.1.4` Product Release under the existing Release resolver contract.
 
-## Semantic request identity and duplicate handling
+## Semantic request identity and replay
 
-For deployment, the semantic request identity remains the existing `req-sha256:` digest over the normalized deployment schema, operation, target and Product Release tag. Comment ID, workflow run ID and run attempt are provenance/execution identities, not a new semantic request.
+Deployment semantic identity remains the existing `req-sha256:` digest over normalized deployment schema, operation, target and Product Release tag. Comment ID, workflow run ID and run attempt are provenance/execution identities and do not create a new semantic deployment request.
 
-Therefore repeated comments for the same deployment request do not imply a new destructive operation. The durable Issue #1 evidence ledger reconciles reusable admission, intent, terminal and duplicate state for the semantic request.
+Repeated equivalent deployment comments therefore do not imply another destructive operation. The durable Issue #1 evidence ledger reconciles reusable admission, intent, terminal and duplicate state for the semantic request.
 
-Read-only observer routing uses a stricter transport rule: only the original ingress run attempt may dispatch the observer. A workflow rerun is refused before dispatch.
+Generic read-only dispatch may define stricter transport idempotency. The current observer is `single-run-attempt`: rerunning the ingress workflow is rejected before dispatch.
 
-Runner-tooling operations retain their operation-specific idempotency contract and must fail closed if existing persistent tooling differs from the pinned package.
+Runner-tooling keeps its own exact-package no-op/create semantics and fails closed if an existing persisted package differs.
 
 ## Mutation lifecycle and evidence
 
-A destructive deployment is not successful because a workflow is green. Canonical execution evidence must preserve the existing lifecycle, including the equivalent of:
+A green workflow is not deployment success. Canonical deployment evidence retains the equivalent lifecycle:
 
 `REQUEST -> ACK -> ADMISSION -> INTENT -> DISPATCH -> TERMINAL -> independent postcondition`
 
-`ACK` identifies the controller execution. `ADMISSION` does not itself grant mutation authority. Mutation requires durable pre-dispatch intent. Canonical terminal state plus independent target postcondition determines acceptance. Public GitHub Deployment status is only a projection of canonical private truth.
+`ADMISSION` alone grants no mutation authority. Durable mutation intent must precede destructive dispatch. Canonical terminal state plus independent target postcondition determines acceptance. Public GitHub Deployment status is only a projection of canonical private truth.
 
 ## UNKNOWN and recovery
 
-`UNKNOWN` is distinct from `FAILED`.
+`UNKNOWN != FAILED`.
 
-If destructive dispatch may have occurred and the outcome is not proven, the controller must not perform a blind retry and must not synthesize success. Only bounded read-only recovery/reconciliation may re-establish truth before another destructive action can become admissible.
+If destructive dispatch may have occurred but the outcome is not proven, blind retry is forbidden and success must not be synthesized. Only bounded read-only recovery/reconciliation may restore truth before another destructive operation becomes admissible.
 
-`RECOVERED` is not the same as `ACCEPTED`. `UNKNOWN`, `RECOVERED` and quarantine states must remain fail-closed in public success projection.
+`RECOVERED` is not `ACCEPTED`. `UNKNOWN`, `RECOVERED` and quarantine states remain fail-closed for public success projection.
 
-Any future destructive command contract must explicitly carry semantic idempotency, serialization, terminal/postcondition evidence and an `UNKNOWN` / no-blind-retry recovery policy. The registry validator rejects incomplete destructive contracts.
+Every destructive command contract must carry semantic idempotency, non-empty serialization, terminal/postcondition evidence and explicit `UNKNOWN` / `no-blind-retry` recovery metadata. Runtime registry validation rejects an incomplete destructive contract before routing.
 
-## Target serialization
+## Target registry and serialization
 
-Target mutation is serialized by target/domain contract, not by comment or workflow-run identity. `phone-production` retains the existing global mutation serialization in the Deployment State Machine. Future targets must define their own serialization domain before physical mutation is enabled.
+Target mutation is serialized by target/domain contract, never by comment/run identity. `phone-production` retains the existing `production-target-phone-production` global mutation serialization. `vm-production` is present only as a deferred target contract and has no accepted physical adapter.
 
-Read-only observation may run outside the physical mutation lock only when its operation contract explicitly declares no physical mutation domain.
+A future target must define type, adapter, allowed operations, physical domains, serialization domain and required postcondition before physical mutation can become active.
 
-## Permission and secret boundary
+## Permissions and secrets
 
-The sole Issue ingress receives only the permissions needed by each job. It has no direct phone, ADB, provider or secret-bearing execution step.
+The sole ingress has no direct phone, ADB, provider or secret-bearing physical execution step.
 
-Higher privileges and target secrets remain confined to the accepted child workflows and GitHub Environments. Commands never contain PATs, credentials, secret values, arbitrary URLs, filesystem paths, JSON payloads, shell fragments, workflow names or Git refs.
+Per-job permissions are minimized:
 
-The observer dispatch job receives only `contents: read` and `actions: write`. Deployment ACK receives the Issue write permission it needs. Physical deployment secrets remain inside the existing deployment child workflow/environment boundary.
+- route classification: repository contents read;
+- generic hosted read-only dispatch: contents read + actions write;
+- deployment ACK: contents read + Issue write;
+- physical secrets remain in the existing deployment child workflow/GitHub Environment.
 
-## Current historical public projection observation
+Credentials never appear in Issue commands, registry values, evidence payloads or router logs. The generic dispatcher receives only the ephemeral GitHub job token and may call only the same-repository Actions dispatch endpoint selected from a validated registry contract.
 
-The bounded Stage 2AD observation returned `exact_match_count=2`. That is ambiguous under the accepted classification and is not a reusable deployment projection and not evidence of deployment success. The command-control framework does not modify or repair those historical public Deployments.
+## Current historical projection observation
 
-## Adding a future command
+Stage 2AD returned `exact_match_count=2`. That is ambiguous under the accepted classification. It is not a reusable projection candidate and not deployment-success evidence. This framework does not modify or repair those historical public Deployments.
 
-A future command is complete only when all of the following are true:
+## How to add a command without rebuilding the ingress
 
-1. Add one explicit command contract to `command-control-registry.json`.
-2. If target-bound, use an existing accepted target contract or add/accept a target contract first.
-3. Add one static handler/workflow mapping to the sole `production-control-router.yml`; never dynamically dispatch a registry-provided workflow/ref.
-4. Add exact parser/negative tests, including malformed input and capability-escalation cases.
-5. For mutation, prove semantic identity, idempotency, serialization, durable intent, terminal/postcondition evidence and UNKNOWN/no-blind-retry recovery.
-6. Keep secrets/physical adapters in the child workflow/environment, not the ingress.
-7. Require hosted policy CI on the exact PR head and exact merged `main` revision.
-8. Update the authoritative development checkpoint before executing any newly enabled production operation when the migration cursor requires it.
+For a new hosted read-only operation:
 
-If any required metadata or evidence is absent, the route must remain disabled or the classifier/policy must reject it.
+1. Add the target workflow with `workflow_dispatch`, hosted runner and least privileges.
+2. Add one command contract to `command-control-registry.json`: exact regex, typed arguments, operation class, literal workflow path, `ref=main`, read-only safety flags, evidence/idempotency/recovery metadata and optional argument-to-workflow-input mapping.
+3. If target-bound, use/add a target contract with explicit allowed operation.
+4. Add positive and negative tests, including malformed arguments, rerun/replay behavior and capability-escalation attempts.
+5. Require exact PR-head hosted CI and exact merged-main push guards.
+6. Update the development authority checkpoint before execution when #179 requires it.
+
+The core ingress and generic dispatcher do not change for this class of command.
+
+For a destructive/physical operation, do **not** use `dispatch_workflow`. Define/extend a controller-owned privileged handler only after semantic identity, durable intent, serialization, postcondition and UNKNOWN recovery are specified and policy-tested. The generic adapter is intentionally incapable of becoming that bypass.
 
 ## Permanent fitness requirements
 
@@ -131,9 +152,12 @@ CI must fail if:
 
 - more than one private `issue_comment` production ingress exists;
 - an unknown/incomplete command or target contract is introduced;
-- a route accepts a user-supplied workflow or ref;
+- regex captures and typed argument schema drift;
+- a route accepts user-supplied workflow/ref/path/JSON/shell values;
+- generic workflow dispatch is not read-only/non-destructive or targets a non-hosted/physical workflow;
 - a read-only route claims physical mutation domains;
 - a destructive route lacks semantic idempotency, serialization, terminal/postcondition evidence or UNKNOWN/no-blind-retry recovery;
-- existing deployment semantic identity or canonical state-machine invariants are weakened;
-- the ingress acquires direct self-hosted/ADB/phone/provider/secret capability;
-- the single destructive phone dispatch callsite or target-global serialization invariant is weakened.
+- existing deployment semantic identity or canonical state-machine invariants weaken;
+- the ingress gains direct self-hosted/ADB/phone/provider/secret capability;
+- VM ceases to be deferred without an accepted adapter;
+- the single destructive phone dispatch callsite or phone target-global serialization invariant weakens.
