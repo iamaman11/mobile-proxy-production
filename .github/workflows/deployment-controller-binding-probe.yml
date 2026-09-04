@@ -1,0 +1,47 @@
+name: Deployment controller binding probe
+
+on:
+  workflow_call:
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: false
+      ANDROID_TARGET_BINDING_KEY:
+        required: false
+      PUBLIC_DEPLOYMENTS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  classify-bindings:
+    name: Classify reusable-workflow deployment bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Emit bounded presence classification
+        shell: bash
+        env:
+          ANDROID_PRODUCTION_SERIAL_VALUE: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+          ANDROID_TARGET_BINDING_KEY_VALUE: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+          PUBLIC_DEPLOYMENTS_TOKEN_VALUE: ${{ secrets.PUBLIC_DEPLOYMENTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          classify() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              printf '%s=PRESENT\n' "$name"
+            else
+              printf '%s=MISSING\n' "$name"
+              missing=1
+            fi
+          }
+          classify ANDROID_PRODUCTION_SERIAL "$ANDROID_PRODUCTION_SERIAL_VALUE"
+          classify ANDROID_TARGET_BINDING_KEY "$ANDROID_TARGET_BINDING_KEY_VALUE"
+          classify PUBLIC_DEPLOYMENTS_TOKEN "$PUBLIC_DEPLOYMENTS_TOKEN_VALUE"
+          printf 'SECRET_VALUES_EXPOSED=FALSE\n'
+          printf 'PHONE_ACCESSED=FALSE\n'
+          printf 'DEPLOYMENT_CREATED=FALSE\n'
+          exit "$missing"
