@@ -1,4 +1,4 @@
-name: Issue command router policy
+name: Issue command control policy
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-issue-command-router:
-    name: Validate bounded Issue #1 workflow dispatch boundary
+  validate-issue-command-control:
+    name: Validate sole Issue #1 ingress and declarative command contracts
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,11 +19,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run pure allowlist and non-mutation policy tests
+      - name: Compile classifier and parse registries
         shell: bash
         run: |
           set -euo pipefail
           python3 -m py_compile \
             .github/scripts/issue_command_router.py \
             .github/controller/tests/test_issue_command_router.py
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in (
+              Path('.github/production/command-control-registry.json'),
+              Path('.github/production/targets.json'),
+          ):
+              value = json.loads(path.read_text(encoding='utf-8'))
+              if not isinstance(value, dict):
+                  raise SystemExit(f'{path} is not a JSON object')
+          print('COMMAND_CONTROL_REGISTRIES_JSON_OK')
+          PY
+
+      - name: Run fail-closed command-control policy tests
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 .github/controller/tests/test_issue_command_router.py
