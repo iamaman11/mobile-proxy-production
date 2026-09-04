@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ TRUSTED_ACTOR = "github-actions[bot]"
 INTENT_HEADING = "## DEPLOYMENT MUTATION INTENT V2"
 TERMINAL_HEADING = "## DEPLOYMENT TERMINAL V2"
 DUPLICATE_HEADING = "## DEPLOYMENT DUPLICATE V2"
+_GET_TRANSPORT_ATTEMPTS = 3
+_GET_TRANSPORT_BACKOFF_SECONDS = (0.25, 0.5)
 
 
 class EvidenceError(RuntimeError):
@@ -82,10 +85,11 @@ class IssueEvidenceStore:
         self.token = token
 
     def _open(self, url: str, *, method: str = "GET", payload: bytes | None = None):
+        normalized_method = method.upper()
         request = urllib.request.Request(
             url,
             data=payload,
-            method=method,
+            method=normalized_method,
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {self.token}",
@@ -94,12 +98,17 @@ class IssueEvidenceStore:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        try:
-            return urllib.request.urlopen(request, timeout=30)
-        except urllib.error.HTTPError as exc:
-            raise EvidenceError(f"private durable evidence request rejected with HTTP {exc.code}") from exc
-        except (OSError, urllib.error.URLError) as exc:
-            raise EvidenceTransportError("private durable evidence transport failed") from exc
+        attempts = _GET_TRANSPORT_ATTEMPTS if normalized_method == "GET" and payload is None else 1
+        for attempt in range(attempts):
+            try:
+                return urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as exc:
+                raise EvidenceError(f"private durable evidence request rejected with HTTP {exc.code}") from exc
+            except (OSError, urllib.error.URLError) as exc:
+                if attempt + 1 >= attempts:
+                    raise EvidenceTransportError("private durable evidence transport failed") from exc
+                time.sleep(_GET_TRANSPORT_BACKOFF_SECONDS[attempt])
+        raise AssertionError("unreachable durable evidence transport retry state")
 
     def list_records(self, heading: str) -> list[EvidenceRecord]:
         result: list[EvidenceRecord] = []
