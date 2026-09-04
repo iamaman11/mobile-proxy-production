@@ -64,7 +64,6 @@ jobs:
               'source-manifest.json',
               'hashlib.sha256(path.read_bytes()).hexdigest() != files[name]',
               'runs-on: [self-hosted, Linux, X64, android-production]',
-              'uses: actions/setup-java@v4',
               "distribution: temurin",
               "java-version: '17'",
               'ANDROID_TARGET_BINDING_KEY: mobile-proxy/android-production/target-binding/v1/public-nonsecret',
@@ -111,6 +110,36 @@ jobs:
                   + ', '.join(present)
               )
 
+          action_pins = {
+              'checkout': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+              'upload': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+              'download': 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
+              'setup_java': 'actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c',
+          }
+          expected_actions = [
+              action_pins['checkout'],
+              action_pins['upload'],
+              action_pins['download'],
+              action_pins['download'],
+              action_pins['download'],
+              action_pins['setup_java'],
+              action_pins['upload'],
+          ]
+          action_refs = re.findall(
+              r'(?m)^\s*uses:\s*(actions/[A-Za-z0-9_.-]+@[^\s#]+)',
+              text,
+          )
+          if sorted(action_refs) != sorted(expected_actions):
+              raise SystemExit(
+                  'signing observer action dependency inventory differs: '
+                  + repr(action_refs)
+              )
+          for ref in action_refs:
+              if re.fullmatch(r'actions/[A-Za-z0-9_.-]+@[0-9a-f]{40}', ref) is None:
+                  raise SystemExit('signing observer action is not immutable-SHA pinned: ' + ref)
+          if len(action_refs) != 7:
+              raise SystemExit('signing observer must contain exactly seven action callsites')
+
           source_verify = text.index('Verify immutable canonical source and apksigner before phone access')
           java_setup = text.index('Ensure Java signing runtime on production runner')
           tooling = text.index('Activate same-run digest-bound apksigner tooling read-only')
@@ -119,10 +148,14 @@ jobs:
           if not (source_verify < java_setup < tooling < context < observe):
               raise SystemExit('signing observer ordering allows phone observation before source/tool/context admission')
 
-          if text.count('uses: actions/upload-artifact@v4') < 2:
+          if action_refs.count(action_pins['upload']) != 2:
               raise SystemExit('immutable source/tool and bounded observation persistence must both remain explicit')
-          if text.count('uses: actions/download-artifact@v4') < 3:
+          if action_refs.count(action_pins['download']) != 3:
               raise SystemExit('bounded immutable source/tool transport retries were removed')
+          if action_refs.count(action_pins['checkout']) != 1:
+              raise SystemExit('exact canonical source checkout dependency differs')
+          if action_refs.count(action_pins['setup_java']) != 1:
+              raise SystemExit('Java runtime setup dependency differs')
 
           phone_job = re.search(
               r'(?ms)^  phone-signing-identity:\n(?P<body>.*?)(?=^  publish-control-evidence:\n)',
@@ -142,6 +175,7 @@ jobs:
                   raise SystemExit('read-only signing observer contains a phone mutation command')
 
           print('Phone signing identity current-authority policy: accepted')
+          print('SIGNING_OBSERVER_ACTIONS_PINNED_NODE24_OK count=7')
           print('apksigner_transport=same_run_hosted_digest_bound_jar')
           print('apksigner_build_tools_version=36.0.0')
           print('target_binding_secret_required=false')
