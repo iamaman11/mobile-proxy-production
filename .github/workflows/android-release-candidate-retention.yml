@@ -1,10 +1,7 @@
 name: Production Android signed migration-candidate retention
 
 on:
-  workflow_run:
-    workflows:
-      - Production Android 0.1.4 signed migration candidate
-    types: [completed]
+  workflow_call:
 
 permissions:
   actions: read
