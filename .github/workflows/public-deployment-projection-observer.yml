@@ -1,0 +1,26 @@
+name: Public Deployment projection observer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observe-public-deployment-projection:
+    name: Observe exact public Deployment projection read-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact private controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Read exact public Deployment projection only
+        env:
+          PUBLIC_DEPLOYMENTS_TOKEN: ${{ secrets.PUBLIC_DEPLOYMENTS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/observe_public_deployment_projection.py
