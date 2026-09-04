@@ -11,10 +11,20 @@ from typing import Any, Mapping
 PRIVATE_REPOSITORY = "iamaman11/mobile-proxy-production"
 ISSUE_NUMBER = 1
 TRUSTED_ACTOR = "github-actions[bot]"
+ADMISSION_HEADING = "## DEPLOYMENT ADMISSION V2"
 INTENT_HEADING = "## DEPLOYMENT MUTATION INTENT V2"
 TERMINAL_HEADING = "## DEPLOYMENT TERMINAL V2"
 DUPLICATE_HEADING = "## DEPLOYMENT DUPLICATE V2"
 READ_TRANSPORT_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
+_ADMISSION_STABLE_FIELDS = (
+    "semantic_request_id",
+    "target",
+    "product_release",
+    "release_id",
+    "release_source_sha",
+    "artifact_digest",
+    "deployment_id",
+)
 
 
 class EvidenceError(RuntimeError):
@@ -75,6 +85,37 @@ def _parse_body(body: str, heading: str) -> Mapping[str, Any] | None:
     if not isinstance(value, Mapping):
         raise EvidenceError(f"trusted {heading} JSON is not an object")
     return value
+
+
+def _admission_stable_identity(payload: Mapping[str, Any]) -> tuple[object, ...]:
+    return tuple(payload.get(field) for field in _ADMISSION_STABLE_FIELDS)
+
+
+def _validate_admission_payload(payload: Mapping[str, Any]) -> None:
+    if payload.get("schema") != "production-deployment-admission.v2":
+        raise EvidenceError("deployment admission schema differs")
+    if not str(payload.get("semantic_request_id", "")).startswith("req-sha256:"):
+        raise EvidenceError("deployment admission semantic request id is invalid")
+    if not str(payload.get("execution_id", "")).startswith("gh-run:"):
+        raise EvidenceError("deployment admission execution id is invalid")
+    if not str(payload.get("controller_revision", "")):
+        raise EvidenceError("deployment admission controller revision is unavailable")
+    if not str(payload.get("target", "")) or not str(payload.get("product_release", "")):
+        raise EvidenceError("deployment admission target/release identity is incomplete")
+    release_id = payload.get("release_id")
+    deployment_id = payload.get("deployment_id")
+    if not isinstance(release_id, int) or release_id <= 0:
+        raise EvidenceError("deployment admission Release id is invalid")
+    if not isinstance(deployment_id, int) or deployment_id <= 0:
+        raise EvidenceError("deployment admission public Deployment id is invalid")
+    if payload.get("initial_projection_state") != "queued":
+        raise EvidenceError("deployment admission initial projection must be queued")
+    if payload.get("mutation_authority") is not False:
+        raise EvidenceError("deployment admission must not grant mutation authority")
+    if payload.get("dispatch_authority") is not False:
+        raise EvidenceError("deployment admission must not grant dispatch authority")
+    if payload.get("mutation_performed") is not False:
+        raise EvidenceError("deployment admission cannot claim physical mutation")
 
 
 class IssueEvidenceStore:
@@ -160,6 +201,77 @@ class IssueEvidenceStore:
         if not isinstance(comment_id, int) or comment_id <= 0:
             raise EvidenceWriteAmbiguous("durable private evidence write was not confirmed")
         return EvidenceRecord(comment_id, heading, dict(payload))
+
+    def admission_for_execution(self, semantic_request_id: str, execution_id: str) -> EvidenceRecord | None:
+        records = [
+            item for item in self.list_records(ADMISSION_HEADING)
+            if item.payload.get("semantic_request_id") == semantic_request_id
+            and item.payload.get("execution_id") == execution_id
+        ]
+        for record in records:
+            _validate_admission_payload(record.payload)
+        if len(records) > 1:
+            first = records[0].identity
+            if any(item.identity != first for item in records[1:]):
+                raise EvidenceError("execution has conflicting durable deployment admissions")
+        return records[0] if records else None
+
+    def reusable_admission(self, semantic_request_id: str) -> EvidenceRecord | None:
+        records = [
+            item for item in self.list_records(ADMISSION_HEADING)
+            if item.payload.get("semantic_request_id") == semantic_request_id
+        ]
+        for record in records:
+            _validate_admission_payload(record.payload)
+        if not records:
+            return None
+        expected = _admission_stable_identity(records[0].payload)
+        if any(_admission_stable_identity(item.payload) != expected for item in records[1:]):
+            raise EvidenceError("semantic request has conflicting durable deployment admissions")
+        return records[0]
+
+    def _matching_admission(self, payload: Mapping[str, Any]) -> EvidenceRecord | None:
+        _validate_admission_payload(payload)
+        request_id = str(payload.get("semantic_request_id", ""))
+        reusable = self.reusable_admission(request_id)
+        if reusable is not None and _admission_stable_identity(reusable.payload) != _admission_stable_identity(payload):
+            raise EvidenceError("semantic request already has a different public Deployment admission")
+        execution_id = str(payload.get("execution_id", ""))
+        existing = self.admission_for_execution(request_id, execution_id)
+        if existing is None:
+            return None
+        expected_identity = evidence_identity(ADMISSION_HEADING, payload)
+        if existing.identity != expected_identity:
+            raise EvidenceError("execution already has a different durable deployment admission")
+        return existing
+
+    def persist_admission(self, payload: Mapping[str, Any]) -> EvidenceRecord:
+        existing = self._matching_admission(payload)
+        if existing is not None:
+            return existing
+        try:
+            return self.create(ADMISSION_HEADING, payload)
+        except EvidenceWriteAmbiguous as first_error:
+            try:
+                reconciled = self._matching_admission(payload)
+            except EvidenceError as reconcile_error:
+                raise EvidenceError("ambiguous deployment admission write could not be reconciled") from reconcile_error
+            if reconciled is not None:
+                return reconciled
+            try:
+                return self.create(ADMISSION_HEADING, payload)
+            except EvidenceWriteAmbiguous as second_error:
+                try:
+                    reconciled = self._matching_admission(payload)
+                except EvidenceError as reconcile_error:
+                    raise EvidenceError("bounded deployment admission retry could not be reconciled") from reconcile_error
+                if reconciled is not None:
+                    return reconciled
+                raise EvidenceError("durable deployment admission remains absent after bounded reconciliation") from second_error
+            except EvidenceError:
+                raise
+            finally:
+                _ = first_error
 
     def request_history(self, semantic_request_id: str) -> tuple[EvidenceRecord | None, EvidenceRecord | None]:
         intents = [
