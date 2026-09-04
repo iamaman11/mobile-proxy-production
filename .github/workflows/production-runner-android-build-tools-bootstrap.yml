@@ -87,7 +87,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for tool in curl sha256sum python3 java diff; do
+          for tool in curl sha256sum python3 java diff cp mv; do
             command -v "$tool" >/dev/null 2>&1 || {
               echo "required runner bootstrap prerequisite unavailable: $tool" >&2
               exit 1
@@ -174,8 +174,10 @@ jobs:
           )
           if any(not path.is_file() for path in required):
               raise SystemExit('Android Build Tools archive lacks required verifier files')
-          if any(not os.access(path, os.X_OK) for path in required[:2]):
-              raise SystemExit('Android Build Tools verifier executables are not executable')
+          for executable in required[:2]:
+              executable.chmod(0o755)
+              if not os.access(executable, os.X_OK):
+                  raise SystemExit('Android Build Tools verifier executable is not executable')
 
           marker = {
               'schema': 'mobile-proxy-runner-tooling.v1',
@@ -196,23 +198,30 @@ jobs:
           echo 'archive_sha256_verified=true'
           echo 'phone_access=false'
 
-      - name: Install exact staged package only into controller-owned user-local location
+      - name: Publish exact package atomically inside controller-owned user-local location
         shell: bash
         run: |
           set -euo pipefail
           parent="${ANDROID_SDK_ROOT}/build-tools"
+          install_stage="${parent}/.${ANDROID_BUILD_TOOLS_VERSION}.stage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           case "$parent" in "${HOME}/"*) ;; *) echo 'Android Build Tools parent escaped runner home' >&2; exit 1 ;; esac
+          case "$install_stage" in "${parent}/."*) ;; *) echo 'Android Build Tools install stage escaped parent' >&2; exit 1 ;; esac
           mkdir -p "$parent"
+          test ! -e "$install_stage"
+          cp -a "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage"
+          printf 'ANDROID_BUILD_TOOLS_INSTALL_STAGING=%s\n' "$install_stage" >> "$GITHUB_ENV"
+          diff -qr "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage" >/dev/null
           if [ -e "$ANDROID_BUILD_TOOLS_DIR" ]; then
             test -d "$ANDROID_BUILD_TOOLS_DIR"
-            diff -qr "$ANDROID_BUILD_TOOLS_STAGING" "$ANDROID_BUILD_TOOLS_DIR" >/dev/null || {
+            diff -qr "$install_stage" "$ANDROID_BUILD_TOOLS_DIR" >/dev/null || {
               echo 'existing user-local Android Build Tools differ from pinned package' >&2
               exit 1
             }
+            rm -rf "$install_stage"
             echo 'android_build_tools_install=noop_existing_exact'
           else
-            mv "$ANDROID_BUILD_TOOLS_STAGING" "$ANDROID_BUILD_TOOLS_DIR"
-            echo 'android_build_tools_install=created_exact'
+            mv "$install_stage" "$ANDROID_BUILD_TOOLS_DIR"
+            echo 'android_build_tools_install=created_exact_atomic'
           fi
           test -f "$ANDROID_BUILD_TOOLS_DIR/.mobile-proxy-source.json"
           echo 'runner_tooling_mutation=true'
@@ -263,7 +272,7 @@ jobs:
           echo 'config_rendered=false'
           echo 'secret_access=false'
 
-      - name: Remove temporary downloaded archive
+      - name: Remove bounded temporary staging only
         if: always()
         shell: bash
         run: |
@@ -273,4 +282,9 @@ jobs:
           fi
           if [ -n "${ANDROID_BUILD_TOOLS_STAGING:-}" ] && [ -e "$ANDROID_BUILD_TOOLS_STAGING" ]; then
             case "$ANDROID_BUILD_TOOLS_STAGING" in "${RUNNER_TEMP}/"*) rm -rf "$ANDROID_BUILD_TOOLS_STAGING" ;; *) exit 1 ;; esac
+          fi
+          if [ -n "${ANDROID_BUILD_TOOLS_INSTALL_STAGING:-}" ] && [ -e "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" ]; then
+            expected_prefix="${HOME}/.local/share/mobile-proxy/android-sdk/build-tools/.36.0.0.stage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" = "$expected_prefix"
+            rm -rf "$ANDROID_BUILD_TOOLS_INSTALL_STAGING"
           fi
