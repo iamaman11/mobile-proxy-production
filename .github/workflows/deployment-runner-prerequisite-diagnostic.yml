@@ -1,0 +1,94 @@
+name: Deployment runner prerequisite diagnostic
+
+on:
+  push:
+    branches:
+      - agent/deployment-runner-prerequisite-diagnostic
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  classify-runner-prerequisites:
+    name: Classify Android tooling and evidence-read reachability without device access
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact accepted controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 586244614e44e9cca758ce80ad772a9a8986d829
+          persist-credentials: false
+
+      - name: Classify Android package tools without invoking them
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          def presence(value: bool) -> str:
+              return "PRESENT" if value else "MISSING"
+
+          for tool in ("aapt2", "aapt", "apksigner"):
+              print(f"{tool.upper()}_PATH={presence(shutil.which(tool) is not None)}")
+
+          for env_name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+              raw = os.environ.get(env_name, "").strip()
+              print(f"{env_name}_SET={presence(bool(raw))}")
+              found = {"aapt2": False, "aapt": False, "apksigner": False}
+              if raw:
+                  build_tools = Path(raw) / "build-tools"
+                  if build_tools.is_dir():
+                      try:
+                          versions = [entry for entry in build_tools.iterdir() if entry.is_dir()]
+                      except OSError:
+                          versions = []
+                      for version in versions:
+                          for tool in found:
+                              candidate = version / tool
+                              if candidate.is_file() and os.access(candidate, os.X_OK):
+                                  found[tool] = True
+              for tool, is_found in found.items():
+                  print(f"{env_name}_BUILD_TOOLS_{tool.upper()}={presence(is_found)}")
+
+          print("TOOL_VALUES_EXPOSED=FALSE")
+          print("ADB_INVOKED=FALSE")
+          print("PHONE_ACCESSED=FALSE")
+          print("RUNNER_MUTATION=FALSE")
+          PY
+
+      - name: Classify controller durable-evidence read transport
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from evidence_store import EvidenceError, IssueEvidenceStore
+
+          try:
+              # Use the controller's normal IssueEvidenceStore read path. Do not
+              # print records, token values, comment bodies, or identifiers.
+              IssueEvidenceStore(os.environ.get('GITHUB_TOKEN', '')).list_records(
+                  '## DEPLOYMENT TERMINAL V2'
+              )
+          except EvidenceError:
+              print('EVIDENCE_READ_REACHABLE=FALSE')
+          else:
+              print('EVIDENCE_READ_REACHABLE=TRUE')
+
+          print('EVIDENCE_WRITE_ATTEMPTED=FALSE')
+          print('SECRET_VALUES_EXPOSED=FALSE')
+          print('ADB_INVOKED=FALSE')
+          print('PHONE_ACCESSED=FALSE')
+          print('DEPLOYMENT_CREATED_OR_UPDATED=FALSE')
+          PY
