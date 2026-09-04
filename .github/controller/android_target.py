@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import shutil
 import subprocess
@@ -11,6 +12,8 @@ from pathlib import Path
 _PACKAGE = "com.example.mobileproxy"
 _VERSION_CODE = re.compile(r"versionCode=([0-9]+)")
 _VERSION_NAME = re.compile(r"versionName=([^\s]+)")
+ANDROID_BUILD_TOOLS_VERSION = "36.0.0"
+_ANDROID_SDK_USER_RELATIVE_ROOT = Path(".local/share/mobile-proxy/android-sdk")
 
 
 class AndroidObservationUnavailable(RuntimeError):
@@ -19,6 +22,18 @@ class AndroidObservationUnavailable(RuntimeError):
 
 class AndroidArtifactRefused(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AndroidBuildTools:
+    version: str
+    root: Path
+    aapt2: Path
+    apksigner: Path
+
+    @property
+    def identity(self) -> str:
+        return f"android-build-tools:{self.version}:user-local-v1"
 
 
 @dataclass(frozen=True)
@@ -42,6 +57,43 @@ class DispatchResult:
     confirmed: bool
     outcome_unknown: bool
     error_class: str | None
+
+
+def _user_android_sdk_root(*, home: Path | None = None) -> Path:
+    home_root = (home if home is not None else Path.home()).expanduser().resolve()
+    if not home_root.is_absolute():
+        raise AndroidArtifactRefused("runner home for Android build-tools is invalid")
+    root = (home_root / _ANDROID_SDK_USER_RELATIVE_ROOT).resolve()
+    try:
+        root.relative_to(home_root)
+    except ValueError as exc:
+        raise AndroidArtifactRefused("Android build-tools root escaped runner home") from exc
+    return root
+
+
+def resolve_android_build_tools(*, home: Path | None = None) -> AndroidBuildTools:
+    """Resolve the exact user-local verifier toolchain without consulting PATH.
+
+    Installation is deliberately outside this controller function. Production
+    execution is admitted only when the pinned Build Tools revision is already
+    present at the controller-owned user-local location.
+    """
+    sdk_root = _user_android_sdk_root(home=home)
+    build_root = sdk_root / "build-tools" / ANDROID_BUILD_TOOLS_VERSION
+    aapt2 = build_root / "aapt2"
+    apksigner = build_root / "apksigner"
+    required = (("aapt2", aapt2), ("apksigner", apksigner))
+    missing = [name for name, path in required if not path.is_file() or not os.access(path, os.X_OK)]
+    if missing:
+        raise AndroidArtifactRefused(
+            f"pinned Android build-tools {ANDROID_BUILD_TOOLS_VERSION} are unavailable"
+        )
+    return AndroidBuildTools(
+        version=ANDROID_BUILD_TOOLS_VERSION,
+        root=build_root,
+        aapt2=aapt2,
+        apksigner=apksigner,
+    )
 
 
 def target_binding_id(serial: str, key: str) -> str:
@@ -132,18 +184,19 @@ def verify_artifact(
     expected_sha256: str,
     expected_version_name: str,
     expected_version_code: int,
+    build_tools: AndroidBuildTools | None = None,
 ) -> dict[str, object]:
     if not apk.is_file():
         raise AndroidArtifactRefused("admitted Android artifact is unavailable")
     actual = hashlib.sha256(apk.read_bytes()).hexdigest()
     if actual != expected_sha256:
         raise AndroidArtifactRefused("downloaded Android artifact digest differs")
-    aapt = shutil.which("aapt2") or shutil.which("aapt")
-    if aapt is None:
-        raise AndroidArtifactRefused("Android package metadata tool is unavailable")
+    tools = build_tools if build_tools is not None else resolve_android_build_tools()
+    if tools.version != ANDROID_BUILD_TOOLS_VERSION:
+        raise AndroidArtifactRefused("Android verifier build-tools identity differs")
     try:
         result = subprocess.run(
-            [aapt, "dump", "badging", str(apk)],
+            [str(tools.aapt2), "dump", "badging", str(apk)],
             capture_output=True,
             text=True,
             timeout=60,
@@ -161,12 +214,9 @@ def verify_artifact(
     package, code, name = match.group(1), int(match.group(2)), match.group(3)
     if package != _PACKAGE or code != expected_version_code or name != expected_version_name:
         raise AndroidArtifactRefused("Android artifact package/version differs from Release manifest")
-    apksigner = shutil.which("apksigner")
-    if apksigner is None:
-        raise AndroidArtifactRefused("APK signature verifier is unavailable")
     try:
         subprocess.run(
-            [apksigner, "verify", "--verbose", str(apk)],
+            [str(tools.apksigner), "verify", "--verbose", str(apk)],
             capture_output=True,
             text=True,
             timeout=60,
@@ -180,6 +230,8 @@ def verify_artifact(
         "version_code": code,
         "sha256": actual,
         "signature_verified": True,
+        "build_tools_identity": tools.identity,
+        "build_tools_version": tools.version,
     }
 
 
