@@ -150,7 +150,8 @@ jobs:
               'always() && needs.admit.outputs.admitted',
               'runs-on: ubuntu-latest',
               '.github/scripts/finalize_deployment_projection.py',
-              'TARGET_JOB_RESULT: ${{ needs.execute-phone.result }}',
+              'TARGET_JOB_RESULT:',
+              'needs.execute-phone.result',
           )
           missing_projection = [item for item in projection_required if item not in deployment]
           if missing_projection:
