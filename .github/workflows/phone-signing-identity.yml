@@ -112,7 +112,7 @@ jobs:
           PY
 
       - name: Checkout exact canonical verifier source on hosted runner
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: iamaman11/mobile-proxy
           ref: ${{ steps.command.outputs.canonical_sha }}
@@ -182,7 +182,7 @@ jobs:
           PY
 
       - name: Upload immutable canonical signing-observer source
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: phone-signing-observer-source-${{ steps.command.outputs.canonical_sha }}
           path: ${{ runner.temp }}/phone-signing-observer-source
@@ -211,7 +211,7 @@ jobs:
       - name: Download immutable canonical source attempt 1
         id: source-download-1
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: phone-signing-observer-source-${{ env.CANONICAL_SHA }}
           path: ${{ runner.temp }}/phone-signing-observer-source-attempt-1
@@ -225,7 +225,7 @@ jobs:
         id: source-download-2
         if: steps.source-download-1.outcome == 'failure'
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: phone-signing-observer-source-${{ env.CANONICAL_SHA }}
           path: ${{ runner.temp }}/phone-signing-observer-source-attempt-2
@@ -239,7 +239,7 @@ jobs:
         id: source-download-3
         if: steps.source-download-1.outcome == 'failure' && steps.source-download-2.outcome == 'failure'
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: phone-signing-observer-source-${{ env.CANONICAL_SHA }}
           path: ${{ runner.temp }}/phone-signing-observer-source-attempt-3
@@ -308,7 +308,7 @@ jobs:
           PY
 
       - name: Ensure Java signing runtime on production runner
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           distribution: temurin
           java-version: '17'
@@ -496,7 +496,7 @@ jobs:
         id: evidence-upload
         if: steps.observe.outputs.observation_validated == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: phone-signing-continuity-${{ env.CANONICAL_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/phone-signing-continuity.json
