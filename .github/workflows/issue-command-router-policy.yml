@@ -19,12 +19,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compile classifier and parse registries
+      - name: Compile command adapters and parse registries
         shell: bash
         run: |
           set -euo pipefail
           python3 -m py_compile \
             .github/scripts/issue_command_router.py \
+            .github/scripts/dispatch_allowlisted_workflow.py \
             .github/controller/tests/test_issue_command_router.py
           python3 - <<'PY'
           import json
