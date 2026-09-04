@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 from evidence_store import (  # noqa: E402
     EvidenceError,
     EvidenceRecord,
+    EvidenceTransportError,
     EvidenceWriteAmbiguous,
     INTENT_HEADING,
     IssueEvidenceStore,
@@ -59,6 +63,89 @@ def terminal_payload(*, state: str = "REFUSED") -> dict[str, object]:
         "state": state,
         "mutation_performed": False,
     }
+
+
+def test_get_transport_transient_failure_recovers_with_bounded_retry() -> None:
+    store = IssueEvidenceStore("test-token")
+    calls: list[str] = []
+    sleeps: list[float] = []
+    sentinel = object()
+    original_urlopen = urllib.request.urlopen
+    original_sleep = time.sleep
+
+    def fake_urlopen(request, timeout=30):
+        calls.append(request.get_method())
+        if len(calls) < 3:
+            raise urllib.error.URLError("transient TLS EOF")
+        return sentinel
+
+    try:
+        urllib.request.urlopen = fake_urlopen
+        time.sleep = sleeps.append
+        result = store._open("https://api.github.com/example")
+    finally:
+        urllib.request.urlopen = original_urlopen
+        time.sleep = original_sleep
+
+    assert result is sentinel
+    assert calls == ["GET", "GET", "GET"]
+    assert sleeps == [0.25, 0.5]
+
+
+def test_get_transport_exhaustion_fails_after_exact_bound() -> None:
+    store = IssueEvidenceStore("test-token")
+    calls: list[str] = []
+    sleeps: list[float] = []
+    original_urlopen = urllib.request.urlopen
+    original_sleep = time.sleep
+
+    def fake_urlopen(request, timeout=30):
+        calls.append(request.get_method())
+        raise urllib.error.URLError("persistent TLS EOF")
+
+    try:
+        urllib.request.urlopen = fake_urlopen
+        time.sleep = sleeps.append
+        try:
+            store._open("https://api.github.com/example")
+        except EvidenceTransportError:
+            pass
+        else:
+            raise AssertionError("exhausted GET transport unexpectedly succeeded")
+    finally:
+        urllib.request.urlopen = original_urlopen
+        time.sleep = original_sleep
+
+    assert calls == ["GET", "GET", "GET"]
+    assert sleeps == [0.25, 0.5]
+
+
+def test_post_transport_failure_has_zero_automatic_retry() -> None:
+    store = IssueEvidenceStore("test-token")
+    calls: list[str] = []
+    sleeps: list[float] = []
+    original_urlopen = urllib.request.urlopen
+    original_sleep = time.sleep
+
+    def fake_urlopen(request, timeout=30):
+        calls.append(request.get_method())
+        raise urllib.error.URLError("ambiguous POST transport failure")
+
+    try:
+        urllib.request.urlopen = fake_urlopen
+        time.sleep = sleeps.append
+        try:
+            store.create(TERMINAL_HEADING, terminal_payload())
+        except EvidenceWriteAmbiguous:
+            pass
+        else:
+            raise AssertionError("ambiguous POST transport unexpectedly succeeded")
+    finally:
+        urllib.request.urlopen = original_urlopen
+        time.sleep = original_sleep
+
+    assert calls == ["POST"]
+    assert sleeps == []
 
 
 def test_terminal_identity_is_deterministic() -> None:
