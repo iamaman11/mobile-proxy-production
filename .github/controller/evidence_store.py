@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ TRUSTED_ACTOR = "github-actions[bot]"
 INTENT_HEADING = "## DEPLOYMENT MUTATION INTENT V2"
 TERMINAL_HEADING = "## DEPLOYMENT TERMINAL V2"
 DUPLICATE_HEADING = "## DEPLOYMENT DUPLICATE V2"
+READ_TRANSPORT_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
 
 
 class EvidenceError(RuntimeError):
@@ -94,12 +96,17 @@ class IssueEvidenceStore:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        try:
-            return urllib.request.urlopen(request, timeout=30)
-        except urllib.error.HTTPError as exc:
-            raise EvidenceError(f"private durable evidence request rejected with HTTP {exc.code}") from exc
-        except (OSError, urllib.error.URLError) as exc:
-            raise EvidenceTransportError("private durable evidence transport failed") from exc
+        retry_delays = READ_TRANSPORT_RETRY_DELAYS_SECONDS if method.upper() == "GET" and payload is None else ()
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                return urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as exc:
+                raise EvidenceError(f"private durable evidence request rejected with HTTP {exc.code}") from exc
+            except (OSError, urllib.error.URLError) as exc:
+                if attempt >= len(retry_delays):
+                    raise EvidenceTransportError("private durable evidence transport failed") from exc
+                time.sleep(retry_delays[attempt])
+        raise AssertionError("bounded durable evidence transport retry loop exhausted unexpectedly")
 
     def list_records(self, heading: str) -> list[EvidenceRecord]:
         result: list[EvidenceRecord] = []
