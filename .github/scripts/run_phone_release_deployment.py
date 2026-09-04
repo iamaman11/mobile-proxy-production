@@ -21,6 +21,7 @@ from android_target import (  # noqa: E402
     dispatch_install_once,
     observe,
     verify_artifact,
+    verify_local_artifact_bytes,
 )
 from deployment_request import validate_deployment_request  # noqa: E402
 from deployment_state_machine import DeploymentState, recover_unknown, reduce_state  # noqa: E402
@@ -69,6 +70,22 @@ def _download(url: str, destination: Path, expected_transport_sha256: str) -> No
         raise AndroidArtifactRefused("Android Release artifact download failed") from exc
     if total <= 0 or digest.hexdigest() != expected_transport_sha256:
         raise AndroidArtifactRefused("Android Release artifact transport digest differs after download")
+
+
+def _materialize_verified_release_apk(admitted: object, apk: Path, facts: dict[str, object]) -> None:
+    _download(
+        admitted.artifact_download_url,
+        apk,
+        admitted.artifact_transport_sha256,
+    )
+    artifact_fact = verify_artifact(
+        apk=apk,
+        expected_sha256=admitted.artifact_transport_sha256,
+        expected_version_name=str(admitted.android_version_name),
+        expected_version_code=int(admitted.android_version_code or 0),
+    )
+    artifact_fact["product_content_digest"] = admitted.identity.artifact_digest
+    facts["artifact_verification"] = artifact_fact
 
 
 def _base_state_authorized() -> DeploymentState:
@@ -224,21 +241,30 @@ def main() -> int:
             raise SystemExit("recovery-only execution lacks durable mutation intent")
         evidence_refs.append(existing_intent.ref)
         state = _unknown_from_existing_intent()
-        try:
-            recovered = observe(
-                serial=serial,
-                binding_key=binding_key,
-                expected_version_name=str(admitted.android_version_name),
-                expected_version_code=int(admitted.android_version_code or 0),
-            )
-            facts["recovery_observation"] = recovered.to_dict()
-            state = recover_unknown(
-                state,
-                "recovery_observed_desired" if recovered.desired else "recovery_observed_other",
-            )
-        except AndroidObservationUnavailable as exc:
-            facts["recovery_observation"] = {"available": False}
-            state = recover_unknown(state, "recovery_unavailable", reason=str(exc))
+        with tempfile.TemporaryDirectory(prefix="mobile-proxy-release-recovery-") as td:
+            apk = Path(td) / admitted.identity.artifact_name
+            try:
+                _materialize_verified_release_apk(admitted, apk, facts)
+            except AndroidArtifactRefused as exc:
+                facts["artifact_verification"] = {"available": False, "exact_release_artifact": False}
+                state = recover_unknown(state, "recovery_unavailable", reason=str(exc))
+            else:
+                try:
+                    recovered = observe(
+                        serial=serial,
+                        binding_key=binding_key,
+                        expected_version_name=str(admitted.android_version_name),
+                        expected_version_code=int(admitted.android_version_code or 0),
+                        expected_artifact_sha256=admitted.artifact_transport_sha256,
+                    )
+                    facts["recovery_observation"] = recovered.to_dict()
+                    state = recover_unknown(
+                        state,
+                        "recovery_observed_desired" if recovered.desired else "recovery_observed_other",
+                    )
+                except AndroidObservationUnavailable as exc:
+                    facts["recovery_observation"] = {"available": False}
+                    state = recover_unknown(state, "recovery_unavailable", reason=str(exc))
         terminal = _terminal_payload(
             request=request,
             execution_id=args.execution_id,
@@ -264,19 +290,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mobile-proxy-release-") as td:
         apk = Path(td) / admitted.identity.artifact_name
         try:
-            _download(
-                admitted.artifact_download_url,
-                apk,
-                admitted.artifact_transport_sha256,
-            )
-            artifact_fact = verify_artifact(
-                apk=apk,
-                expected_sha256=admitted.artifact_transport_sha256,
-                expected_version_name=str(admitted.android_version_name),
-                expected_version_code=int(admitted.android_version_code or 0),
-            )
-            artifact_fact["product_content_digest"] = admitted.identity.artifact_digest
-            facts["artifact_verification"] = artifact_fact
+            _materialize_verified_release_apk(admitted, apk, facts)
         except AndroidArtifactRefused as exc:
             state = reduce_state(_base_state_authorized(), "observation_refused", reason=str(exc))
             terminal = _terminal_payload(
@@ -305,6 +319,7 @@ def main() -> int:
                 binding_key=binding_key,
                 expected_version_name=str(admitted.android_version_name),
                 expected_version_code=int(admitted.android_version_code or 0),
+                expected_artifact_sha256=admitted.artifact_transport_sha256,
             )
             facts["preflight_observation"] = pre.to_dict()
         except AndroidObservationUnavailable as exc:
@@ -392,6 +407,45 @@ def main() -> int:
         evidence_refs.append(intent.ref)
         state = reduce_state(state, "intent_persisted")
 
+        try:
+            exact_sha256 = verify_local_artifact_bytes(
+                apk=apk,
+                expected_sha256=admitted.artifact_transport_sha256,
+            )
+            facts["pre_dispatch_artifact_reverification"] = {
+                "exact_release_artifact": True,
+                "sha256": exact_sha256,
+            }
+        except AndroidArtifactRefused as exc:
+            facts["pre_dispatch_artifact_reverification"] = {
+                "exact_release_artifact": False,
+            }
+            facts["dispatch"] = {
+                "attempted_exactly_once": False,
+                "confirmed": False,
+                "outcome_unknown": False,
+                "error_class": "LOCAL_ARTIFACT_IDENTITY_REFUSED",
+            }
+            state = reduce_state(state, "dispatch_refused", reason=str(exc))
+            terminal = _terminal_payload(
+                request=request,
+                execution_id=args.execution_id,
+                controller_revision=args.controller_revision,
+                admitted=admitted,
+                deployment_id=args.deployment_id,
+                state=state,
+                facts=facts,
+                evidence_refs=evidence_refs,
+            )
+            _persist_and_write(
+                evidence=evidence,
+                projection=projection,
+                output=args.output,
+                deployment_id=args.deployment_id,
+                terminal=terminal,
+            )
+            return 2
+
         dispatch = dispatch_install_once(serial=serial, apk=apk)
         facts["dispatch"] = {
             "attempted_exactly_once": True,
@@ -409,6 +463,7 @@ def main() -> int:
                     binding_key=binding_key,
                     expected_version_name=str(admitted.android_version_name),
                     expected_version_code=int(admitted.android_version_code or 0),
+                    expected_artifact_sha256=admitted.artifact_transport_sha256,
                 )
                 facts["postcondition_observation"] = post.to_dict()
                 state = reduce_state(state, "verify_match" if post.desired else "verify_mismatch")
@@ -423,6 +478,7 @@ def main() -> int:
                     binding_key=binding_key,
                     expected_version_name=str(admitted.android_version_name),
                     expected_version_code=int(admitted.android_version_code or 0),
+                    expected_artifact_sha256=admitted.artifact_transport_sha256,
                 )
                 facts["recovery_observation"] = recovery.to_dict()
                 state = recover_unknown(
