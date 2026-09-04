@@ -17,18 +17,13 @@ sys.path.insert(0, str(CONTROLLER))
 
 from android_target import (  # noqa: E402
     AndroidArtifactRefused,
-    AndroidObservation,
     AndroidObservationUnavailable,
     dispatch_install_once,
     observe,
     verify_artifact,
 )
 from deployment_request import validate_deployment_request  # noqa: E402
-from deployment_state_machine import (  # noqa: E402
-    DeploymentState,
-    recover_unknown,
-    reduce_state,
-)
+from deployment_state_machine import DeploymentState, recover_unknown, reduce_state  # noqa: E402
 from evidence_store import EvidenceError, IssueEvidenceStore  # noqa: E402
 from github_projection import ProjectionError, PublicDeploymentProjection  # noqa: E402
 from release_resolver import resolve_release  # noqa: E402
@@ -48,13 +43,11 @@ def _next(state: str) -> str:
     }.get(state, "none")
 
 
-def _safe_observation(value: AndroidObservation | None) -> dict[str, object] | None:
-    return None if value is None else value.to_dict()
-
-
-def _download(url: str, destination: Path, expected_sha256: str) -> None:
+def _download(url: str, destination: Path, expected_transport_sha256: str) -> None:
     if not url.startswith("https://github.com/iamaman11/mobile-proxy/releases/download/"):
         raise AndroidArtifactRefused("Android Release artifact URL differs")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_transport_sha256) is None:
+        raise AndroidArtifactRefused("Android Release transport digest is invalid")
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "mobile-proxy-production-controller-v2"},
@@ -74,8 +67,8 @@ def _download(url: str, destination: Path, expected_sha256: str) -> None:
                 handle.write(chunk)
     except (OSError, urllib.error.URLError) as exc:
         raise AndroidArtifactRefused("Android Release artifact download failed") from exc
-    if total <= 0 or digest.hexdigest() != expected_sha256:
-        raise AndroidArtifactRefused("Android Release artifact digest differs after download")
+    if total <= 0 or digest.hexdigest() != expected_transport_sha256:
+        raise AndroidArtifactRefused("Android Release artifact transport digest differs after download")
 
 
 def _base_state_authorized() -> DeploymentState:
@@ -135,13 +128,29 @@ def _terminal_payload(
     return terminal
 
 
-def _project_terminal(projection: PublicDeploymentProjection, deployment_id: int, terminal: dict[str, object]) -> None:
-    state = str(terminal["deployment_projection"])
+def _project_terminal(
+    projection: PublicDeploymentProjection,
+    deployment_id: int,
+    terminal: dict[str, object],
+) -> None:
     projection.status(
         deployment_id=deployment_id,
-        state=state,
+        state=str(terminal["deployment_projection"]),
         description=f"canonical controller terminal: {terminal['state']}",
     )
+
+
+def _persist_and_write(
+    *,
+    evidence: IssueEvidenceStore,
+    projection: PublicDeploymentProjection,
+    output: Path,
+    deployment_id: int,
+    terminal: dict[str, object],
+) -> None:
+    evidence.persist_terminal(terminal)
+    _project_terminal(projection, deployment_id, terminal)
+    output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -183,7 +192,10 @@ def main() -> int:
     projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
     existing_intent, existing_terminal = evidence.request_history(str(request["request_id"]))
     if existing_terminal is not None:
-        args.output.write_text(json.dumps(existing_terminal.payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        args.output.write_text(
+            json.dumps(existing_terminal.payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         return 0
 
     projection.status(
@@ -200,29 +212,30 @@ def main() -> int:
             "source_sha": admitted.identity.source_sha,
             "artifact_name": admitted.identity.artifact_name,
             "artifact_digest": admitted.identity.artifact_digest,
+            "artifact_transport_sha256": admitted.artifact_transport_sha256,
             "manifest_digest": admitted.identity.manifest_digest,
             "provenance_digest": admitted.identity.provenance_digest,
             "immutability_control": admitted.immutability_control,
         }
     }
 
-    # An old durable intent without terminal means a destructive dispatch may have
-    # happened. The only legal continuation is read-only recovery observation.
     if args.recovery_only == "true":
         if existing_intent is None:
             raise SystemExit("recovery-only execution lacks durable mutation intent")
         evidence_refs.append(existing_intent.ref)
         state = _unknown_from_existing_intent()
         try:
-            recovered_observation = observe(
+            recovered = observe(
                 serial=serial,
                 binding_key=binding_key,
                 expected_version_name=str(admitted.android_version_name),
                 expected_version_code=int(admitted.android_version_code or 0),
             )
-            facts["recovery_observation"] = recovered_observation.to_dict()
-            event = "recovery_observed_desired" if recovered_observation.desired else "recovery_observed_other"
-            state = recover_unknown(state, event)
+            facts["recovery_observation"] = recovered.to_dict()
+            state = recover_unknown(
+                state,
+                "recovery_observed_desired" if recovered.desired else "recovery_observed_other",
+            )
         except AndroidObservationUnavailable as exc:
             facts["recovery_observation"] = {"available": False}
             state = recover_unknown(state, "recovery_unavailable", reason=str(exc))
@@ -251,17 +264,21 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mobile-proxy-release-") as td:
         apk = Path(td) / admitted.identity.artifact_name
         try:
-            _download(admitted.artifact_download_url, apk, admitted.identity.artifact_digest)
+            _download(
+                admitted.artifact_download_url,
+                apk,
+                admitted.artifact_transport_sha256,
+            )
             artifact_fact = verify_artifact(
                 apk=apk,
-                expected_sha256=admitted.identity.artifact_digest,
+                expected_sha256=admitted.artifact_transport_sha256,
                 expected_version_name=str(admitted.android_version_name),
                 expected_version_code=int(admitted.android_version_code or 0),
             )
+            artifact_fact["product_content_digest"] = admitted.identity.artifact_digest
             facts["artifact_verification"] = artifact_fact
         except AndroidArtifactRefused as exc:
-            state = _base_state_authorized()
-            state = reduce_state(state, "observation_refused", reason=str(exc))
+            state = reduce_state(_base_state_authorized(), "observation_refused", reason=str(exc))
             terminal = _terminal_payload(
                 request=request,
                 execution_id=args.execution_id,
@@ -272,9 +289,13 @@ def main() -> int:
                 facts=facts,
                 evidence_refs=evidence_refs,
             )
-            evidence.persist_terminal(terminal)
-            _project_terminal(projection, args.deployment_id, terminal)
-            args.output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _persist_and_write(
+                evidence=evidence,
+                projection=projection,
+                output=args.output,
+                deployment_id=args.deployment_id,
+                terminal=terminal,
+            )
             return 2
 
         state = _base_state_authorized()
@@ -298,9 +319,13 @@ def main() -> int:
                 facts=facts | {"preflight_observation": {"available": False}},
                 evidence_refs=evidence_refs,
             )
-            evidence.persist_terminal(terminal)
-            _project_terminal(projection, args.deployment_id, terminal)
-            args.output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _persist_and_write(
+                evidence=evidence,
+                projection=projection,
+                output=args.output,
+                deployment_id=args.deployment_id,
+                terminal=terminal,
+            )
             return 2
 
         if pre.desired:
@@ -315,9 +340,13 @@ def main() -> int:
                 facts=facts,
                 evidence_refs=evidence_refs,
             )
-            evidence.persist_terminal(terminal)
-            _project_terminal(projection, args.deployment_id, terminal)
-            args.output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _persist_and_write(
+                evidence=evidence,
+                projection=projection,
+                output=args.output,
+                deployment_id=args.deployment_id,
+                terminal=terminal,
+            )
             return 0
 
         state = reduce_state(state, "observed")
@@ -352,9 +381,13 @@ def main() -> int:
                 facts=facts,
                 evidence_refs=evidence_refs,
             )
-            evidence.persist_terminal(terminal)
-            _project_terminal(projection, args.deployment_id, terminal)
-            args.output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _persist_and_write(
+                evidence=evidence,
+                projection=projection,
+                output=args.output,
+                deployment_id=args.deployment_id,
+                terminal=terminal,
+            )
             return 2
         evidence_refs.append(intent.ref)
         state = reduce_state(state, "intent_persisted")
@@ -384,8 +417,6 @@ def main() -> int:
                 state = reduce_state(state, "verify_unavailable", reason=str(exc))
 
         if state.state == "UNKNOWN":
-            # Same-run recovery is intentionally observation-only. There is no call
-            # path back to dispatch_install_once from this branch.
             try:
                 recovery = observe(
                     serial=serial,
@@ -417,8 +448,6 @@ def main() -> int:
         try:
             _project_terminal(projection, args.deployment_id, terminal)
         except ProjectionError:
-            # Canonical private terminal is already durable. Projection failure must
-            # never rewrite it or turn RECOVERED/UNKNOWN into success.
             pass
         args.output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0 if state.state == "ACCEPTED" else 2

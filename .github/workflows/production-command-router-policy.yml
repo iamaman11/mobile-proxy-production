@@ -33,6 +33,39 @@ jobs:
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_release_resolver.py
 
+      - name: Prove accepted public Product Release v0.1.4 resolves off-device
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag='v0.1.4', target='phone-production')
+          identity = admitted.identity
+          if identity.release_id != 382429107:
+              raise SystemExit('v0.1.4 Release id differs from accepted immutable Product Release')
+          if identity.source_sha != 'ff882e5ca5116fa90b80f15c6cc019f88e68ccfa':
+              raise SystemExit('v0.1.4 source SHA differs from accepted Product Release')
+          if identity.artifact_name != 'mobile-proxy-android-v0.1.4.apk':
+              raise SystemExit('v0.1.4 Android artifact name differs')
+          if re.fullmatch(r'b3:[0-9a-f]{64}', identity.artifact_digest) is None:
+              raise SystemExit('v0.1.4 Product content identity is not typed BLAKE3')
+          if re.fullmatch(r'[0-9a-f]{64}', admitted.artifact_transport_sha256) is None:
+              raise SystemExit('v0.1.4 transport sha256 is invalid')
+          if admitted.android_package != 'com.example.mobileproxy' or admitted.android_version_name != '0.1.4':
+              raise SystemExit('v0.1.4 Android package/version contract differs')
+          if not isinstance(admitted.android_version_code, int) or admitted.android_version_code <= 0:
+              raise SystemExit('v0.1.4 Android versionCode is invalid')
+          if admitted.immutability_control != 'github-immutable-release':
+              raise SystemExit('v0.1.4 immutability control differs')
+          print('REAL_PRODUCT_RELEASE_V2_RESOLVER_OK tag=v0.1.4 target=phone-production')
+          PY
+
       - name: Enforce repository ownership boundary and one Issue ingress
         shell: bash
         run: |
@@ -118,6 +151,13 @@ jobs:
               raise SystemExit('public Deployment success is not derived from canonical ACCEPTED')
           if 'state in {UNKNOWN, RECOVERED}' not in state_machine or 'return "error"' not in state_machine:
               raise SystemExit('UNKNOWN/RECOVERED projection contract differs')
+
+          resolver = Path('.github/controller/release_resolver.py').read_text(encoding='utf-8')
+          if 'SHA256SUMS' in resolver or '"sha256"' in resolver:
+              raise SystemExit('obsolete Product Release SHA256SUMS identity contract remains in resolver')
+          for required in ('artifact-digests.json', 'blake3-256', 'mobile-proxy/product-release-asset/v2', 'content_digest'):
+              if required not in resolver:
+                  raise SystemExit('Product Release v2 resolver contract incomplete: ' + required)
 
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
           PY

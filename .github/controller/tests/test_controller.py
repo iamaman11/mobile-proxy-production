@@ -155,7 +155,7 @@ def test_success_and_terminal_projection() -> None:
         product_release="v0.1.4",
         release_id=1,
         release_source_sha="b" * 40,
-        artifact_digest="c" * 64,
+        artifact_digest="b3:" + "c" * 64,
         deployment_id=2,
         state=ACCEPTED,
         current_step="VERIFY",

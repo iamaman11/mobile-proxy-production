@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Mapping
 
 _SHA = re.compile(r"[0-9a-f]{40}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
+_TYPED_DIGEST = re.compile(r"b3:[0-9a-f]{64}")
 _TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 
 
@@ -32,17 +32,17 @@ def validate_product_release(value: Mapping[str, object], *, target: str) -> Pro
     tag = str(value.get("tag", ""))
     source_sha = str(value.get("source_sha", ""))
     artifact_name = str(value.get("artifact_name", ""))
-    artifact_digest = str(value.get("artifact_digest", "")).removeprefix("sha256:")
-    manifest_digest = str(value.get("manifest_digest", "")).removeprefix("sha256:")
-    provenance_digest = str(value.get("provenance_digest", "")).removeprefix("sha256:")
+    artifact_digest = str(value.get("artifact_digest", ""))
+    manifest_digest = str(value.get("manifest_digest", ""))
+    provenance_digest = str(value.get("provenance_digest", ""))
     try:
         release_id = int(value.get("release_id", 0))
     except (TypeError, ValueError) as exc:
         raise ReleaseIdentityError("release id is invalid") from exc
     if _TAG.fullmatch(tag) is None or release_id <= 0 or _SHA.fullmatch(source_sha) is None:
         raise ReleaseIdentityError("release tag/id/source SHA is invalid")
-    if any(_SHA256.fullmatch(item) is None for item in (artifact_digest, manifest_digest, provenance_digest)):
-        raise ReleaseIdentityError("release digest is invalid")
+    if any(_TYPED_DIGEST.fullmatch(item) is None for item in (artifact_digest, manifest_digest, provenance_digest)):
+        raise ReleaseIdentityError("release typed content digest is invalid")
     if value.get("immutable") is not True:
         raise ReleaseIdentityError("deployment requires a GitHub immutable Release")
     expected_suffix = ".apk" if target == "phone-production" else ".tar.gz"
