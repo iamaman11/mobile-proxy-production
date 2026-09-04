@@ -1,0 +1,308 @@
+name: Production runner Android Build Tools bootstrap
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-runner-android-build-tools-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  command-gate:
+    name: Validate exact owner Android Build Tools bootstrap command
+    if: >-
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/runner-android-build-tools-bootstrap ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+    steps:
+      - name: Validate exact command and current canonical main SHA
+        id: command
+        shell: bash
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          command = os.environ.get('COMMAND', '').strip()
+          match = re.fullmatch(r'/runner-android-build-tools-bootstrap ([0-9a-f]{40})', command)
+          if match is None:
+              raise SystemExit('invalid Android Build Tools bootstrap command')
+          requested = match.group(1)
+          request = urllib.request.Request(
+              'https://api.github.com/repos/iamaman11/mobile-proxy/commits/main',
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'mobile-proxy-production-android-build-tools-bootstrap',
+              },
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              current = json.load(response)['sha']
+          if requested != current:
+              raise SystemExit('requested SHA is not current canonical main')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'canonical_sha={requested}\n')
+          PY
+
+  bootstrap:
+    name: Bootstrap pinned Android Build Tools on production runner
+    needs: command-gate
+    if: ${{ needs.command-gate.result == 'success' }}
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 15
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      ANDROID_BUILD_TOOLS_VERSION: '36.0.0'
+      ANDROID_BUILD_TOOLS_ARCHIVE_URL: 'https://dl.google.com/android/repository/build-tools_r36_linux.zip'
+      ANDROID_BUILD_TOOLS_ARCHIVE_SHA1: 'b0b6376977657e8ad9b969bacf4093601da2c6fb'
+      ANDROID_BUILD_TOOLS_ARCHIVE_SHA256: '5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b'
+    steps:
+      - name: Fail closed unless bounded user-local bootstrap prerequisites are available
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in curl sha1sum sha256sum python3 java diff cp mv; do
+            command -v "$tool" >/dev/null 2>&1 || {
+              echo "required runner bootstrap prerequisite unavailable: $tool" >&2
+              exit 1
+            }
+          done
+          case "$HOME" in /*) ;; *) echo 'runner HOME is not absolute' >&2; exit 1 ;; esac
+          ANDROID_SDK_ROOT="${HOME}/.local/share/mobile-proxy/android-sdk"
+          ANDROID_BUILD_TOOLS_DIR="${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
+          case "$ANDROID_SDK_ROOT" in "${HOME}/"*) ;; *) echo 'Android SDK root escaped runner home' >&2; exit 1 ;; esac
+          case "$ANDROID_BUILD_TOOLS_DIR" in "${HOME}/"*) ;; *) echo 'Android Build Tools directory escaped runner home' >&2; exit 1 ;; esac
+          {
+            printf 'ANDROID_SDK_ROOT=%s\n' "$ANDROID_SDK_ROOT"
+            printf 'ANDROID_BUILD_TOOLS_DIR=%s\n' "$ANDROID_BUILD_TOOLS_DIR"
+          } >> "$GITHUB_ENV"
+          echo 'runner_android_build_tools_bootstrap_preflight=true'
+          echo 'runner_tooling_mutation_planned=true'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+          echo 'secret_access=false'
+
+      - name: Download, checksum and safely stage exact official Build Tools archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/build-tools-r36-linux.zip"
+          staging="${RUNNER_TEMP}/mobile-proxy-android-build-tools-${ANDROID_BUILD_TOOLS_VERSION}"
+          rm -f "$archive"
+          rm -rf "$staging"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            "$ANDROID_BUILD_TOOLS_ARCHIVE_URL" -o "$archive"
+          printf '%s  %s\n' "$ANDROID_BUILD_TOOLS_ARCHIVE_SHA1" "$archive" | sha1sum -c -
+          printf '%s  %s\n' "$ANDROID_BUILD_TOOLS_ARCHIVE_SHA256" "$archive" | sha256sum -c -
+          ARCHIVE="$archive" STAGING="$staging" python3 - <<'PY'
+          import json
+          import os
+          import stat
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path(os.environ['ARCHIVE'])
+          staging = Path(os.environ['STAGING'])
+          staging.mkdir(parents=True, exist_ok=False)
+
+          with zipfile.ZipFile(archive) as package:
+              infos = [info for info in package.infolist() if info.filename and not info.is_dir()]
+              if not infos:
+                  raise SystemExit('Android Build Tools archive is empty')
+              roots = set()
+              for info in infos:
+                  parts = PurePosixPath(info.filename).parts
+                  if not parts or info.filename.startswith('/') or '..' in parts:
+                      raise SystemExit('Android Build Tools archive contains an unsafe path')
+                  roots.add(parts[0])
+              if len(roots) != 1:
+                  raise SystemExit('Android Build Tools archive has an unexpected root layout')
+              root = next(iter(roots))
+
+              for info in infos:
+                  parts = PurePosixPath(info.filename).parts
+                  if parts[0] != root or len(parts) < 2:
+                      raise SystemExit('Android Build Tools archive member escaped package root')
+                  unix_mode = (info.external_attr >> 16) & 0o177777
+                  if stat.S_ISLNK(unix_mode):
+                      raise SystemExit('Android Build Tools archive contains a symbolic link')
+                  relative = Path(*parts[1:])
+                  target = staging / relative
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with package.open(info) as source, target.open('wb') as destination:
+                      while True:
+                          chunk = source.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          destination.write(chunk)
+                  target.chmod(0o755 if unix_mode & 0o111 else 0o644)
+
+          required = (
+              staging / 'aapt2',
+              staging / 'apksigner',
+              staging / 'lib' / 'apksigner.jar',
+              staging / 'NOTICE.txt',
+              staging / 'source.properties',
+          )
+          if any(not path.is_file() for path in required):
+              raise SystemExit('Android Build Tools archive lacks required verifier files')
+          for executable in required[:2]:
+              executable.chmod(0o755)
+              if not os.access(executable, os.X_OK):
+                  raise SystemExit('Android Build Tools verifier executable is not executable')
+
+          marker = {
+              'schema': 'mobile-proxy-runner-tooling.v1',
+              'tooling': 'android-build-tools',
+              'version': os.environ['ANDROID_BUILD_TOOLS_VERSION'],
+              'archive_url': os.environ['ANDROID_BUILD_TOOLS_ARCHIVE_URL'],
+              'archive_sha1': os.environ['ANDROID_BUILD_TOOLS_ARCHIVE_SHA1'],
+              'archive_sha256': os.environ['ANDROID_BUILD_TOOLS_ARCHIVE_SHA256'],
+          }
+          (staging / '.mobile-proxy-source.json').write_text(
+              json.dumps(marker, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          printf 'ANDROID_BUILD_TOOLS_STAGING=%s\n' "$staging" >> "$GITHUB_ENV"
+          printf 'ANDROID_BUILD_TOOLS_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
+          echo 'android_build_tools_archive_verified=true'
+          echo 'official_distribution=true'
+          echo 'official_repository_sha1_verified=true'
+          echo 'archive_sha256_verified=true'
+          echo 'phone_access=false'
+
+      - name: Publish exact package atomically inside controller-owned user-local location
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent="${ANDROID_SDK_ROOT}/build-tools"
+          install_stage="${parent}/.${ANDROID_BUILD_TOOLS_VERSION}.stage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          case "$parent" in "${HOME}/"*) ;; *) echo 'Android Build Tools parent escaped runner home' >&2; exit 1 ;; esac
+          case "$install_stage" in "${parent}/."*) ;; *) echo 'Android Build Tools install stage escaped parent' >&2; exit 1 ;; esac
+          mkdir -p "$parent"
+          test ! -e "$install_stage"
+          printf 'ANDROID_BUILD_TOOLS_INSTALL_STAGING=%s\n' "$install_stage" >> "$GITHUB_ENV"
+          cp -a "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage"
+          diff -qr "$ANDROID_BUILD_TOOLS_STAGING" "$install_stage" >/dev/null
+          if [ -e "$ANDROID_BUILD_TOOLS_DIR" ]; then
+            test -d "$ANDROID_BUILD_TOOLS_DIR"
+            diff -qr "$install_stage" "$ANDROID_BUILD_TOOLS_DIR" >/dev/null || {
+              echo 'existing user-local Android Build Tools differ from pinned package' >&2
+              exit 1
+            }
+            rm -rf "$install_stage"
+            echo 'android_build_tools_install=noop_existing_exact'
+          else
+            mv "$install_stage" "$ANDROID_BUILD_TOOLS_DIR"
+            echo 'android_build_tools_install=created_exact_atomic'
+          fi
+          test -f "$ANDROID_BUILD_TOOLS_DIR/.mobile-proxy-source.json"
+          echo 'runner_tooling_mutation=true'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+          echo 'config_rendered=false'
+          echo 'secret_access=false'
+
+      - name: Verify exact persistent verifier prerequisite without phone access
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ANDROID_BUILD_TOOLS_DIR" = "${HOME}/.local/share/mobile-proxy/android-sdk/build-tools/36.0.0"
+          test -x "$ANDROID_BUILD_TOOLS_DIR/aapt2"
+          test -x "$ANDROID_BUILD_TOOLS_DIR/apksigner"
+          test -f "$ANDROID_BUILD_TOOLS_DIR/lib/apksigner.jar"
+          test -f "$ANDROID_BUILD_TOOLS_DIR/NOTICE.txt"
+          test -f "$ANDROID_BUILD_TOOLS_DIR/source.properties"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['ANDROID_BUILD_TOOLS_DIR'])
+          marker = json.loads((root / '.mobile-proxy-source.json').read_text(encoding='utf-8'))
+          expected = {
+              'schema': 'mobile-proxy-runner-tooling.v1',
+              'tooling': 'android-build-tools',
+              'version': '36.0.0',
+              'archive_url': 'https://dl.google.com/android/repository/build-tools_r36_linux.zip',
+              'archive_sha1': 'b0b6376977657e8ad9b969bacf4093601da2c6fb',
+              'archive_sha256': '5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b',
+          }
+          if marker != expected:
+              raise SystemExit('persisted Android Build Tools source marker differs')
+
+          properties = {}
+          for raw in (root / 'source.properties').read_text(encoding='utf-8').splitlines():
+              line = raw.strip()
+              if not line or line.startswith('#') or '=' not in line:
+                  continue
+              key, value = line.split('=', 1)
+              properties[key.strip()] = value.strip()
+          if properties.get('Pkg.Revision') != '36.0.0':
+              raise SystemExit('persisted Android Build Tools package revision differs')
+          PY
+          "$ANDROID_BUILD_TOOLS_DIR/aapt2" version >/dev/null
+          "$ANDROID_BUILD_TOOLS_DIR/apksigner" version >/dev/null
+          echo 'runner_android_build_tools_ready=true'
+          echo 'android_build_tools_version=36.0.0'
+          echo 'android_build_tools_identity=android-build-tools:36.0.0:user-local-v1'
+          echo 'canonical_sha_bound=true'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+          echo 'config_rendered=false'
+          echo 'secret_access=false'
+
+      - name: Remove bounded temporary staging only
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${ANDROID_BUILD_TOOLS_ARCHIVE:-}" ]; then
+            case "$ANDROID_BUILD_TOOLS_ARCHIVE" in "${RUNNER_TEMP}/"*) rm -f "$ANDROID_BUILD_TOOLS_ARCHIVE" ;; *) exit 1 ;; esac
+          fi
+          if [ -n "${ANDROID_BUILD_TOOLS_STAGING:-}" ] && [ -e "$ANDROID_BUILD_TOOLS_STAGING" ]; then
+            case "$ANDROID_BUILD_TOOLS_STAGING" in "${RUNNER_TEMP}/"*) rm -rf "$ANDROID_BUILD_TOOLS_STAGING" ;; *) exit 1 ;; esac
+          fi
+          if [ -n "${ANDROID_BUILD_TOOLS_INSTALL_STAGING:-}" ] && [ -e "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" ]; then
+            expected_stage="${HOME}/.local/share/mobile-proxy/android-sdk/build-tools/.36.0.0.stage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test "$ANDROID_BUILD_TOOLS_INSTALL_STAGING" = "$expected_stage"
+            rm -rf "$ANDROID_BUILD_TOOLS_INSTALL_STAGING"
+          fi
