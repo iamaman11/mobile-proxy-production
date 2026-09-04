@@ -1,0 +1,76 @@
+{
+  "schema": "non-authority-execution-surface-disposition.v1",
+  "source_classification_stage": "2AG",
+  "source_classification_private_main": "a15c6f70fae257784c8d3d5588cdea2a56cfc3ab",
+  "stage_2ai_base_private_main": "026bb4917c8177917e8600c2843ec946d7c71b16",
+  "workflow_count": 11,
+  "legacy_action_ref_count": 31,
+  "workflows": {
+    ".github/workflows/filesystem-scratch-kernel-rehearsal.yml": {
+      "classification": "rehearsal-only",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "One-off historical rehearsal is already workflow_call-only; preserve source without reviving its pinned self-hosted mutation path."
+    },
+    ".github/workflows/phone-capability-inventory.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy capability observer has no independent trigger and is not an enabled Issue #1/current-authority route."
+    },
+    ".github/workflows/phone-filesystem-tooling-diagnostic.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy filesystem tooling diagnostic has no independent trigger and remains outside enabled Issue #1/current authority."
+    },
+    ".github/workflows/phone-post-migration-diagnostic.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy post-migration diagnostic is reusable-only and is not admitted to current production authority."
+    },
+    ".github/workflows/phone-preflight.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy preflight implementation is reusable-only; current command transport/persistence authority is separate."
+    },
+    ".github/workflows/phone-runtime-cutover-preflight.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy cutover preflight is reusable-only and outside the enabled Issue #1/current-authority closure."
+    },
+    ".github/workflows/phone-runtime-diagnostic.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy runtime layout diagnostic is reusable-only and unavailable from current authority."
+    },
+    ".github/workflows/phone-runtime-error-context.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy sanitized error-context helper is reusable-only and unavailable from current authority."
+    },
+    ".github/workflows/phone-runtime-failure-diagnostic.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy failure diagnostic is reusable-only and unavailable from current authority."
+    },
+    ".github/workflows/phone-runtime-release-inventory.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Legacy runtime release inventory is reusable-only and unavailable from current authority."
+    },
+    ".github/workflows/physical-transaction-readiness.yml": {
+      "classification": "independently manual/diagnostic",
+      "disposition": "reusable-only-unreachable",
+      "independently_runnable": false,
+      "rationale": "Standalone historical readiness helper is workflow_call-only, explicitly refuses phone execution, and remains outside current authority."
+    }
+  }
+}

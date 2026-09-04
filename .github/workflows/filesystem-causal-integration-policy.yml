@@ -33,6 +33,9 @@ jobs:
       - name: Enforce retired historical workflow execution surfaces
         working-directory: private-control
         run: python3 .github/scripts/audit_retired_workflow_surfaces.py
+      - name: Enforce remaining non-authority workflow execution surfaces
+        working-directory: private-control
+        run: python3 .github/scripts/audit_nonauthority_workflow_surfaces.py
       - name: Validate causal generation and quarantine reuse semantics
         working-directory: private-control
         run: python3 .github/scripts/control_plane_policy.py --policy filesystem-causal-integration --canonical-root ../canonical
