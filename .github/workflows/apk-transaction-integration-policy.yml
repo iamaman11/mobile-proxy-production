@@ -39,11 +39,18 @@ jobs:
               'mobile-proxy-android-',
               'release-manifest.json',
               'provenance.json',
-              'SHA256SUMS',
+              'artifact-digests.json',
+              'blake3-256',
+              'mobile-proxy/product-release-asset/v2',
+              'content_digest',
               'android-apk',
           ):
               if required not in resolver:
-                  raise SystemExit('Release admission contract missing ' + required)
+                  raise SystemExit('Product Release v2 admission contract missing ' + required)
+          if 'SHA256SUMS' in resolver:
+              raise SystemExit('obsolete SHA256SUMS Product identity contract remains reachable')
+          if 'artifact_transport_sha256' not in resolver or 'artifact_transport_sha256' not in runner:
+              raise SystemExit('transport SHA-256 is not separated from typed Product content identity')
           if 'verify_artifact(' not in runner or 'dispatch_install_once(' not in runner or 'observe(' not in runner:
               raise SystemExit('Android transaction does not connect verify/dispatch/postcondition seams')
           if 'latest' in resolver.lower():
