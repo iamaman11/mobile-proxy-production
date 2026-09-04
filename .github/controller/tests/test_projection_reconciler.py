@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from evidence_store import ADMISSION_HEADING, EvidenceRecord, INTENT_HEADING, TERMINAL_HEADING  # noqa: E402
+from github_projection import PublicDeploymentMatch, PublicDeploymentProjection  # noqa: E402
+from projection_admission import ProjectionAdmissionError, resolve_projection_admission  # noqa: E402
 from projection_reconciler import ProjectionReconciliationError, decide_projection, reconcile_projection  # noqa: E402
 from terminal_result import DeploymentTerminal  # noqa: E402
 
@@ -18,6 +20,11 @@ CONTROLLER_SHA = "b" * 40
 SOURCE_SHA = "c" * 40
 ARTIFACT_DIGEST = "b3:" + "d" * 64
 DEPLOYMENT_ID = 77
+PUBLIC_PAYLOAD = {
+    "schema": "mobile-proxy-deployment-projection.v1",
+    "product_release": "v0.1.4",
+    "release_id": 382429107,
+}
 
 
 def admission_record(*, execution_id: str = EXECUTION_ID, deployment_id: int = DEPLOYMENT_ID) -> EvidenceRecord:
@@ -86,6 +93,17 @@ def terminal_record(*, state: str, deployment_id: int = DEPLOYMENT_ID) -> Eviden
     return EvidenceRecord(12, TERMINAL_HEADING, payload)
 
 
+def public_match(*, deployment_id: int = DEPLOYMENT_ID, state: str | None = "queued") -> PublicDeploymentMatch:
+    return PublicDeploymentMatch(
+        deployment_id=deployment_id,
+        source_sha=SOURCE_SHA,
+        ref=SOURCE_SHA,
+        environment="phone-production",
+        payload=PUBLIC_PAYLOAD,
+        latest_state=state,
+    )
+
+
 class FakeEvidence:
     def __init__(self, *, admission: EvidenceRecord | None = None, intent: EvidenceRecord | None = None, terminal: EvidenceRecord | None = None) -> None:
         self.admission = admission
@@ -131,6 +149,42 @@ class FakeProjection:
         if self.fail:
             raise RuntimeError("simulated public projection failure")
         return 9001
+
+
+class FakeAdmissionProjection:
+    def __init__(self, matches: list[PublicDeploymentMatch]) -> None:
+        self.matches = tuple(matches)
+        self.find_calls = 0
+        self.create_calls: list[dict[str, object]] = []
+        self.status_calls: list[dict[str, object]] = []
+
+    def find_exact(self, **kwargs):
+        self.find_calls += 1
+        return self.matches
+
+    def create(self, **kwargs) -> int:
+        self.create_calls.append(dict(kwargs))
+        return DEPLOYMENT_ID
+
+    def status(self, **kwargs) -> int:
+        self.status_calls.append(dict(kwargs))
+        return 9001
+
+
+class FakeLookupProjection(PublicDeploymentProjection):
+    def __init__(self, deployments: list[object], statuses: list[object]) -> None:
+        self.token = "test"
+        self.deployments = deployments
+        self.statuses = statuses
+        self.calls: list[tuple[str, str]] = []
+
+    def _request(self, path: str, *, method: str, payload=None):
+        self.calls.append((path, method))
+        if path.startswith("/deployments?"):
+            return self.deployments
+        if path.startswith(f"/deployments/{DEPLOYMENT_ID}/statuses?"):
+            return self.statuses
+        raise AssertionError("unexpected lookup path: " + path)
 
 
 def test_pre_intent_target_failure_projects_error_never_success() -> None:
@@ -228,6 +282,144 @@ def test_public_projection_failure_cannot_rewrite_private_canonical_evidence() -
         raise AssertionError("simulated public projection failure unexpectedly succeeded")
     assert evidence.private_write_calls == 0
     assert projection.calls[0]["state"] == "error"
+
+
+def test_public_lookup_filters_exact_identity_and_reads_latest_state() -> None:
+    other_payload = dict(PUBLIC_PAYLOAD)
+    other_payload["release_id"] = 1
+    projection = FakeLookupProjection(
+        deployments=[
+            {
+                "id": DEPLOYMENT_ID,
+                "sha": SOURCE_SHA,
+                "ref": SOURCE_SHA,
+                "environment": "phone-production",
+                "payload": PUBLIC_PAYLOAD,
+            },
+            {
+                "id": 88,
+                "sha": SOURCE_SHA,
+                "ref": SOURCE_SHA,
+                "environment": "phone-production",
+                "payload": other_payload,
+            },
+        ],
+        statuses=[
+            {"id": 100, "state": "queued"},
+            {"id": 101, "state": "in_progress"},
+        ],
+    )
+    matches = projection.find_exact(
+        source_sha=SOURCE_SHA,
+        environment="phone-production",
+        release_tag="v0.1.4",
+        release_id=382429107,
+    )
+    assert len(matches) == 1
+    assert matches[0].deployment_id == DEPLOYMENT_ID
+    assert matches[0].latest_state == "in_progress"
+    assert projection.calls[0][1] == "GET"
+    assert projection.calls[1][1] == "GET"
+
+
+def test_zero_match_creates_exactly_one_and_queues() -> None:
+    projection = FakeAdmissionProjection([])
+    decision = resolve_projection_admission(
+        projection=projection,
+        source_sha=SOURCE_SHA,
+        environment="phone-production",
+        release_tag="v0.1.4",
+        release_id=382429107,
+        durable_deployment_id=None,
+    )
+    assert decision.deployment_id == DEPLOYMENT_ID
+    assert decision.reused is False
+    assert projection.find_calls == 1
+    assert len(projection.create_calls) == 1
+    assert projection.status_calls == [{
+        "deployment_id": DEPLOYMENT_ID,
+        "state": "queued",
+        "description": "v0.1.4 admitted by production controller",
+    }]
+
+
+def test_one_matching_safe_projection_reuses_without_public_write() -> None:
+    projection = FakeAdmissionProjection([public_match(state="in_progress")])
+    decision = resolve_projection_admission(
+        projection=projection,
+        source_sha=SOURCE_SHA,
+        environment="phone-production",
+        release_tag="v0.1.4",
+        release_id=382429107,
+        durable_deployment_id=DEPLOYMENT_ID,
+    )
+    assert decision.reused is True
+    assert decision.observed_state == "in_progress"
+    assert projection.create_calls == []
+    assert projection.status_calls == []
+
+
+def test_multiple_exact_projection_matches_refuse_before_create() -> None:
+    projection = FakeAdmissionProjection([
+        public_match(deployment_id=DEPLOYMENT_ID),
+        public_match(deployment_id=78),
+    ])
+    try:
+        resolve_projection_admission(
+            projection=projection,
+            source_sha=SOURCE_SHA,
+            environment="phone-production",
+            release_tag="v0.1.4",
+            release_id=382429107,
+            durable_deployment_id=None,
+        )
+    except ProjectionAdmissionError as exc:
+        assert "multiple exact public Deployments" in str(exc)
+    else:
+        raise AssertionError("multiple exact public Deployments were unexpectedly accepted")
+    assert projection.create_calls == []
+    assert projection.status_calls == []
+
+
+def test_ack_only_queued_projection_reuses_without_durable_admission() -> None:
+    projection = FakeAdmissionProjection([public_match(state="queued")])
+    decision = resolve_projection_admission(
+        projection=projection,
+        source_sha=SOURCE_SHA,
+        environment="phone-production",
+        release_tag="v0.1.4",
+        release_id=382429107,
+        durable_deployment_id=None,
+    )
+    assert decision.deployment_id == DEPLOYMENT_ID
+    assert decision.reused is True
+    assert projection.create_calls == []
+    assert projection.status_calls == []
+
+
+def test_public_success_without_private_terminal_fails_closed() -> None:
+    projection = FakeAdmissionProjection([public_match(state="success")])
+    try:
+        resolve_projection_admission(
+            projection=projection,
+            source_sha=SOURCE_SHA,
+            environment="phone-production",
+            release_tag="v0.1.4",
+            release_id=382429107,
+            durable_deployment_id=None,
+        )
+    except ProjectionAdmissionError as exc:
+        assert "missing private canonical terminal" in str(exc)
+    else:
+        raise AssertionError("public success without private terminal was unexpectedly accepted")
+    assert projection.create_calls == []
+    assert projection.status_calls == []
+
+
+def test_prepare_has_no_direct_create_bypass_around_read_before_create() -> None:
+    source = (ROOT.parent / "scripts" / "prepare_release_deployment.py").read_text(encoding="utf-8")
+    assert "resolve_projection_admission(" in source
+    assert "projection.create(" not in source
 
 
 def main() -> int:

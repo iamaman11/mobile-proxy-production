@@ -15,6 +15,7 @@ from deployment_request import validate_deployment_request  # noqa: E402
 from deployment_state_machine import DeploymentState, reduce_state  # noqa: E402
 from evidence_store import EvidenceError, IssueEvidenceStore  # noqa: E402
 from github_projection import ProjectionError, PublicDeploymentProjection  # noqa: E402
+from projection_admission import ProjectionAdmissionError, resolve_projection_admission  # noqa: E402
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
 from terminal_result import DeploymentTerminal, validate_terminal  # noqa: E402
 
@@ -204,43 +205,37 @@ def main() -> int:
         _output("admission_ref", admission.ref if admission is not None else "")
         return 0
 
-    projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
-    deployment_id: int | None = None
     reusable = evidence.reusable_admission(str(request["request_id"]))
+    durable_deployment_id: int | None = None
+    if reusable is not None:
+        reusable_payload = reusable.payload
+        exact = (
+            reusable_payload.get("product_release") == identity.tag
+            and reusable_payload.get("release_id") == identity.release_id
+            and reusable_payload.get("release_source_sha") == identity.source_sha
+            and reusable_payload.get("artifact_digest") == identity.artifact_digest
+            and reusable_payload.get("target") == request["target"]
+        )
+        if not exact:
+            raise SystemExit("durable deployment admission conflicts with current immutable Release identity")
+        candidate_id = reusable_payload.get("deployment_id")
+        if not isinstance(candidate_id, int) or candidate_id <= 0:
+            raise SystemExit("durable deployment admission lacks public Deployment id")
+        durable_deployment_id = candidate_id
+
+    deployment_id: int | None = durable_deployment_id
     try:
-        if reusable is not None:
-            reusable_payload = reusable.payload
-            exact = (
-                reusable_payload.get("product_release") == identity.tag
-                and reusable_payload.get("release_id") == identity.release_id
-                and reusable_payload.get("release_source_sha") == identity.source_sha
-                and reusable_payload.get("artifact_digest") == identity.artifact_digest
-                and reusable_payload.get("target") == request["target"]
-            )
-            if not exact:
-                raise SystemExit("durable deployment admission conflicts with current immutable Release identity")
-            candidate_id = reusable_payload.get("deployment_id")
-            if not isinstance(candidate_id, int) or candidate_id <= 0:
-                raise SystemExit("durable deployment admission lacks public Deployment id")
-            deployment_id = candidate_id
-            projection.status(
-                deployment_id=deployment_id,
-                state="queued",
-                description=f"{identity.tag} readmitted by production controller",
-            )
-        else:
-            deployment_id = projection.create(
-                source_sha=identity.source_sha,
-                environment=str(request["target"]),
-                release_tag=identity.tag,
-                release_id=identity.release_id,
-            )
-            projection.status(
-                deployment_id=deployment_id,
-                state="queued",
-                description=f"{identity.tag} admitted by production controller",
-            )
-    except ProjectionError as exc:
+        projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
+        decision = resolve_projection_admission(
+            projection=projection,
+            source_sha=identity.source_sha,
+            environment=str(request["target"]),
+            release_tag=identity.tag,
+            release_id=identity.release_id,
+            durable_deployment_id=durable_deployment_id,
+        )
+        deployment_id = decision.deployment_id
+    except (ProjectionError, ProjectionAdmissionError) as exc:
         state = reduce_state(state, "authorize_refused", reason=str(exc))
         terminal = DeploymentTerminal(
             operation="deploy-product-release",
@@ -269,7 +264,7 @@ def main() -> int:
         _output("duplicate", False)
         _output("recovery_only", False)
         _output("canonical_terminal_ref", record.ref)
-        _output("admission_ref", "")
+        _output("admission_ref", reusable.ref if reusable is not None else "")
         return 0
 
     assert deployment_id is not None
