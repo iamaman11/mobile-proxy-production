@@ -121,6 +121,7 @@ jobs:
               "needs.route.outputs.read_only == 'true'",
               "needs.route.outputs.destructive == 'false'",
               "needs.route.outputs.route_id == 'deploy-product-release'",
+              'name: Revalidate deployment request outputs against admitted route',
               'uses: ./.github/workflows/release-deployment.yml',
           )
           missing = [item for item in required_router if item not in router]
@@ -139,6 +140,24 @@ jobs:
           present = [item for item in forbidden_router if item in router]
           if present:
               raise SystemExit('router gained forbidden capability: ' + ', '.join(present))
+
+          build_marker = '      - name: Build existing cursor-free semantic deployment request'
+          validate_marker = '      - name: Revalidate deployment request outputs against admitted route'
+          execution_marker = '      - name: Build exact controller execution ACK'
+          if not all(marker in router for marker in (build_marker, validate_marker, execution_marker)):
+              raise SystemExit('deployment ACK output-validation step ordering markers missing')
+          build_block = router.split(build_marker, 1)[1].split(validate_marker, 1)[0]
+          if 'steps.command.outputs.' in build_block:
+              raise SystemExit('deployment request step must not consume its own outputs')
+          validate_block = router.split(validate_marker, 1)[1].split(execution_marker, 1)[0]
+          for required in (
+              'steps.command.outputs.target',
+              'steps.command.outputs.release_tag',
+              'needs.route.outputs.target',
+              'needs.route.outputs.release_tag',
+          ):
+              if required not in validate_block:
+                  raise SystemExit('deployment output-validation contract incomplete: ' + required)
 
           spec = importlib.util.spec_from_file_location('issue_command_router_acceptance', '.github/scripts/issue_command_router.py')
           if spec is None or spec.loader is None:
