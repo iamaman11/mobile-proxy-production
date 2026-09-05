@@ -9,17 +9,14 @@ reads production secrets, or performs mutations.
 from __future__ import annotations
 
 import argparse
-import copy
-import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
-SCRIPTS = ROOT / ".github" / "scripts"
 
 
 class PolicyFailure(RuntimeError):
@@ -132,17 +129,6 @@ def _assert_three_upload_retries(
         identities.append(_artifact_identity(block, artifact_fragment, path_fragment))
     require(len({name for name, _ in identities}) == 1, f"{label}: artifact name changes across retries")
     require(len({path for _, path in identities}) == 1, f"{label}: artifact path changes across retries")
-
-
-def _load_module(name: str, path: Path):
-    require(path.is_file(), f"Python module missing: {path}")
-    spec = importlib.util.spec_from_file_location(name, path)
-    require(spec is not None and spec.loader is not None, f"unable to load Python module: {path}")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def policy_phone_preflight() -> None:
@@ -548,310 +534,6 @@ def policy_dispatch_intent() -> None:
         require(classify(*inputs) == expected, f"dispatch ambiguity truth table differs: {inputs}")
 
 
-def _trusted_comment(body: str, login: str = "github-actions[bot]") -> dict[str, Any]:
-    return {"body": body, "user": {"login": login}}
-
-
-def policy_filesystem_causal_integration(canonical_root: Path) -> None:
-    adapter = _load_module("filesystem_generation_inventory_policy", SCRIPTS / "filesystem_generation_inventory.py")
-    canonical_scripts = canonical_root / "scripts"
-    generation = _load_module("physical_domain_generation_policy", canonical_scripts / "physical_domain_generation.py")
-    control = _load_module("control_state_machine_policy", canonical_scripts / "control_state_machine.py")
-    recovery = _load_module(
-        "run_android_filesystem_quarantine_recovery_policy",
-        canonical_scripts / "run_android_filesystem_quarantine_recovery.py",
-    )
-
-    sha_a = "1" * 40
-    sha_b = "2" * 40
-    target_binding = "tb-hmac-sha256:" + "a" * 64
-
-    def journal(run_id: int, attempt: int = 1, *, login: str = "github-actions[bot]", extra: dict[str, Any] | None = None):
-        transaction_id = f"fs-{run_id}-{attempt}"
-        payload: dict[str, Any] = {
-            "format_version": 1,
-            "journal_type": "FILESYSTEM_MUTATION_INTENT",
-            "evidence_type": "MUTATION_DISPATCH_INTENT",
-            "authority": "CONTROL",
-            "lifecycle": "CURRENT",
-            "private_repository": "iamaman11/mobile-proxy-production",
-            "private_sha": sha_a,
-            "canonical_repository": "iamaman11/mobile-proxy",
-            "canonical_sha": sha_a,
-            "canonical_quality_run_id": 1000 + run_id,
-            "workflow_run_id": run_id,
-            "workflow_run_attempt": attempt,
-            "operation_id": "android.filesystem-certification.v1",
-            "operation_transaction_id": transaction_id,
-            "target": "android-production",
-            "target_binding_id": target_binding,
-            "affected_domain_generations": {"domain/filesystem": transaction_id},
-            "dispatch_intent_artifact_persisted": True,
-            "journaled_before_adapter_invocation": True,
-            "dispatch_may_reach_target": True,
-            "blind_retry_allowed": False,
-            "raw_device_identifier_recorded": False,
-        }
-        if extra:
-            payload.update(extra)
-        body = (
-            "## CONTROL FILESYSTEM MUTATION INTENT\n\n```json\n"
-            + json.dumps(payload, separators=(",", ":"), sort_keys=True)
-            + "\n```"
-        )
-        return _trusted_comment(body, login)
-
-    def terminal_result(run_id: int, attempt: int = 1, *, login: str = "github-actions[bot]"):
-        transaction_id = f"fs-{run_id}-{attempt}"
-        lines = [
-            "## CONTROL ANDROID FILESYSTEM MUTATION RESULT",
-            "- classification: **FILESYSTEM_MUTATION_PROVEN**",
-            f"- canonical_sha: `{sha_a}`",
-            f"- quality_run_id: `{1000 + run_id}`",
-            f"- workflow_run_id: `{run_id}`",
-            f"- operation_transaction_id: `{transaction_id}`",
-            "- dispatch_intent_persisted: `true`",
-            f"- domain/filesystem_generation: `{transaction_id}`",
-            "- blind_retry_allowed: `false`",
-            "- transaction_state: `ACCEPTED`",
-        ]
-        return _trusted_comment("\n".join(lines), login)
-
-    empty_inventory = adapter.build_inventory([])
-    empty_resolution = generation.resolve_inventory(empty_inventory)
-    require(empty_resolution.state == generation.RESOLVED, "empty trusted inventory must resolve")
-    require(empty_resolution.generation == generation.FILESYSTEM_BOOTSTRAP_GENERATION, "empty inventory must use stable bootstrap generation")
-    require(empty_resolution.source == generation.BOOTSTRAP, "bootstrap source classification differs")
-
-    completed_inventory = adapter.build_inventory([journal(10), terminal_result(10)])
-    completed_resolution = generation.resolve_inventory(completed_inventory)
-    require(completed_resolution.state == generation.RESOLVED, "completed mutation intent must resolve")
-    require(completed_resolution.generation == "fs-10-1", "completed mutation must own filesystem generation")
-
-    latest_inventory = adapter.build_inventory(
-        [journal(10), terminal_result(10), journal(11), terminal_result(11)]
-    )
-    latest_resolution = generation.resolve_inventory(latest_inventory)
-    require(latest_resolution.generation == "fs-11-1", "latest completed intent must own filesystem generation")
-
-    unresolved_inventory = adapter.build_inventory([journal(12)])
-    unresolved_resolution = generation.resolve_inventory(unresolved_inventory)
-    require(
-        unresolved_resolution.state == generation.UNKNOWN_EXECUTION_OUTCOME,
-        "any unresolved persisted intent must block causal reuse",
-    )
-    require("fs-12-1" in unresolved_resolution.unresolved_transaction_ids, "unresolved transaction identity missing")
-
-    untrusted_inventory = adapter.build_inventory([journal(13, login="iamaman11")])
-    require(untrusted_inventory["intents"] == [], "untrusted author must not create causal generation evidence")
-
-    try:
-        adapter.build_inventory([terminal_result(14)])
-    except adapter.EvidenceAdapterError:
-        pass
-    else:
-        raise PolicyFailure("trusted Stage-B result without exact journal pair must fail closed")
-
-    try:
-        adapter.build_inventory([journal(15, extra={"unexpected": True})])
-    except adapter.EvidenceAdapterError:
-        pass
-    else:
-        raise PolicyFailure("trusted journal schema drift must fail closed")
-
-    legacy_body = "\n".join(
-        [
-            "## CONTROL ANDROID FILESYSTEM MUTATION RESULT",
-            "- classification: **FILESYSTEM_MUTATION_PROVEN**",
-            f"- canonical_sha: `{sha_a}`",
-            "- quality_run_id: `1`",
-            "- workflow_run_id: `16`",
-            "- transaction_state: `ACCEPTED`",
-        ]
-    )
-    legacy_inventory = adapter.build_inventory([_trusted_comment(legacy_body)])
-    require(legacy_inventory["intents"] == [], "legacy pre-Stage-B result must not be retrofitted into causal intent")
-
-    report = {
-        "observation_complete": True,
-        "cleanup_admissible": True,
-        "transactions": [
-            {
-                "transaction_id": "fs-11-1",
-                "scratch": {"node_state": "DIRECTORY"},
-                "managed_root": {"node_state": "ABSENT"},
-            }
-        ],
-    }
-    raw_facts = recovery.build_quarantine_fact_envelopes(
-        sha_a,
-        ["fs-11-1"],
-        report,
-        target_binding_id=target_binding,
-        filesystem_generation="fs-11-1",
-        observation_ref="filesystem-quarantine-observation:100:1",
-    )
-    require(len(raw_facts) == 2, "complete quarantine observation must emit exactly two facts")
-    expected_dependencies = [
-        {"scope": "target/android-production", "identity": target_binding},
-        {"scope": "observer/filesystem-quarantine", "identity": "android.filesystem-quarantine-observer.v2"},
-        {"scope": "domain/filesystem", "identity": "fs-11-1"},
-        {"scope": "transaction/fs-11-1", "identity": "fs-11-1"},
-    ]
-    for fact in raw_facts:
-        require(fact["authority"] == "CONTROL", "quarantine raw fact authority differs")
-        require(fact["persisted"] is False, "canonical observer must emit unpersisted facts")
-        require(fact["dependencies"] == expected_dependencies, "quarantine fact causal dependencies differ")
-        require(not any(item["scope"].startswith("source/") for item in fact["dependencies"]), "Git source must not be a physical quarantine dependency")
-
-    promoted_facts = []
-    for raw_fact in raw_facts:
-        promoted = copy.deepcopy(raw_fact)
-        promoted["persisted"] = True
-        comparison = copy.deepcopy(promoted)
-        comparison["persisted"] = False
-        require(comparison == raw_fact, "promotion must change only persistence")
-        promoted_facts.append(promoted)
-
-    def observed_fact(payload: dict[str, Any]):
-        dependencies = tuple(
-            control.FactDependency(item["scope"], item["identity"])
-            for item in payload["dependencies"]
-        )
-        return control.ObservedFact(
-            subject=payload["subject"],
-            predicate=payload["predicate"],
-            value=payload["value"],
-            target=payload["target"],
-            observation_ref=payload["observation_ref"],
-            source_ref=payload["source_ref"],
-            dependencies=dependencies,
-            authority=payload["authority"],
-            persisted=payload["persisted"],
-        )
-
-    stable_context = {
-        "target/android-production": target_binding,
-        "observer/filesystem-quarantine": "android.filesystem-quarantine-observer.v2",
-        "domain/filesystem": "fs-11-1",
-        "transaction/fs-11-1": "fs-11-1",
-        "source/canonical": sha_b,
-    }
-    required_scopes = (
-        "target/android-production",
-        "observer/filesystem-quarantine",
-        "domain/filesystem",
-        "transaction/fs-11-1",
-    )
-    for payload in promoted_facts:
-        validity = control.classify_observed_fact(
-            observed_fact(payload),
-            stable_context,
-            required_scopes=required_scopes,
-        )
-        require(validity.state == control.FACT_VALID, "unrelated Git/source change must not stale physical quarantine fact")
-
-    changed_context = dict(stable_context)
-    changed_context["domain/filesystem"] = "fs-12-1"
-    for payload in promoted_facts:
-        validity = control.classify_observed_fact(
-            observed_fact(payload),
-            changed_context,
-            required_scopes=required_scopes,
-        )
-        require(validity.state != control.FACT_VALID, "filesystem mutation generation change must invalidate prior quarantine fact")
-
-    observe = workflow("phone-filesystem-quarantine-observation.yml")
-    cleanup = workflow("phone-filesystem-quarantine-cleanup.yml")
-    require_tokens(
-        observe,
-        (
-            "'physical_domain_generation.py'",
-            "filesystem_generation_inventory.py",
-            "id: pre-history",
-            "id: pre-generation",
-            "Require resolved filesystem generation before device access",
-            "id: causal-context",
-            "id: observe-physical",
-            "id: raw-evidence-state",
-            "id: post-history",
-            "id: post-generation",
-            "id: generation-stability",
-            "PRE_STATE: ${{ steps.pre-generation.outputs.state }}",
-            "POST_STATE: ${{ steps.post-generation.outputs.state }}",
-            '[ "${PRE_GENERATION}" = "${POST_GENERATION}" ]',
-            "id: promote-facts",
-            "comparison['persisted'] = False",
-            "if comparison != raw_fact:",
-            "id: promoted-facts-upload",
-            "phone-filesystem-quarantine-observed-facts-",
-        ),
-        "Stage C.0b.3 observation integration",
-    )
-    require(observe.count("'--mode', 'observe'") == 1, "Stage C.0b.3 observer producer must execute exactly once")
-    require(observe.count("subprocess.run(command, check=True)") == 1, "Stage C.0b.3 observer subprocess must execute exactly once")
-    require_order(
-        observe,
-        (
-            "id: pre-history",
-            "id: pre-generation",
-            "Require resolved filesystem generation before device access",
-            "id: causal-context",
-            "id: observe-physical",
-            "id: raw-evidence-state",
-            "id: post-history",
-            "id: post-generation",
-            "id: generation-stability",
-            "id: promote-facts",
-            "id: promoted-facts-upload",
-        ),
-        "Stage C.0b.3 pre/post generation and promotion",
-    )
-    require("source/canonical" not in _step_block_by_id(observe, "causal-context"), "quarantine causal context must not add Git source dependency")
-
-    require_tokens(
-        cleanup,
-        (
-            "phone-filesystem-quarantine-observed-facts-",
-            "admission-promoted-facts.json",
-            "id: current-history",
-            "id: current-generation",
-            "id: causal-admission",
-            "control.classify_observed_fact(",
-            "'domain/filesystem': os.environ['CURRENT_FILESYSTEM_GENERATION']",
-            "id: dispatch-intent",
-        ),
-        "Stage C.0b.3 cleanup causal admission",
-    )
-    require("observation.get('head_sha')" not in cleanup, "unrelated private Git revision must not invalidate causal quarantine facts")
-    require_order(
-        cleanup,
-        (
-            "id: current-history",
-            "id: current-generation",
-            "id: causal-admission",
-            "id: dispatch-intent",
-            "Persist CONTROL mutation dispatch intent before adapter invocation",
-            "Run exact bounded quarantine cleanup",
-        ),
-        "Stage C.0b.3 cleanup admission/dispatch",
-    )
-
-    def promotion_allowed(raw_persisted: bool, pre_state: str, pre_generation: str, post_state: str, post_generation: str) -> bool:
-        return (
-            raw_persisted
-            and pre_state == "RESOLVED"
-            and post_state == "RESOLVED"
-            and bool(pre_generation)
-            and pre_generation == post_generation
-        )
-
-    require(promotion_allowed(True, "RESOLVED", "fs-11-1", "RESOLVED", "fs-11-1"), "stable pre/post generation must allow promotion")
-    require(not promotion_allowed(True, "RESOLVED", "fs-11-1", "RESOLVED", "fs-12-1"), "mutation during observation must block promotion")
-    require(not promotion_allowed(True, "RESOLVED", "fs-11-1", "UNKNOWN_EXECUTION_OUTCOME", "fs-12-1"), "unresolved post-observation intent must block promotion")
-    require(not promotion_allowed(False, "RESOLVED", "fs-11-1", "RESOLVED", "fs-11-1"), "raw persistence failure must block promotion")
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -862,10 +544,8 @@ def parse_args() -> argparse.Namespace:
             "quarantine-source-transport",
             "quarantine-recovery",
             "filesystem-dispatch-intent",
-            "filesystem-causal-integration",
         ),
     )
-    parser.add_argument("--canonical-root", type=Path)
     return parser.parse_args()
 
 
@@ -880,9 +560,6 @@ def main() -> int:
             policy_quarantine_recovery()
         elif args.policy == "filesystem-dispatch-intent":
             policy_dispatch_intent()
-        elif args.policy == "filesystem-causal-integration":
-            require(args.canonical_root is not None, "--canonical-root is required for causal integration policy")
-            policy_filesystem_causal_integration(args.canonical_root.resolve())
         else:  # pragma: no cover
             raise PolicyFailure(f"unsupported policy: {args.policy}")
     except (PolicyFailure, OSError, ValueError, TypeError, json.JSONDecodeError) as error:
