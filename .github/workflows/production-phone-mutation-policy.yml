@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Enforce target lock, one dispatch and no legacy runtime routing
+      - name: Enforce target lock, one composite dispatch and no legacy runtime routing
         shell: bash
         run: |
           set -euo pipefail
@@ -35,12 +35,12 @@ jobs:
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
           runtime = Path('.github/scripts/run_phone_release_deployment.py')
-          adapter_path = Path('.github/controller/android_target.py')
-          adapter = adapter_path.read_text(encoding='utf-8')
+          apk_adapter_path = Path('.github/controller/android_target.py')
+          composite_adapter_path = Path('.github/controller/phone_target.py')
+          apk_adapter = apk_adapter_path.read_text(encoding='utf-8')
 
           direct_ingress = sorted(
-              path.name
-              for path in workflows.glob('*.yml')
+              path.name for path in workflows.glob('*.yml')
               if re.search(r'(?m)^  issue_comment:\s*$', path.read_text(encoding='utf-8'))
           )
           if direct_ingress != ['production-control-router.yml']:
@@ -48,26 +48,18 @@ jobs:
 
           deploy_routes = [
               item for item in registry.get('routes', [])
-              if isinstance(item, dict)
-              and item.get('id') == 'deploy-product-release'
-              and item.get('enabled') is True
+              if isinstance(item, dict) and item.get('id') == 'deploy-product-release' and item.get('enabled') is True
           ]
           if len(deploy_routes) != 1:
               raise SystemExit('exactly one enabled deployment route is required')
           deploy_contract = deploy_routes[0]
           expected_contract = {
-              'handler': 'deployment',
-              'workflow': '.github/workflows/release-deployment.yml',
-              'ref': 'main',
-              'operation': 'deploy-product-release',
-              'operation_class': 'DEPLOY',
-              'read_only': False,
-              'destructive': True,
-              'allowed_targets': ['phone-production', 'vm-production'],
-              'semantic_identity_policy': 'existing-deployment-request-v2',
-              'idempotency_policy': 'durable-semantic-ledger',
-              'concurrency_domain': 'target-global-mutation',
-              'recovery_policy': 'UNKNOWN-read-only-reconcile-no-blind-retry',
+              'handler':'deployment', 'workflow':'.github/workflows/release-deployment.yml', 'ref':'main',
+              'operation':'deploy-product-release', 'operation_class':'DEPLOY', 'read_only':False,
+              'destructive':True, 'allowed_targets':['phone-production','vm-production'],
+              'semantic_identity_policy':'existing-deployment-request-v2',
+              'idempotency_policy':'durable-semantic-ledger', 'concurrency_domain':'target-global-mutation',
+              'recovery_policy':'UNKNOWN-read-only-reconcile-no-blind-retry',
           }
           for field, expected in expected_contract.items():
               if deploy_contract.get(field) != expected:
@@ -78,22 +70,19 @@ jobs:
 
           required = (
               'runs-on: [self-hosted, Linux, X64, android-production]',
-              'group: production-target-phone-production',
-              'cancel-in-progress: false',
-              'environment: phone-production',
-              'ANDROID_PRODUCTION_SERIAL',
-              'ANDROID_TARGET_BINDING_KEY',
+              'group: production-target-phone-production', 'cancel-in-progress: false',
+              'environment: phone-production', 'ANDROID_PRODUCTION_SERIAL', 'ANDROID_TARGET_BINDING_KEY',
+              'MOBILE_PROXY_ADMIN_TOKEN', 'MOBILE_PROXY_DEVICE_TOKEN', 'MOBILE_PROXY_UI_TOKEN',
+              'MOBILE_PROXY_RELAY_USER', 'MOBILE_PROXY_RELAY_PASSWORD', 'MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64',
           )
           missing = [item for item in required if item not in workflow]
           if missing:
               raise SystemExit('phone target execution boundary incomplete: ' + ', '.join(missing))
 
-          adapter_tree = ast.parse(adapter)
+          adapter_tree = ast.parse(apk_adapter)
           install_calls = []
           for node in ast.walk(adapter_tree):
-              if not isinstance(node, ast.Call):
-                  continue
-              if not isinstance(node.func, ast.Attribute) or node.func.attr != 'run':
+              if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or node.func.attr != 'run':
                   continue
               if not node.args or not isinstance(node.args[0], ast.List):
                   continue
@@ -110,25 +99,30 @@ jobs:
           if install_calls != [['<adb>', '-s', '<serial>', 'install', '-r', '<expr>']]:
               raise SystemExit(f'Android adapter must contain exactly one bounded install-replace primitive; got {install_calls!r}')
 
-          tree = ast.parse(runtime.read_text(encoding='utf-8'))
-          calls = [
-              node for node in ast.walk(tree)
-              if isinstance(node, ast.Call)
-              and isinstance(node.func, ast.Name)
-              and node.func.id == 'dispatch_install_once'
+          runner_tree = ast.parse(runtime.read_text(encoding='utf-8'))
+          composite_calls = [
+              node for node in ast.walk(runner_tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'dispatch_release_once'
           ]
-          if len(calls) != 1:
-              raise SystemExit(f'controller must have exactly one destructive dispatch callsite; got {len(calls)}')
+          direct_apk_calls = [
+              node for node in ast.walk(runner_tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'dispatch_install_once'
+          ]
+          if len(composite_calls) != 1 or direct_apk_calls:
+              raise SystemExit(f'controller must have exactly one composite dispatch callsite and no direct APK dispatch; composite={len(composite_calls)} direct_apk={len(direct_apk_calls)}')
+
+          composite_tree = ast.parse(composite_adapter_path.read_text(encoding='utf-8'))
+          primitive_calls = [
+              node for node in ast.walk(composite_tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'dispatch_install_once'
+          ]
+          if len(primitive_calls) != 1:
+              raise SystemExit('composite adapter must contain exactly one APK destructive primitive callsite')
 
           legacy_routes = (
-              '/phone-clean-install',
-              '/phone-filesystem-certification',
-              '/phone-filesystem-quarantine-cleanup',
-              '/phone-runtime-recovery',
-              '/runtime-reconstruction',
-              '/phone-apk-install',
-              'filesystem-scratch-kernel-rehearsal.yml',
-              'android-signing-migration.yml',
+              '/phone-clean-install', '/phone-filesystem-certification', '/phone-filesystem-quarantine-cleanup',
+              '/phone-runtime-recovery', '/runtime-reconstruction', '/phone-apk-install',
+              'filesystem-scratch-kernel-rehearsal.yml', 'android-signing-migration.yml',
           )
           present = [item for item in legacy_routes if item in router]
           if present:
@@ -136,13 +130,9 @@ jobs:
 
           router_required = (
               "github.event.repository.full_name == 'iamaman11/mobile-proxy-production'",
-              'github.event.issue.number == 1',
-              'github.event.comment.user.login == github.repository_owner',
-              "needs.route.outputs.route_id == 'deploy-product-release'",
-              "needs.route.outputs.operation == 'deploy-product-release'",
-              "needs.route.outputs.destructive == 'true'",
-              'uses: ./.github/workflows/release-deployment.yml',
-              'secrets: inherit',
+              'github.event.issue.number == 1', 'github.event.comment.user.login == github.repository_owner',
+              "needs.route.outputs.route_id == 'deploy-product-release'", "needs.route.outputs.operation == 'deploy-product-release'",
+              "needs.route.outputs.destructive == 'true'", 'uses: ./.github/workflows/release-deployment.yml', 'secrets: inherit',
           )
           router_missing = [item for item in router_required if item not in router]
           if router_missing:
@@ -154,7 +144,7 @@ jobs:
           if 'def recover_unknown' not in recovery or 'raise TransitionError("recovery is strictly read-only")' not in recovery:
               raise SystemExit('UNKNOWN recovery is not structurally read-only')
 
-          print('CONTROLLER_OWNED_PHONE_MUTATION_POLICY_OK')
+          print('CONTROLLER_OWNED_PHONE_COMPOSITE_MUTATION_POLICY_OK')
           print('sole_issue_ingress=true')
           print('deployment_registry_gate=true')
           PY

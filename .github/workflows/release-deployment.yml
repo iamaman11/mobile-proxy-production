@@ -19,6 +19,18 @@ on:
         required: true
       PUBLIC_DEPLOYMENTS_TOKEN:
         required: true
+      MOBILE_PROXY_ADMIN_TOKEN:
+        required: true
+      MOBILE_PROXY_DEVICE_TOKEN:
+        required: true
+      MOBILE_PROXY_UI_TOKEN:
+        required: true
+      MOBILE_PROXY_RELAY_USER:
+        required: true
+      MOBILE_PROXY_RELAY_PASSWORD:
+        required: true
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64:
+        required: true
 
 permissions:
   contents: read
@@ -63,11 +75,11 @@ jobs:
             --execution-id "$EXECUTION_ID"
 
   execute-phone:
-    name: Execute Android Release transaction once
+    name: Execute composite Android Product Release transaction once
     needs: admit
     if: needs.admit.outputs.admitted == 'true' && inputs.target == 'phone-production'
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 10
+    timeout-minutes: 20
     concurrency:
       group: production-target-phone-production
       cancel-in-progress: false
@@ -77,6 +89,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact admitted PRODUCT source for normative digest/render code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ fromJSON(needs.admit.outputs.admitted_release_json).identity.source_sha }}
+          path: product-source
           persist-credentials: false
 
       - name: Reconcile recovery mode from durable private ledger
@@ -92,7 +112,7 @@ jobs:
             --request-json "$CONTROL_REQUEST_JSON" \
             --admission-recovery-only "$ADMISSION_RECOVERY_ONLY"
 
-      - name: Execute controller-owned transaction
+      - name: Execute controller-owned composite transaction
         id: deploy
         continue-on-error: true
         env:
@@ -100,6 +120,12 @@ jobs:
           PUBLIC_DEPLOYMENTS_TOKEN: ${{ secrets.PUBLIC_DEPLOYMENTS_TOKEN }}
           ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
           ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+          MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+          MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+          MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+          MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+          MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+          MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
           CONTROL_REQUEST_JSON: ${{ inputs.request_json }}
           ADMITTED_RELEASE_JSON: ${{ needs.admit.outputs.admitted_release_json }}
           DEPLOYMENT_ID: ${{ needs.admit.outputs.deployment_id }}
@@ -115,6 +141,8 @@ jobs:
             --execution-id "$EXECUTION_ID" \
             --controller-revision "$GITHUB_SHA" \
             --recovery-only "$RECOVERY_ONLY" \
+            --product-root "$GITHUB_WORKSPACE/product-source" \
+            --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
             --output "$RUNNER_TEMP/deployment-terminal.json"
 
       - name: Preserve bounded terminal artifact
@@ -143,10 +171,18 @@ jobs:
           if value.get('state') != 'ACCEPTED':
               raise SystemExit('deployment did not reach canonical ACCEPTED terminal')
           if value.get('postcondition_verified') is not True:
-              raise SystemExit('ACCEPTED deployment lacks independent phone postcondition')
+              raise SystemExit('ACCEPTED deployment lacks independent composite phone postcondition')
           if value.get('deployment_projection') != 'success':
               raise SystemExit('ACCEPTED deployment projection differs')
-          print('PHONE_RELEASE_DEPLOYMENT_ACCEPTED')
+          facts = value.get('facts') or {}
+          post = facts.get('postcondition_observation')
+          pre = facts.get('preflight_observation')
+          if value.get('mutation_performed') and not isinstance(post, dict):
+              raise SystemExit('mutating ACCEPTED deployment lacks composite postcondition evidence')
+          observed = post if isinstance(post, dict) else pre
+          if not isinstance(observed, dict) or observed.get('desired') is not True:
+              raise SystemExit('ACCEPTED deployment lacks exact APK+runtime desired observation')
+          print('PHONE_COMPOSITE_RELEASE_DEPLOYMENT_ACCEPTED')
           PY
 
   finalize-phone-projection:
