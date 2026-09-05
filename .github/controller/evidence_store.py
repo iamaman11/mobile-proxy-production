@@ -8,6 +8,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from durable_release_identity import PHONE_RUNTIME_IDENTITY_FIELDS, validate_optional_runtime_identity
+
 PRIVATE_REPOSITORY = "iamaman11/mobile-proxy-production"
 ISSUE_NUMBER = 1
 TRUSTED_ACTOR = "github-actions[bot]"
@@ -23,7 +25,20 @@ _ADMISSION_STABLE_FIELDS = (
     "release_id",
     "release_source_sha",
     "artifact_digest",
+    *PHONE_RUNTIME_IDENTITY_FIELDS,
     "deployment_id",
+)
+_INTENT_STABLE_FIELDS = (
+    "semantic_request_id",
+    "target",
+    "target_binding_id",
+    "product_release",
+    "release_id",
+    "release_source_sha",
+    "artifact_digest",
+    *PHONE_RUNTIME_IDENTITY_FIELDS,
+    "deployment_id",
+    "dispatch_operation",
 )
 
 
@@ -91,7 +106,18 @@ def _admission_stable_identity(payload: Mapping[str, Any]) -> tuple[object, ...]
     return tuple(payload.get(field) for field in _ADMISSION_STABLE_FIELDS)
 
 
-def _validate_admission_payload(payload: Mapping[str, Any]) -> None:
+def _intent_stable_identity(payload: Mapping[str, Any]) -> tuple[object, ...]:
+    return tuple(payload.get(field) for field in _INTENT_STABLE_FIELDS)
+
+
+def _runtime_identity_present(payload: Mapping[str, Any], *, target: str) -> bool:
+    try:
+        return validate_optional_runtime_identity(payload, target=target)
+    except ValueError as exc:
+        raise EvidenceError(str(exc)) from exc
+
+
+def _validate_admission_payload(payload: Mapping[str, Any], *, require_current: bool = False) -> None:
     if payload.get("schema") != "production-deployment-admission.v2":
         raise EvidenceError("deployment admission schema differs")
     if not str(payload.get("semantic_request_id", "")).startswith("req-sha256:"):
@@ -100,7 +126,8 @@ def _validate_admission_payload(payload: Mapping[str, Any]) -> None:
         raise EvidenceError("deployment admission execution id is invalid")
     if not str(payload.get("controller_revision", "")):
         raise EvidenceError("deployment admission controller revision is unavailable")
-    if not str(payload.get("target", "")) or not str(payload.get("product_release", "")):
+    target = str(payload.get("target", ""))
+    if not target or not str(payload.get("product_release", "")):
         raise EvidenceError("deployment admission target/release identity is incomplete")
     release_id = payload.get("release_id")
     deployment_id = payload.get("deployment_id")
@@ -116,6 +143,34 @@ def _validate_admission_payload(payload: Mapping[str, Any]) -> None:
         raise EvidenceError("deployment admission must not grant dispatch authority")
     if payload.get("mutation_performed") is not False:
         raise EvidenceError("deployment admission cannot claim physical mutation")
+    runtime_present = _runtime_identity_present(payload, target=target)
+    if require_current and target == "phone-production" and not runtime_present:
+        raise EvidenceError("new phone deployment admission lacks rooted-phone runtime identity")
+
+
+def _validate_intent_payload(payload: Mapping[str, Any]) -> None:
+    if payload.get("schema") != "production-deployment-intent.v2":
+        raise EvidenceError("deployment mutation intent schema differs")
+    if not str(payload.get("semantic_request_id", "")).startswith("req-sha256:"):
+        raise EvidenceError("deployment mutation intent semantic request id is invalid")
+    if not str(payload.get("execution_id", "")).startswith("gh-run:"):
+        raise EvidenceError("deployment mutation intent execution id is invalid")
+    target = str(payload.get("target", ""))
+    if not target or not str(payload.get("product_release", "")):
+        raise EvidenceError("deployment mutation intent target/release identity is incomplete")
+    if not str(payload.get("target_binding_id", "")):
+        raise EvidenceError("deployment mutation intent target binding is unavailable")
+    release_id = payload.get("release_id")
+    deployment_id = payload.get("deployment_id")
+    if not isinstance(release_id, int) or release_id <= 0:
+        raise EvidenceError("deployment mutation intent Release id is invalid")
+    if not isinstance(deployment_id, int) or deployment_id <= 0:
+        raise EvidenceError("deployment mutation intent public Deployment id is invalid")
+    if payload.get("blind_retry_allowed") is not False or payload.get("dispatch_may_reach_target") is not True:
+        raise EvidenceError("mutation intent lacks no-blind-retry boundary")
+    runtime_present = _runtime_identity_present(payload, target=target)
+    if target == "phone-production" and not runtime_present:
+        raise EvidenceError("new phone mutation intent lacks rooted-phone runtime identity")
 
 
 class IssueEvidenceStore:
@@ -231,7 +286,7 @@ class IssueEvidenceStore:
         return records[0]
 
     def _matching_admission(self, payload: Mapping[str, Any]) -> EvidenceRecord | None:
-        _validate_admission_payload(payload)
+        _validate_admission_payload(payload, require_current=True)
         request_id = str(payload.get("semantic_request_id", ""))
         reusable = self.reusable_admission(request_id)
         if reusable is not None and _admission_stable_identity(reusable.payload) != _admission_stable_identity(payload):
@@ -293,14 +348,15 @@ class IssueEvidenceStore:
         return (intents[0] if intents else None, terminals[0] if terminals else None)
 
     def persist_intent(self, payload: Mapping[str, Any]) -> EvidenceRecord:
+        _validate_intent_payload(payload)
         request_id = str(payload.get("semantic_request_id", ""))
         existing_intent, existing_terminal = self.request_history(request_id)
         if existing_terminal is not None:
             raise EvidenceError("terminal already exists; mutation intent cannot be created")
         if existing_intent is not None:
+            if _intent_stable_identity(existing_intent.payload) != _intent_stable_identity(payload):
+                raise EvidenceError("semantic request already has a different durable mutation intent")
             return existing_intent
-        if payload.get("blind_retry_allowed") is not False or payload.get("dispatch_may_reach_target") is not True:
-            raise EvidenceError("mutation intent lacks no-blind-retry boundary")
         return self.create(INTENT_HEADING, payload)
 
     def _matching_terminal(self, payload: Mapping[str, Any]) -> EvidenceRecord | None:
