@@ -209,6 +209,20 @@ def test_exactly_one_destructive_adapter_callsite() -> None:
     assert len(calls) == 1, f"expected one destructive dispatch callsite, got {len(calls)}"
 
 
+def test_recovery_binds_full_release_identity_before_any_observation() -> None:
+    path = GITHUB_DIR / "scripts" / "run_phone_release_deployment.py"
+    source = path.read_text(encoding="utf-8")
+    recovery = source.split('if args.recovery_only == "true":', 1)[1].split(
+        '    if existing_intent is not None:',
+        1,
+    )[0]
+    identity_check = recovery.index("payload_matches_release_identity")
+    materialize = recovery.index("_materialize_verified_release_apk")
+    observation = recovery.index("recovered = observe(")
+    assert identity_check < materialize < observation
+    assert "recovery lacks matching full durable deployment admission" in recovery
+
+
 def test_recovery_api_has_no_dispatch_parameter() -> None:
     import inspect
     signature = inspect.signature(recover_unknown)
