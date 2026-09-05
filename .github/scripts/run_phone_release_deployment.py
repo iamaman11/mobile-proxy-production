@@ -25,6 +25,10 @@ from android_target import (  # noqa: E402
 )
 from deployment_request import validate_deployment_request  # noqa: E402
 from deployment_state_machine import DeploymentState, recover_unknown, reduce_state  # noqa: E402
+from durable_release_identity import (  # noqa: E402
+    durable_release_identity,
+    payload_matches_release_identity,
+)
 from evidence_store import EvidenceError, IssueEvidenceStore  # noqa: E402
 from github_projection import ProjectionError, PublicDeploymentProjection  # noqa: E402
 from release_resolver import resolve_release  # noqa: E402
@@ -225,10 +229,9 @@ def main() -> int:
     evidence_refs = [source_ref]
     facts: dict[str, object] = {
         "release_admission": {
-            "release_id": admitted.identity.release_id,
+            **durable_release_identity(admitted.identity, target="phone-production"),
             "source_sha": admitted.identity.source_sha,
             "artifact_name": admitted.identity.artifact_name,
-            "artifact_digest": admitted.identity.artifact_digest,
             "artifact_transport_sha256": admitted.artifact_transport_sha256,
             "manifest_digest": admitted.identity.manifest_digest,
             "provenance_digest": admitted.identity.provenance_digest,
@@ -239,7 +242,20 @@ def main() -> int:
     if args.recovery_only == "true":
         if existing_intent is None:
             raise SystemExit("recovery-only execution lacks durable mutation intent")
-        evidence_refs.append(existing_intent.ref)
+        if not payload_matches_release_identity(
+            existing_intent.payload,
+            admitted.identity,
+            target="phone-production",
+        ):
+            raise SystemExit("recovery mutation intent conflicts with current immutable Release identity")
+        admission = evidence.reusable_admission(str(request["request_id"]))
+        if admission is None or not payload_matches_release_identity(
+            admission.payload,
+            admitted.identity,
+            target="phone-production",
+        ):
+            raise SystemExit("recovery lacks matching full durable deployment admission")
+        evidence_refs.extend((admission.ref, existing_intent.ref))
         state = _unknown_from_existing_intent()
         with tempfile.TemporaryDirectory(prefix="mobile-proxy-release-recovery-") as td:
             apk = Path(td) / admitted.identity.artifact_name
@@ -370,12 +386,8 @@ def main() -> int:
             "semantic_request_id": request["request_id"],
             "execution_id": args.execution_id,
             "controller_revision": args.controller_revision,
-            "target": "phone-production",
+            **durable_release_identity(admitted.identity, target="phone-production"),
             "target_binding_id": pre.target_binding_id,
-            "product_release": admitted.identity.tag,
-            "release_id": admitted.identity.release_id,
-            "release_source_sha": admitted.identity.source_sha,
-            "artifact_digest": admitted.identity.artifact_digest,
             "deployment_id": args.deployment_id,
             "dispatch_operation": "adb-install-replace",
             "dispatch_may_reach_target": True,
