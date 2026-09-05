@@ -25,18 +25,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/controller/tests/test_controller.py
+          python3 .github/controller/tests/test_phone_runtime.py
+          python3 .github/controller/tests/test_product_runtime_renderer.py
+          python3 .github/controller/tests/test_phone_target.py
           python3 - <<'PY'
           from pathlib import Path
 
           controller = Path('.github/controller')
           required = {
-              'deployment_state_machine.py',
-              'deployment_request.py',
-              'release_resolver.py',
-              'evidence_store.py',
-              'android_target.py',
-              'terminal_result.py',
-              'github_projection.py',
+              'deployment_state_machine.py', 'deployment_request.py', 'release_resolver.py',
+              'evidence_store.py', 'android_target.py', 'phone_runtime.py',
+              'product_runtime_renderer.py', 'phone_target.py', 'terminal_result.py', 'github_projection.py',
           }
           found = {path.name for path in controller.glob('*.py')}
           missing = sorted(required - found)
@@ -54,16 +53,15 @@ jobs:
               ]
           )
           forbidden = (
-              'canonical-public',
-              'authority_cursor',
-              'issue179-comment-',
-              'transaction_runner.py',
-              'control_state_machine.py',
-              'operation_state_machine.py',
+              'canonical-public', 'authority_cursor', 'issue179-comment-',
+              'transaction_runner.py', 'control_state_machine.py', 'operation_state_machine.py',
           )
           present = [item for item in forbidden if item in active]
           if present:
               raise SystemExit('active v2 runtime still depends on legacy public kernel/cursor: ' + ', '.join(present))
-
-          print('PRIVATE_CONTROLLER_TRANSACTION_WIRING_OK')
+          if active.count('run_phone_release_deployment.py') != 1:
+              raise SystemExit('composite transaction must retain one existing transaction owner')
+          if 'android-release-composite-v1' not in active:
+              raise SystemExit('active transaction owner does not persist composite dispatch identity')
+          print('PRIVATE_CONTROLLER_COMPOSITE_TRANSACTION_WIRING_OK')
           PY

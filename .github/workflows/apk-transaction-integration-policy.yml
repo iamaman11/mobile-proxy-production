@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   validate-apk-transaction-integration:
-    name: Validate controller-owned APK Release transaction seam
+    name: Validate controller-owned APK+runtime Release transaction seam
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -20,40 +20,51 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prove Android transaction contract without public source checkout
+      - name: Prove composite transaction contract without mutable PRODUCT authority
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_release_resolver.py
+          python3 .github/controller/tests/test_phone_runtime.py
+          python3 .github/controller/tests/test_product_runtime_renderer.py
+          python3 .github/controller/tests/test_phone_target.py
           python3 - <<'PY'
           from pathlib import Path
 
           workflow = Path('.github/workflows/release-deployment.yml').read_text(encoding='utf-8')
           runner = Path('.github/scripts/run_phone_release_deployment.py').read_text(encoding='utf-8')
           resolver = Path('.github/controller/release_resolver.py').read_text(encoding='utf-8')
+          target = Path('.github/controller/phone_target.py').read_text(encoding='utf-8')
+          renderer = Path('.github/controller/product_runtime_renderer.py').read_text(encoding='utf-8')
 
-          if 'repository: iamaman11/mobile-proxy' in workflow or 'ref: main' in workflow:
-              raise SystemExit('APK deployment must consume Release assets, not public source checkout')
+          if 'repository: iamaman11/mobile-proxy' not in workflow:
+              raise SystemExit('composite transaction lacks exact PRODUCT renderer source checkout')
+          if 'fromJSON(needs.admit.outputs.admitted_release_json).identity.source_sha' not in workflow:
+              raise SystemExit('PRODUCT renderer checkout is not bound to admitted Release source SHA')
+          if 'ref: main' in workflow:
+              raise SystemExit('mutable PRODUCT main must never be transaction authority')
           for required in (
-              'mobile-proxy-android-',
-              'release-manifest.json',
-              'provenance.json',
-              'artifact-digests.json',
-              'blake3-256',
-              'mobile-proxy/product-release-asset/v2',
-              'content_digest',
-              'android-apk',
+              'mobile-proxy-android-', 'mobile-proxy-phone-production-runtime-',
+              'release-manifest.json', 'provenance.json', 'artifact-digests.json',
+              'blake3-256', 'mobile-proxy/product-release-asset/v2', 'content_digest',
+              'android-apk', 'phone-production-runtime-tar',
           ):
               if required not in resolver:
                   raise SystemExit('Product Release v2 admission contract missing ' + required)
           if 'SHA256SUMS' in resolver:
               raise SystemExit('obsolete SHA256SUMS Product identity contract remains reachable')
-          if 'artifact_transport_sha256' not in resolver or 'artifact_transport_sha256' not in runner:
-              raise SystemExit('transport SHA-256 is not separated from typed Product content identity')
-          if 'verify_artifact(' not in runner or 'dispatch_install_once(' not in runner or 'observe(' not in runner:
-              raise SystemExit('Android transaction does not connect verify/dispatch/postcondition seams')
+          if 'dispatch_release_once(' not in runner or 'dispatch_install_once(' in runner:
+              raise SystemExit('transaction owner does not use exactly the composite target adapter seam')
+          if '"android-release-composite-v1"' not in runner:
+              raise SystemExit('durable mutation intent is not classified as one composite dispatch')
+          if 'apk_post.desired and runtime_post.desired' not in runner:
+              raise SystemExit('composite postcondition does not require exact APK+runtime desired state')
+          if 'product-release-asset-digest' not in renderer or 'package-device-release' not in renderer:
+              raise SystemExit('Controller duplicated PRODUCT digest/render semantics instead of invoking normative code')
+          if 'dispatch_install_once' not in target:
+              raise SystemExit('composite target adapter does not contain the sole APK destructive primitive')
           if 'latest' in resolver.lower():
               raise SystemExit('latest must never be deployment authority')
-          print('APK_RELEASE_TRANSACTION_INTEGRATION_OK')
+          print('COMPOSITE_PHONE_RELEASE_TRANSACTION_INTEGRATION_OK')
           PY

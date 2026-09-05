@@ -43,13 +43,7 @@ def _adb() -> str:
 
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PhoneTargetUnavailable("phone target transport unavailable") from exc
 
@@ -84,30 +78,18 @@ def _files(release_root: Path, required_paths: tuple[str, ...]) -> tuple[tuple[s
     return tuple(result)
 
 
-def observe_runtime(
-    *,
-    serial: str,
-    release_root: Path,
-    release_id: str,
-    required_paths: tuple[str, ...],
-) -> RuntimeObservation:
+def observe_runtime(*, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]) -> RuntimeObservation:
     release_id = _safe_release_id(release_id)
     files = _files(release_root, required_paths)
     target = f"{_ROOT}/releases/{release_id}"
     probe = _read(
         serial,
         [
-            "shell",
-            "su",
-            "0",
-            "sh",
-            "-c",
+            "shell", "su", "0", "sh", "-c",
             (
-                f"if [ -e '{target}' ] || [ -L '{target}' ]; then echo target=present; "
-                "else echo target=absent; fi; "
+                f"if [ -e '{target}' ] || [ -L '{target}' ]; then echo target=present; else echo target=absent; fi; "
                 f"if [ -L '{_ROOT}/current' ]; then printf 'current='; readlink '{_ROOT}/current'; "
-                "elif [ -e '" + _ROOT + "/current' ]; then echo current=invalid; "
-                "else echo current=absent; fi"
+                "elif [ -e '" + _ROOT + "/current' ]; then echo current=invalid; else echo current=absent; fi"
             ),
         ],
     )
@@ -132,34 +114,23 @@ def observe_runtime(
                 exact = False
                 break
     desired = exists and current == target and exact
+    current_is_managed = current is None or current.startswith(f"{_ROOT}/releases/")
     return RuntimeObservation(
-        target_release=target,
-        target_release_exists=exists,
-        current_target=current,
-        exact_files_verified=exact,
-        required_file_count=len(files),
-        desired=desired,
-        admissible_for_new_dispatch=(desired or not exists),
+        target_release=target, target_release_exists=exists, current_target=current,
+        exact_files_verified=exact, required_file_count=len(files), desired=desired,
+        admissible_for_new_dispatch=(desired or (not exists and current_is_managed)),
     )
 
 
-def _stage_runtime(
-    *,
-    serial: str,
-    release_root: Path,
-    release_id: str,
-    required_paths: tuple[str, ...],
-) -> tuple[str, tuple[tuple[str, Path, str], ...]]:
+def _stage_runtime(*, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]) -> tuple[str, tuple[tuple[str, Path, str], ...]]:
     files = _files(release_root, required_paths)
     stage = f"/data/local/tmp/mobile-proxy-release-{release_id}"
     adb = _adb()
-    prepare = _run([adb, "-s", serial, "shell", "rm", "-rf", stage], timeout=30)
-    if prepare.returncode != 0:
+    if _run([adb, "-s", serial, "shell", "rm", "-rf", stage], timeout=30).returncode != 0:
         raise PhoneTargetUnavailable("phone runtime stage cleanup failed")
     if _run([adb, "-s", serial, "shell", "mkdir", "-p", stage], timeout=30).returncode != 0:
         raise PhoneTargetUnavailable("phone runtime stage creation failed")
-    pushed = _run([adb, "-s", serial, "push", str(release_root) + "/.", stage + "/"], timeout=180)
-    if pushed.returncode != 0:
+    if _run([adb, "-s", serial, "push", str(release_root) + "/.", stage + "/"], timeout=180).returncode != 0:
         raise PhoneTargetUnavailable("phone runtime stage upload failed")
     for relative, _local, expected in files:
         result = _read(serial, ["shell", "sha256sum", f"{stage}/{relative}"])
@@ -169,13 +140,7 @@ def _stage_runtime(
     return stage, files
 
 
-def _materialize_inactive(
-    *,
-    serial: str,
-    release_id: str,
-    stage: str,
-    files: tuple[tuple[str, Path, str], ...],
-) -> str:
+def _materialize_inactive(*, serial: str, release_id: str, stage: str, files: tuple[tuple[str, Path, str], ...]) -> str:
     target = f"{_ROOT}/releases/{release_id}"
     script = f"""
 set -eu
@@ -213,7 +178,7 @@ BOOT='{_BOOT_HOOK}'
 if [ -f "$ROOT/logs/runtime-watchdog.pid" ]; then
   pid="$(cat "$ROOT/logs/runtime-watchdog.pid" 2>/dev/null || true)"
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
-    cmd="$(tr '\\000' ' ' < "/proc/$pid/cmdline")"
+    cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline")"
     case "$cmd" in *"$ROOT/logs/runtime-watchdog.sh"*"$ROOT/current"*) kill -TERM "$pid" 2>/dev/null || true ;; esac
   fi
 fi
@@ -253,41 +218,24 @@ sh "$ROOT/current/service.sh"
 
 
 def dispatch_release_once(
-    *,
-    serial: str,
-    apk: Path,
-    release_root: Path,
-    release_id: str,
-    required_paths: tuple[str, ...],
+    *, serial: str, apk: Path, release_root: Path, release_id: str,
+    required_paths: tuple[str, ...], install_apk: bool, install_runtime: bool,
 ) -> DispatchResult:
-    """Execute one durable phone Release dispatch boundary.
-
-    The caller invokes this function at most once for one durable intent. Any
-    uncertainty after entering the adapter returns UNKNOWN; the caller may only
-    use read-only observation afterward.
-    """
+    """Cross one composite durable dispatch boundary at most once."""
     release_id = _safe_release_id(release_id)
-    try:
-        stage, files = _stage_runtime(
-            serial=serial,
-            release_root=release_root,
-            release_id=release_id,
-            required_paths=required_paths,
-        )
-    except PhoneTargetUnavailable:
-        return DispatchResult(False, True, "RUNTIME_STAGE_OUTCOME_UNKNOWN")
-
-    apk_result = dispatch_install_once(serial=serial, apk=apk)
-    if apk_result.outcome_unknown or not apk_result.confirmed:
-        return apk_result
-    try:
-        target = _materialize_inactive(
-            serial=serial,
-            release_id=release_id,
-            stage=stage,
-            files=files,
-        )
-        _activate(serial=serial, release_id=release_id, target=target)
-    except PhoneTargetUnavailable:
-        return DispatchResult(False, True, "ROOTED_RUNTIME_MUTATION_OUTCOME_UNKNOWN")
+    if not install_apk and not install_runtime:
+        return DispatchResult(True, False, None)
+    if install_apk:
+        apk_result = dispatch_install_once(serial=serial, apk=apk)
+        if apk_result.outcome_unknown or not apk_result.confirmed:
+            return apk_result
+    if install_runtime:
+        try:
+            stage, files = _stage_runtime(
+                serial=serial, release_root=release_root, release_id=release_id, required_paths=required_paths,
+            )
+            target = _materialize_inactive(serial=serial, release_id=release_id, stage=stage, files=files)
+            _activate(serial=serial, release_id=release_id, target=target)
+        except PhoneTargetUnavailable:
+            return DispatchResult(False, True, "ROOTED_RUNTIME_MUTATION_OUTCOME_UNKNOWN")
     return DispatchResult(True, False, None)

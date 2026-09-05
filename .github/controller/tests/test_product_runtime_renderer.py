@@ -45,36 +45,22 @@ def materialized(root: Path) -> PhoneRuntimeMaterialization:
     inventory.write_text("{}\n", encoding="utf-8")
     realization = source / "realization/phone-production-runtime-realization-v1.json"
     return PhoneRuntimeMaterialization(
-        source_root=source,
-        release_root=release,
-        inventory_path=inventory,
-        realization_path=realization,
+        source_root=source, release_root=release, inventory_path=inventory, realization_path=realization,
         components=components,
-        required_live_release_paths=(
-            "service.sh",
-            "bin/runtime-supervisor",
-            "config/host-daemon.json",
-            "config/sing-box.json",
-        ),
+        required_live_release_paths=("service.sh", "bin/runtime-supervisor", "config/host-daemon.json", "config/sing-box.json"),
         transport_sha256="0" * 64,
     )
 
 
 def write_contract(product: Path, *, tracked_service: bytes = b"#!/system/bin/sh\n") -> None:
     items = [
-        {"name": "runtime-supervisor", "source": "deploy/device-runtime/bin/runtime-supervisor", "archive_path": "bin/runtime-supervisor", "kind": "product-native-executable", "executable": True},
-        {"name": "magisk-service", "source": "deploy/device-runtime/module/service.sh", "archive_path": "module/service.sh", "kind": "runtime-static-file", "executable": True},
-        {"name": "host-daemon-template", "source": "deploy/device-runtime/templates/host-daemon.base.json", "archive_path": "templates/host-daemon.base.json", "kind": "runtime-template", "executable": False},
-        {"name": "sing-box-template", "source": "deploy/device-runtime/templates/sing-box.base.json", "archive_path": "templates/sing-box.base.json", "kind": "runtime-template", "executable": False},
-        {"name": "runtime-realization-contract", "source": "contracts/operations/phone-production-runtime-realization-v1.json", "archive_path": "realization/phone-production-runtime-realization-v1.json", "kind": "runtime-realization-contract", "executable": False},
+        {"name":"runtime-supervisor","source":"deploy/device-runtime/bin/runtime-supervisor","archive_path":"bin/runtime-supervisor","kind":"product-native-executable","executable":True},
+        {"name":"magisk-service","source":"deploy/device-runtime/module/service.sh","archive_path":"module/service.sh","kind":"runtime-static-file","executable":True},
+        {"name":"host-daemon-template","source":"deploy/device-runtime/templates/host-daemon.base.json","archive_path":"templates/host-daemon.base.json","kind":"runtime-template","executable":False},
+        {"name":"sing-box-template","source":"deploy/device-runtime/templates/sing-box.base.json","archive_path":"templates/sing-box.base.json","kind":"runtime-template","executable":False},
+        {"name":"runtime-realization-contract","source":"contracts/operations/phone-production-runtime-realization-v1.json","archive_path":"realization/phone-production-runtime-realization-v1.json","kind":"runtime-realization-contract","executable":False},
     ]
-    contract = {
-        "contract_version": 1,
-        "status": "protected",
-        "target": "phone-production",
-        "archive_root": "phone-production-runtime",
-        "components": items,
-    }
+    contract = {"contract_version":1,"status":"protected","target":"phone-production","archive_root":"phone-production-runtime","components":items}
     path = product / "contracts/operations/phone-production-release-components-v1.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(contract), encoding="utf-8")
@@ -96,6 +82,35 @@ def expect_refused(callback) -> None:
     except PhoneRuntimeRefused:
         return
     raise AssertionError("expected PhoneRuntimeRefused")
+
+
+def test_verify_release_component_digests_binds_outer_runtime_and_inventory() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        value = materialized(root / "work")
+        product = root / "product"
+        product.mkdir()
+        runtime_archive = root / "runtime.tar.gz"
+        runtime_archive.write_bytes(b"runtime-tar")
+        calls: list[tuple[str, Path]] = []
+        original = renderer._product_digest
+
+        def fake(*, product_root, asset_name, path):
+            calls.append((asset_name, Path(path)))
+            return DIGEST
+
+        renderer._product_digest = fake
+        try:
+            renderer.verify_release_component_digests(
+                value, product_root=product, runtime_archive=runtime_archive,
+                expected_artifact_name="mobile-proxy-phone-production-runtime-v0.1.6.tar.gz",
+                expected_artifact_digest=DIGEST, expected_inventory_digest=DIGEST,
+            )
+        finally:
+            renderer._product_digest = original
+        assert calls[0] == ("mobile-proxy-phone-production-runtime-v0.1.6.tar.gz", runtime_archive)
+        assert calls[1][0] == "phone-production-runtime/components.json"
+        assert len(calls) == len(value.components) + 2
 
 
 def test_bind_renderer_inputs_uses_release_native_bytes_and_exact_tracked_inputs() -> None:
@@ -129,7 +144,6 @@ def test_render_copies_only_missing_required_derived_files_and_removes_manifest(
         native = value.release_root / "bin/runtime-supervisor"
         native.parent.mkdir(parents=True)
         native.write_text("runtime\n")
-
         original = renderer._run_checked
 
         def fake(command, *, cwd, timeout, environment=None):
@@ -142,11 +156,8 @@ def test_render_copies_only_missing_required_derived_files_and_removes_manifest(
         renderer._run_checked = fake
         try:
             copied = renderer.render_required_runtime_configs(
-                value,
-                product_root=product,
-                manifest_json='{"deviceId":"x"}',
-                release_id="v0.1.6",
-                environment=dict(os.environ),
+                value, product_root=product, manifest_json='{"deviceId":"x"}',
+                release_id="v0.1.6", environment=dict(os.environ),
             )
         finally:
             renderer._run_checked = original

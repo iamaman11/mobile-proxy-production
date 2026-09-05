@@ -39,21 +39,13 @@ def _sha256_file(path: Path) -> str:
 
 
 def _run_checked(
-    command: list[str],
-    *,
-    cwd: Path,
-    timeout: int,
+    command: list[str], *, cwd: Path, timeout: int,
     environment: Mapping[str, str] | None = None,
 ) -> str:
     try:
         result = subprocess.run(
-            command,
-            cwd=cwd,
-            env=None if environment is None else dict(environment),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=True,
+            command, cwd=cwd, env=None if environment is None else dict(environment),
+            capture_output=True, text=True, timeout=timeout, check=True,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise PhoneRuntimeRefused("PRODUCT runtime verification/render command failed") from exc
@@ -65,32 +57,17 @@ def verify_product_source(*, product_root: Path, expected_source_sha: str) -> No
         raise PhoneRuntimeRefused("PRODUCT source identity input is invalid")
     if _run_checked(["git", "rev-parse", "HEAD"], cwd=product_root, timeout=15) != expected_source_sha:
         raise PhoneRuntimeRefused("PRODUCT renderer source SHA differs from admitted Release")
-    if _run_checked(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
-        cwd=product_root,
-        timeout=15,
-    ):
+    if _run_checked(["git", "status", "--porcelain", "--untracked-files=no"], cwd=product_root, timeout=15):
         raise PhoneRuntimeRefused("PRODUCT renderer source has tracked worktree drift")
 
 
 def _product_digest(*, product_root: Path, asset_name: str, path: Path) -> str:
     value = _run_checked(
         [
-            "cargo",
-            "run",
-            "--quiet",
-            "--locked",
-            "--release",
-            "-p",
-            "operator-cli",
-            "--bin",
-            "product-release-asset-digest",
-            "--",
-            asset_name,
-            str(path.resolve()),
+            "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+            "--bin", "product-release-asset-digest", "--", asset_name, str(path.resolve()),
         ],
-        cwd=product_root,
-        timeout=600,
+        cwd=product_root, timeout=600,
     )
     if _TYPED_DIGEST.fullmatch(value) is None:
         raise PhoneRuntimeRefused("PRODUCT digest command returned invalid identity")
@@ -98,16 +75,20 @@ def _product_digest(*, product_root: Path, asset_name: str, path: Path) -> str:
 
 
 def verify_release_component_digests(
-    materialized: PhoneRuntimeMaterialization,
-    *,
-    product_root: Path,
-    expected_inventory_digest: str,
+    materialized: PhoneRuntimeMaterialization, *, product_root: Path,
+    runtime_archive: Path, expected_artifact_name: str,
+    expected_artifact_digest: str, expected_inventory_digest: str,
 ) -> None:
-    if _TYPED_DIGEST.fullmatch(expected_inventory_digest) is None:
-        raise PhoneRuntimeRefused("admitted phone runtime inventory digest is invalid")
+    if (
+        not expected_artifact_name or "/" in expected_artifact_name
+        or _TYPED_DIGEST.fullmatch(expected_artifact_digest) is None
+        or _TYPED_DIGEST.fullmatch(expected_inventory_digest) is None
+    ):
+        raise PhoneRuntimeRefused("admitted phone runtime Product identity is invalid")
+    if _product_digest(product_root=product_root, asset_name=expected_artifact_name, path=runtime_archive) != expected_artifact_digest:
+        raise PhoneRuntimeRefused("phone runtime outer Product content digest differs")
     if _product_digest(
-        product_root=product_root,
-        asset_name="phone-production-runtime/components.json",
+        product_root=product_root, asset_name="phone-production-runtime/components.json",
         path=materialized.inventory_path,
     ) != expected_inventory_digest:
         raise PhoneRuntimeRefused("phone runtime component inventory digest differs")
@@ -128,10 +109,8 @@ def _load_product_component_contract(product_root: Path) -> dict[str, Mapping[st
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PhoneRuntimeRefused("exact PRODUCT component contract is unavailable") from exc
     if (
-        not isinstance(value, Mapping)
-        or value.get("contract_version") != 1
-        or value.get("status") != "protected"
-        or value.get("target") != "phone-production"
+        not isinstance(value, Mapping) or value.get("contract_version") != 1
+        or value.get("status") != "protected" or value.get("target") != "phone-production"
         or value.get("archive_root") != "phone-production-runtime"
     ):
         raise PhoneRuntimeRefused("exact PRODUCT component contract metadata differs")
@@ -149,11 +128,7 @@ def _load_product_component_contract(product_root: Path) -> dict[str, Mapping[st
     return result
 
 
-def bind_renderer_inputs(
-    materialized: PhoneRuntimeMaterialization,
-    *,
-    product_root: Path,
-) -> None:
+def bind_renderer_inputs(materialized: PhoneRuntimeMaterialization, *, product_root: Path) -> None:
     contract = _load_product_component_contract(product_root)
     by_name = {item.name: item for item in materialized.components}
     if set(contract) != set(by_name):
@@ -174,18 +149,12 @@ def bind_renderer_inputs(
             shutil.copyfile(source, target)
             os.chmod(target, 0o755)
         elif not target.is_file() or _sha256_file(target) != _sha256_file(source):
-            raise PhoneRuntimeRefused(
-                f"PRODUCT renderer tracked input differs from Release component: {name}"
-            )
+            raise PhoneRuntimeRefused(f"PRODUCT renderer tracked input differs from Release component: {name}")
 
 
 def render_required_runtime_configs(
-    materialized: PhoneRuntimeMaterialization,
-    *,
-    product_root: Path,
-    manifest_json: str,
-    release_id: str,
-    environment: Mapping[str, str],
+    materialized: PhoneRuntimeMaterialization, *, product_root: Path,
+    manifest_json: str, release_id: str, environment: Mapping[str, str],
 ) -> tuple[str, ...]:
     try:
         manifest = json.loads(manifest_json)
@@ -200,36 +169,18 @@ def render_required_runtime_configs(
     try:
         _run_checked(
             [
-                "cargo",
-                "run",
-                "--quiet",
-                "--locked",
-                "--release",
-                "-p",
-                "operator-cli",
-                "--bin",
-                "operator-cli",
-                "--",
-                "package-device-release",
-                "--manifest-path",
-                str(manifest_path.resolve()),
-                "--release-id",
-                release_id,
-                "--output-dir",
-                str(render_root.resolve()),
-                "--tunnel-owner",
-                _TUNNEL_OWNER,
+                "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+                "--bin", "operator-cli", "--", "package-device-release",
+                "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
+                "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
             ],
-            cwd=product_root,
-            timeout=600,
-            environment=environment,
+            cwd=product_root, timeout=600, environment=environment,
         )
     finally:
         try:
             manifest_path.unlink()
         except FileNotFoundError:
             pass
-
     rendered_release = render_root / release_id
     copied: list[str] = []
     for relative in materialized.required_live_release_paths:
@@ -238,16 +189,11 @@ def render_required_runtime_configs(
             continue
         source = rendered_release / relative
         if not source.is_file() or source.stat().st_size <= 0:
-            raise PhoneRuntimeRefused(
-                f"PRODUCT renderer did not create required runtime file: {relative}"
-            )
+            raise PhoneRuntimeRefused(f"PRODUCT renderer did not create required runtime file: {relative}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
         os.chmod(destination, 0o600)
         copied.append(relative)
-    if any(
-        not (materialized.release_root / relative).is_file()
-        for relative in materialized.required_live_release_paths
-    ):
+    if any(not (materialized.release_root / relative).is_file() for relative in materialized.required_live_release_paths):
         raise PhoneRuntimeRefused("materialized runtime release lacks required live files")
     return tuple(sorted(copied))

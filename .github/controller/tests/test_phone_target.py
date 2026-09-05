@@ -21,9 +21,7 @@ fake_android.DispatchResult = DispatchResult
 fake_android.dispatch_install_once = lambda **kwargs: DispatchResult(True, False, None)
 sys.modules["android_target"] = fake_android
 
-spec = importlib.util.spec_from_file_location(
-    "phone_target", Path(__file__).resolve().parents[1] / "phone_target.py"
-)
+spec = importlib.util.spec_from_file_location("phone_target", Path(__file__).resolve().parents[1] / "phone_target.py")
 phone_target = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules["phone_target"] = phone_target
@@ -60,12 +58,7 @@ def test_observe_runtime_requires_exact_current_and_all_bytes() -> None:
         original = phone_target._read
         phone_target._read = fake_read
         try:
-            observed = phone_target.observe_runtime(
-                serial="serial",
-                release_root=release,
-                release_id="v0.1.6",
-                required_paths=required,
-            )
+            observed = phone_target.observe_runtime(serial="serial", release_root=release, release_id="v0.1.6", required_paths=required)
         finally:
             phone_target._read = original
         assert observed.desired is True
@@ -78,101 +71,111 @@ def test_observe_runtime_rejects_existing_noncurrent_target_for_new_dispatch() -
         release, required = runtime_release(Path(raw))
 
         def fake_read(serial, args, timeout=30):
-            return SimpleNamespace(
-                returncode=0,
-                stdout="target=present\ncurrent=/data/adb/mobile-proxy-node/releases/v0.1.5\n",
-            )
+            return SimpleNamespace(returncode=0, stdout="target=present\ncurrent=/data/adb/mobile-proxy-node/releases/v0.1.5\n")
 
         original = phone_target._read
         phone_target._read = fake_read
         try:
-            observed = phone_target.observe_runtime(
-                serial="serial",
-                release_root=release,
-                release_id="v0.1.6",
-                required_paths=required,
-            )
+            observed = phone_target.observe_runtime(serial="serial", release_root=release, release_id="v0.1.6", required_paths=required)
         finally:
             phone_target._read = original
         assert observed.desired is False
         assert observed.admissible_for_new_dispatch is False
 
 
-def test_composite_dispatch_calls_apk_once_then_runtime_once() -> None:
+def test_observe_runtime_rejects_unmanaged_current_even_when_target_absent() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+
+        def fake_read(serial, args, timeout=30):
+            return SimpleNamespace(returncode=0, stdout="target=absent\ncurrent=/data/local/tmp/foreign-runtime\n")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            observed = phone_target.observe_runtime(serial="serial", release_root=release, release_id="v0.1.6", required_paths=required)
+        finally:
+            phone_target._read = original
+        assert observed.desired is False
+        assert observed.admissible_for_new_dispatch is False
+
+
+def test_composite_dispatch_calls_apk_then_runtime_once() -> None:
     with tempfile.TemporaryDirectory() as raw:
         release, required = runtime_release(Path(raw))
         apk = Path(raw) / "app.apk"
         apk.write_bytes(b"apk")
         calls: list[str] = []
-        originals = (
-            phone_target._stage_runtime,
-            phone_target.dispatch_install_once,
-            phone_target._materialize_inactive,
-            phone_target._activate,
-        )
-        phone_target._stage_runtime = lambda **kwargs: ("/stage", tuple())
+        originals = (phone_target._stage_runtime, phone_target.dispatch_install_once, phone_target._materialize_inactive, phone_target._activate)
 
         def install(**kwargs):
             calls.append("apk")
             return DispatchResult(True, False, None)
 
-        phone_target.dispatch_install_once = install
+        def stage(**kwargs):
+            calls.append("stage")
+            return "/stage", tuple()
 
         def materialize(**kwargs):
             calls.append("runtime")
             return "/data/adb/mobile-proxy-node/releases/v0.1.6"
 
+        phone_target.dispatch_install_once = install
+        phone_target._stage_runtime = stage
         phone_target._materialize_inactive = materialize
         phone_target._activate = lambda **kwargs: calls.append("activate")
         try:
             result = phone_target.dispatch_release_once(
-                serial="serial",
-                apk=apk,
-                release_root=release,
-                release_id="v0.1.6",
-                required_paths=required,
+                serial="serial", apk=apk, release_root=release, release_id="v0.1.6",
+                required_paths=required, install_apk=True, install_runtime=True,
             )
         finally:
-            (
-                phone_target._stage_runtime,
-                phone_target.dispatch_install_once,
-                phone_target._materialize_inactive,
-                phone_target._activate,
-            ) = originals
+            (phone_target._stage_runtime, phone_target.dispatch_install_once, phone_target._materialize_inactive, phone_target._activate) = originals
         assert result.confirmed is True and result.outcome_unknown is False
-        assert calls == ["apk", "runtime", "activate"]
+        assert calls == ["apk", "stage", "runtime", "activate"]
 
 
-def test_apk_unknown_stops_before_rooted_runtime_mutation() -> None:
+def test_apk_unknown_stops_before_any_rooted_runtime_mutation() -> None:
     with tempfile.TemporaryDirectory() as raw:
         release, required = runtime_release(Path(raw))
         apk = Path(raw) / "app.apk"
         apk.write_bytes(b"apk")
         mutated: list[str] = []
-        originals = (
-            phone_target._stage_runtime,
-            phone_target.dispatch_install_once,
-            phone_target._materialize_inactive,
-        )
-        phone_target._stage_runtime = lambda **kwargs: ("/stage", tuple())
+        originals = (phone_target._stage_runtime, phone_target.dispatch_install_once, phone_target._materialize_inactive)
         phone_target.dispatch_install_once = lambda **kwargs: DispatchResult(False, True, "ADB_UNKNOWN")
+        phone_target._stage_runtime = lambda **kwargs: mutated.append("stage")
         phone_target._materialize_inactive = lambda **kwargs: mutated.append("runtime")
         try:
             result = phone_target.dispatch_release_once(
-                serial="serial",
-                apk=apk,
-                release_root=release,
-                release_id="v0.1.6",
-                required_paths=required,
+                serial="serial", apk=apk, release_root=release, release_id="v0.1.6",
+                required_paths=required, install_apk=True, install_runtime=True,
             )
         finally:
-            (
-                phone_target._stage_runtime,
-                phone_target.dispatch_install_once,
-                phone_target._materialize_inactive,
-            ) = originals
+            (phone_target._stage_runtime, phone_target.dispatch_install_once, phone_target._materialize_inactive) = originals
         assert result.outcome_unknown is True
         assert mutated == []
+
+
+def test_composite_dispatch_can_skip_already_desired_apk_domain() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        apk = Path(raw) / "app.apk"
+        apk.write_bytes(b"apk")
+        calls: list[str] = []
+        originals = (phone_target._stage_runtime, phone_target.dispatch_install_once, phone_target._materialize_inactive, phone_target._activate)
+        phone_target.dispatch_install_once = lambda **kwargs: calls.append("apk")
+        phone_target._stage_runtime = lambda **kwargs: (calls.append("stage") or ("/stage", tuple()))
+        phone_target._materialize_inactive = lambda **kwargs: (calls.append("runtime") or "/data/adb/mobile-proxy-node/releases/v0.1.6")
+        phone_target._activate = lambda **kwargs: calls.append("activate")
+        try:
+            result = phone_target.dispatch_release_once(
+                serial="serial", apk=apk, release_root=release, release_id="v0.1.6",
+                required_paths=required, install_apk=False, install_runtime=True,
+            )
+        finally:
+            (phone_target._stage_runtime, phone_target.dispatch_install_once, phone_target._materialize_inactive, phone_target._activate) = originals
+        assert result.confirmed is True and result.outcome_unknown is False
+        assert calls == ["stage", "runtime", "activate"]
 
 
 def main() -> None:
