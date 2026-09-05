@@ -16,9 +16,20 @@ API = f"https://api.github.com/repos/{PUBLIC_REPOSITORY}"
 _TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"sha256:([0-9a-f]{64})")
+_RAW_SHA256 = re.compile(r"[0-9a-f]{64}")
 _TYPED_DIGEST = re.compile(r"b3:[0-9a-f]{64}")
 _DIGEST_ALGORITHM = "blake3-256"
 _DIGEST_DOMAIN = "mobile-proxy/product-release-asset/v2"
+_PHONE_TARGET = "phone-production"
+_PHONE_RUNTIME_KIND = "phone-production-runtime-tar"
+_PHONE_RUNTIME_INVENTORY_PATH = "phone-production-runtime/components.json"
+_PHONE_RUNTIME_ABI = {
+    "os": "android",
+    "arch": "arm",
+    "rust_target": "armv7-linux-androideabi",
+    "elf_machine": 40,
+}
+_SING_BOX_ARCHIVE_DOMAIN = "mobile-proxy/upstream-sing-box-archive/v1"
 
 
 class ReleaseAdmissionError(RuntimeError):
@@ -38,6 +49,9 @@ class AdmittedRelease:
     android_package: str | None = None
     android_version_name: str | None = None
     android_version_code: int | None = None
+    phone_runtime_asset_id: int | None = None
+    phone_runtime_download_url: str | None = None
+    phone_runtime_transport_sha256: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         result = asdict(self)
@@ -205,6 +219,82 @@ def _artifact_records(
     return result
 
 
+def _safe_component_records(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ReleaseAdmissionError("phone runtime component set is empty or invalid")
+    names: set[str] = set()
+    paths: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ReleaseAdmissionError("phone runtime component record is invalid")
+        name = str(item.get("name", ""))
+        path = str(item.get("archive_path", ""))
+        kind = str(item.get("kind", ""))
+        digest = str(item.get("content_digest", ""))
+        executable = item.get("executable")
+        if (
+            not name
+            or not path
+            or not kind
+            or name in names
+            or path in paths
+            or path.startswith("/")
+            or ".." in path.split("/")
+            or item.get("content_digest_algorithm") != _DIGEST_ALGORITHM
+            or item.get("content_digest_domain") != _DIGEST_DOMAIN
+            or _TYPED_DIGEST.fullmatch(digest) is None
+            or not isinstance(executable, bool)
+        ):
+            raise ReleaseAdmissionError("phone runtime component identity is invalid or ambiguous")
+        names.add(name)
+        paths.add(path)
+    return tuple(sorted(names))
+
+
+def _validate_sing_box_identity(value: object) -> None:
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], Mapping):
+        raise ReleaseAdmissionError("phone runtime third-party identity set differs")
+    item = value[0]
+    if (
+        item.get("name") != "sing-box"
+        or not isinstance(item.get("version"), str)
+        or not str(item.get("version"))
+        or item.get("lock_target") != "android-arm"
+        or not isinstance(item.get("archive_size"), int)
+        or isinstance(item.get("archive_size"), bool)
+        or int(item.get("archive_size", 0)) <= 0
+        or _RAW_SHA256.fullmatch(str(item.get("archive_upstream_sha256", ""))) is None
+        or _TYPED_DIGEST.fullmatch(str(item.get("archive_content_digest", ""))) is None
+        or item.get("archive_content_digest_algorithm") != _DIGEST_ALGORITHM
+        or item.get("archive_content_digest_domain") != _SING_BOX_ARCHIVE_DOMAIN
+    ):
+        raise ReleaseAdmissionError("phone runtime sing-box identity differs")
+
+
+def _phone_runtime_identity(record: Mapping[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+    if (
+        record.get("kind") != _PHONE_RUNTIME_KIND
+        or record.get("target") != _PHONE_TARGET
+        or record.get("runtime_abi") != _PHONE_RUNTIME_ABI
+    ):
+        raise ReleaseAdmissionError("phone runtime target/kind/ABI identity differs")
+    inventory = record.get("component_inventory")
+    if not isinstance(inventory, Mapping):
+        raise ReleaseAdmissionError("phone runtime component inventory identity is missing")
+    inventory_path = str(inventory.get("path", ""))
+    inventory_digest = str(inventory.get("content_digest", ""))
+    if (
+        inventory_path != _PHONE_RUNTIME_INVENTORY_PATH
+        or inventory.get("content_digest_algorithm") != _DIGEST_ALGORITHM
+        or inventory.get("content_digest_domain") != _DIGEST_DOMAIN
+        or _TYPED_DIGEST.fullmatch(inventory_digest) is None
+    ):
+        raise ReleaseAdmissionError("phone runtime component inventory identity differs")
+    components = _safe_component_records(record.get("components"))
+    _validate_sing_box_identity(record.get("third_party_runtime"))
+    return inventory_path, inventory_digest, components
+
+
 def resolve_payload(
     *,
     tag: str,
@@ -235,41 +325,48 @@ def resolve_payload(
     assets = _assets(release)
     linux_name = f"mobile-proxy-linux-x86_64-{tag}.tar.gz"
     apk_name = f"mobile-proxy-android-{tag}.apk"
+    phone_name = f"mobile-proxy-phone-production-runtime-{tag}.tar.gz"
     expected_release_assets = {
         linux_name,
         apk_name,
+        phone_name,
         "release-manifest.json",
         "provenance.json",
         "artifact-digests.json",
     }
     if set(assets) != expected_release_assets:
-        raise ReleaseAdmissionError("Release does not contain the exact five Product Release v2 assets")
+        raise ReleaseAdmissionError("Release does not contain the exact six Product Release v2 assets")
     for asset in assets.values():
         _asset_transport_sha256(asset)
 
     digest_covered_names = {
         linux_name,
         apk_name,
+        phone_name,
         "release-manifest.json",
         "provenance.json",
     }
     digests = _typed_digest_map(digest_set, expected_names=digest_covered_names)
+    product_names = {linux_name, apk_name, phone_name}
     manifest_records = _artifact_records(
         manifest.get("artifacts"),
         label="release manifest",
-        expected_names={linux_name, apk_name},
+        expected_names=product_names,
         digests=digests,
     )
     _artifact_records(
         provenance.get("artifacts"),
         label="release provenance",
-        expected_names={linux_name, apk_name},
+        expected_names=product_names,
         digests=digests,
     )
 
-    artifact_name = apk_name if target == "phone-production" else linux_name
+    phone_record = manifest_records[phone_name]
+    inventory_path, inventory_digest, _component_names = _phone_runtime_identity(phone_record)
+
+    artifact_name = apk_name if target == _PHONE_TARGET else linux_name
     artifact_digest = digests[artifact_name]
-    identity_raw = {
+    identity_raw: dict[str, object] = {
         "tag": tag,
         "release_id": _positive(release.get("id"), "release id"),
         "source_sha": source_sha,
@@ -279,6 +376,15 @@ def resolve_payload(
         "provenance_digest": digests["provenance.json"],
         "immutable": True,
     }
+    if target == _PHONE_TARGET:
+        identity_raw.update(
+            {
+                "phone_runtime_artifact_name": phone_name,
+                "phone_runtime_artifact_digest": digests[phone_name],
+                "phone_runtime_inventory_path": inventory_path,
+                "phone_runtime_inventory_digest": inventory_digest,
+            }
+        )
     try:
         identity = validate_product_release(identity_raw, target=target)
     except ReleaseIdentityError as exc:
@@ -287,7 +393,10 @@ def resolve_payload(
     android_package = None
     android_version_name = None
     android_version_code = None
-    if target == "phone-production":
+    phone_runtime_asset_id = None
+    phone_runtime_download_url = None
+    phone_runtime_transport_sha256 = None
+    if target == _PHONE_TARGET:
         manifest_artifact = manifest_records[apk_name]
         if manifest_artifact.get("kind") != "android-apk":
             raise ReleaseAdmissionError("Android release artifact kind differs")
@@ -296,6 +405,9 @@ def resolve_payload(
         android_version_code = _positive(manifest_artifact.get("version_code"), "Android version code")
         if android_package != "com.example.mobileproxy" or android_version_name != tag.removeprefix("v"):
             raise ReleaseAdmissionError("Android package/version does not match deployment Release")
+        phone_runtime_asset_id = _positive(assets[phone_name].get("id"), "phone runtime asset id")
+        phone_runtime_download_url = str(assets[phone_name].get("browser_download_url", ""))
+        phone_runtime_transport_sha256 = _asset_transport_sha256(assets[phone_name])
 
     return AdmittedRelease(
         identity=identity,
@@ -309,6 +421,9 @@ def resolve_payload(
         android_package=android_package,
         android_version_name=android_version_name,
         android_version_code=android_version_code,
+        phone_runtime_asset_id=phone_runtime_asset_id,
+        phone_runtime_download_url=phone_runtime_download_url,
+        phone_runtime_transport_sha256=phone_runtime_transport_sha256,
     )
 
 

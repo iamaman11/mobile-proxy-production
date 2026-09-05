@@ -57,33 +57,26 @@ jobs:
           python3 .github/controller/tests/test_release_resolver.py
           echo 'DEPLOYMENT_CONTROLLER_HOSTED_TESTS_OK'
 
-      - name: Prove immutable Product Release resolver off-device
+      - name: Prove legacy Product Release refusal off-device
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import re
           import sys
           from pathlib import Path
 
           sys.path.insert(0, str(Path('.github/controller').resolve()))
-          from release_resolver import resolve_release
+          from release_resolver import ReleaseAdmissionError, resolve_release
 
-          admitted = resolve_release(tag='v0.1.4', target='phone-production')
-          identity = admitted.identity
-          if identity.release_id != 382429107:
-              raise SystemExit('v0.1.4 Release id differs')
-          if identity.source_sha != 'ff882e5ca5116fa90b80f15c6cc019f88e68ccfa':
-              raise SystemExit('v0.1.4 source SHA differs')
-          if identity.artifact_name != 'mobile-proxy-android-v0.1.4.apk':
-              raise SystemExit('v0.1.4 artifact name differs')
-          if re.fullmatch(r'b3:[0-9a-f]{64}', identity.artifact_digest) is None:
-              raise SystemExit('v0.1.4 content identity is not typed BLAKE3')
-          if re.fullmatch(r'[0-9a-f]{64}', admitted.artifact_transport_sha256) is None:
-              raise SystemExit('v0.1.4 transport sha256 is invalid')
-          if admitted.immutability_control != 'github-immutable-release':
-              raise SystemExit('v0.1.4 immutability control differs')
-          print('REAL_PRODUCT_RELEASE_V2_RESOLVER_OK tag=v0.1.4 target=phone-production')
+          try:
+              resolve_release(tag='v0.1.4', target='phone-production')
+          except ReleaseAdmissionError as exc:
+              message = str(exc)
+              if 'exact six Product Release v2 assets' not in message:
+                  raise SystemExit('v0.1.4 refusal reason differs: ' + message)
+          else:
+              raise SystemExit('legacy five-asset v0.1.4 unexpectedly admitted')
+          print('LEGACY_PRODUCT_RELEASE_REFUSAL_OK tag=v0.1.4 target=phone-production')
           PY
 
       - name: Prove sole ingress and Deployment Controller safety invariants
