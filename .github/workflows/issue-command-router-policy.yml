@@ -213,15 +213,34 @@ jobs:
               raise SystemExit('UNKNOWN/RECOVERED projection fail-closed invariant missing')
 
           run_path = Path('.github/scripts/run_phone_release_deployment.py')
-          tree = ast.parse(run_path.read_text(encoding='utf-8'))
-          dispatch_calls = [
-              node for node in ast.walk(tree)
+          run_tree = ast.parse(run_path.read_text(encoding='utf-8'))
+          composite_calls = [
+              node for node in ast.walk(run_tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == 'dispatch_release_once'
+          ]
+          direct_apk_calls = [
+              node for node in ast.walk(run_tree)
               if isinstance(node, ast.Call)
               and isinstance(node.func, ast.Name)
               and node.func.id == 'dispatch_install_once'
           ]
-          if len(dispatch_calls) != 1:
-              raise SystemExit(f'exactly one destructive dispatch callsite required; got {len(dispatch_calls)}')
+          if len(composite_calls) != 1 or direct_apk_calls:
+              raise SystemExit(
+                  f'exactly one composite dispatch and zero direct APK dispatch callsites required; '
+                  f'composite={len(composite_calls)} direct_apk={len(direct_apk_calls)}'
+              )
+          target_path = Path('.github/controller/phone_target.py')
+          target_tree = ast.parse(target_path.read_text(encoding='utf-8'))
+          primitive_calls = [
+              node for node in ast.walk(target_tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == 'dispatch_install_once'
+          ]
+          if len(primitive_calls) != 1:
+              raise SystemExit(f'composite adapter must contain exactly one APK destructive primitive; got {len(primitive_calls)}')
 
           print('SOLE_COMMAND_CONTROL_INGRESS_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')

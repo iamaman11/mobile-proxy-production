@@ -68,12 +68,17 @@ jobs:
           if present:
               raise SystemExit('Android verifier depends on ambient SDK/tool discovery: ' + ' | '.join(present))
 
-          verify = execution.index('artifact_fact = verify_artifact(')
-          observe = execution.index('pre = observe(', verify)
+          recovery_boundary = execution.index('if args.recovery_only == "true":')
+          new_execution = execution.index('if existing_intent is not None:', recovery_boundary)
+          apk_ready = execution.index('_materialize_verified_release_apk(admitted, apk, facts)', new_execution)
+          runtime_ready = execution.index('materialized = _materialize_verified_release_runtime(', apk_ready)
+          observe = execution.index('apk_pre, runtime_pre = _observe_composite(', runtime_ready)
           intent = execution.index('intent = evidence.persist_intent', observe)
-          dispatch = execution.index('dispatch = dispatch_install_once', intent)
-          if not verify < observe < intent < dispatch:
-              raise SystemExit('artifact readiness must fail closed before observe/intent/dispatch')
+          dispatch = execution.index('dispatch = dispatch_release_once', intent)
+          if not apk_ready < runtime_ready < observe < intent < dispatch:
+              raise SystemExit('composite artifact readiness must fail closed before observe/intent/dispatch')
+          if 'dispatch_install_once(' in execution:
+              raise SystemExit('transaction owner bypasses composite dispatch adapter')
 
           evidence_required = (
               'class EvidenceWriteAmbiguous(EvidenceError):',
