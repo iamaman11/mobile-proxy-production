@@ -83,8 +83,6 @@ jobs:
         id: command
         env:
           COMMAND: ${{ github.event.comment.body }}
-          REGISTRY_TARGET: ${{ needs.route.outputs.target }}
-          REGISTRY_RELEASE: ${{ needs.route.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -95,8 +93,20 @@ jobs:
             --comment-id "${{ github.event.comment.id }}" \
             --actor "${{ github.event.comment.user.login }}" \
             --owner "${{ github.repository_owner }}"
-          test "${{ steps.command.outputs.target }}" = "$REGISTRY_TARGET"
-          test "${{ steps.command.outputs.release_tag }}" = "$REGISTRY_RELEASE"
+
+      - name: Revalidate deployment request outputs against admitted route
+        env:
+          COMMAND_TARGET: ${{ steps.command.outputs.target }}
+          COMMAND_RELEASE: ${{ steps.command.outputs.release_tag }}
+          REGISTRY_TARGET: ${{ needs.route.outputs.target }}
+          REGISTRY_RELEASE: ${{ needs.route.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$COMMAND_TARGET"
+          test -n "$COMMAND_RELEASE"
+          test "$COMMAND_TARGET" = "$REGISTRY_TARGET"
+          test "$COMMAND_RELEASE" = "$REGISTRY_RELEASE"
 
       - name: Build exact controller execution ACK
         id: execution
