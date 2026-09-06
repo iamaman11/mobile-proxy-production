@@ -32,7 +32,9 @@ jobs:
             .github/scripts/deployment_execution.py \
             .github/scripts/prepare_release_deployment.py \
             .github/scripts/finalize_deployment_projection.py \
-            .github/scripts/run_phone_release_deployment.py
+            .github/scripts/run_phone_release_deployment.py \
+            .github/scripts/prepare_quarantine_recovery.py \
+            .github/scripts/run_quarantine_recovery.py
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -56,6 +58,7 @@ jobs:
           python3 .github/controller/tests/test_product_release_admission_workflow.py
           python3 .github/controller/tests/test_projection_reconciler.py
           python3 .github/controller/tests/test_release_resolver.py
+          python3 .github/controller/tests/test_quarantine_recovery.py
           echo 'DEPLOYMENT_CONTROLLER_HOSTED_TESTS_OK'
 
       - name: Prove legacy Product Release refusal off-device
@@ -95,6 +98,7 @@ jobs:
           workflows = Path('.github/workflows')
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           deployment = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
+          quarantine_recovery = (workflows / 'quarantined-release-recovery.yml').read_text(encoding='utf-8')
           admission = (workflows / 'product-release-admission-proof.yml').read_text(encoding='utf-8')
           registry_path = Path('.github/production/command-control-registry.json')
           targets_path = Path('.github/production/targets.json')
@@ -116,8 +120,11 @@ jobs:
               "needs.route.outputs.read_only == 'true'",
               "needs.route.outputs.destructive == 'false'",
               "needs.route.outputs.route_id == 'deploy-product-release'",
+              "needs.route.outputs.route_id == 'recover-quarantined-product-release'",
+              "needs.route.outputs.operation_class == 'RECOVER'",
               'name: Revalidate deployment request outputs against admitted route',
               'uses: ./.github/workflows/release-deployment.yml',
+              'uses: ./.github/workflows/quarantined-release-recovery.yml',
           )
           missing = [item for item in required_router if item not in router]
           if missing:
@@ -168,18 +175,38 @@ jobs:
               'verify-product-release',
               'deploy-product-release',
               'runner-android-build-tools-bootstrap',
+              'recover-quarantined-product-release',
           }:
               raise SystemExit('active route set differs')
-          destructive = [item for item in active if item.get('destructive') is True]
-          if len(destructive) != 1 or destructive[0].get('id') != 'deploy-product-release':
+          destructive = {item.get('id'): item for item in active if item.get('destructive') is True}
+          if set(destructive) != {'deploy-product-release', 'recover-quarantined-product-release'}:
               raise SystemExit('unexpected destructive route set')
-          deploy = destructive[0]
+          deploy = destructive['deploy-product-release']
           if deploy.get('semantic_identity_policy') != 'existing-deployment-request-v2':
               raise SystemExit('deployment semantic identity drifted')
           if deploy.get('idempotency_policy') != 'durable-semantic-ledger':
               raise SystemExit('deployment idempotency drifted')
           if deploy.get('recovery_policy') != 'UNKNOWN-read-only-reconcile-no-blind-retry':
               raise SystemExit('deployment UNKNOWN recovery drifted')
+
+          recover = destructive['recover-quarantined-product-release']
+          if (
+              recover.get('handler') != 'workflow_call'
+              or recover.get('operation_class') != 'RECOVER'
+              or recover.get('read_only') is not False
+              or recover.get('requires_phone') is not True
+              or recover.get('requires_vm') is not False
+              or recover.get('requires_release') is not True
+              or recover.get('allowed_targets') != ['phone-production']
+              or recover.get('physical_domains') != ['runtime']
+              or recover.get('idempotency_policy') != 'single-run-attempt+durable-semantic-quarantine-recovery-ledger'
+              or recover.get('semantic_identity_policy') != 'quarantined-deployment-terminal+command-arguments'
+              or recover.get('recovery_policy') != 'UNKNOWN-no-blind-retry-owner-checkpoint-required'
+              or recover.get('workflow') != '.github/workflows/quarantined-release-recovery.yml'
+              or 'v0\\.1\\.7' not in recover.get('pattern', '')
+              or '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in recover.get('pattern', '')
+          ):
+              raise SystemExit('Stage 3 quarantine recovery route safety contract differs')
 
           verify = next((item for item in active if item.get('id') == 'verify-product-release'), None)
           if verify is None:
@@ -204,6 +231,7 @@ jobs:
           if targets['phone-production'].get('allowed_operations') != [
               'deploy-product-release',
               'verify-product-release',
+              'recover-quarantined-product-release',
           ]:
               raise SystemExit('phone target operation allowlist differs')
           if targets['vm-production'].get('active') is not False or targets['vm-production'].get('adapter') != 'deferred':
@@ -252,6 +280,27 @@ jobs:
           ):
               if required not in deployment:
                   raise SystemExit('deployment workflow invariant missing: ' + required)
+
+          for required in (
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              'prepare_quarantine_recovery.py',
+              'run_quarantine_recovery.py',
+              'STAGE3_QUARANTINE_RECOVERY_ACCEPTED',
+          ):
+              if required not in quarantine_recovery:
+                  raise SystemExit('quarantine recovery workflow invariant missing: ' + required)
+          for forbidden in (
+              'workflow_dispatch:',
+              'dispatch_release_once',
+              'dispatch_install_once',
+              '_stage_runtime',
+              '_materialize_inactive',
+          ):
+              if forbidden in quarantine_recovery:
+                  raise SystemExit('quarantine recovery workflow gained forbidden deploy/restage surface: ' + forbidden)
 
           evidence = Path('.github/controller/evidence_store.py').read_text(encoding='utf-8')
           for required in (
@@ -303,5 +352,6 @@ jobs:
           print('SOLE_COMMAND_CONTROL_INGRESS_OK')
           print('PRODUCT_RELEASE_ADMISSION_READ_ONLY_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
+          print('STAGE3_QUARANTINE_RECOVERY_BOUNDARY_OK')
           print('VM_TARGET_DEFERRED_OK')
           PY

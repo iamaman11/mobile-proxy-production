@@ -376,8 +376,9 @@ def classify(
         raise RouteRefused("command does not resolve to exactly one active contract")
 
     raw, match = matches[0]
-    if raw["idempotency_policy"] == "single-run-attempt" and run_attempt != 1:
-        raise RouteRefused("this read-only dispatch is admitted only on the original router attempt")
+    idempotency_tokens = str(raw["idempotency_policy"]).split("+")
+    if "single-run-attempt" in idempotency_tokens and run_attempt != 1:
+        raise RouteRefused("this route is admitted only on the original router attempt")
 
     groups = {key: value for key, value in match.groupdict().items() if value is not None}
     specs = raw["arguments"]

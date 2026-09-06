@@ -1,0 +1,72 @@
+name: Stage 3 quarantine recovery policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-stage3-quarantine-recovery:
+    name: Validate exact quarantined v0.1.7 activation-only recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out private controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prove recovery ledger, route and activation-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/controller/tests/test_quarantine_recovery.py
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
+          targets = json.loads(Path('.github/production/targets.json').read_text(encoding='utf-8'))
+          router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
+          workflow = Path('.github/workflows/quarantined-release-recovery.yml').read_text(encoding='utf-8')
+          runner = Path('.github/scripts/run_quarantine_recovery.py').read_text(encoding='utf-8')
+          ledger = Path('.github/controller/quarantine_recovery.py').read_text(encoding='utf-8')
+
+          routes = [r for r in registry['routes'] if r['id'] == 'recover-quarantined-product-release']
+          if len(routes) != 1:
+              raise SystemExit('exact quarantine recovery route is missing or duplicated')
+          route = routes[0]
+          if route['operation_class'] != 'RECOVER' or not route['destructive'] or route['read_only']:
+              raise SystemExit('quarantine recovery safety classification differs')
+          if route['concurrency_domain'] != 'target-global-mutation':
+              raise SystemExit('quarantine recovery lacks target-global mutation serialization')
+          if '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in route['pattern']:
+              raise SystemExit('quarantine recovery route is not bound to exact failed request')
+          if 'v0\\.1\\.7' not in route['pattern']:
+              raise SystemExit('quarantine recovery route is not bound to exact release')
+          if 'recover-quarantined-product-release' not in targets['targets']['phone-production']['allowed_operations']:
+              raise SystemExit('phone target does not explicitly admit quarantine recovery operation')
+          if 'recover-quarantined-v017' not in router or 'quarantined-release-recovery.yml' not in router:
+              raise SystemExit('sole Issue #1 router does not own recovery invocation')
+          if 'production-target-phone-production' not in workflow:
+              raise SystemExit('recovery does not share the phone target serialization domain')
+          if 'continue-on-error: true' not in workflow or 'STAGE3_QUARANTINE_RECOVERY_ACCEPTED' not in workflow:
+              raise SystemExit('recovery terminal enforcement is incomplete')
+          for required in (
+              'QUARANTINED_TERMINAL_REF', 'RECOVERY_INTENT_HEADING', 'RECOVERY_TERMINAL_HEADING',
+              'blind_retry_allowed', '_root_runtime_observation', '_activate(',
+          ):
+              if required not in runner + ledger:
+                  raise SystemExit('recovery contract missing ' + required)
+          for forbidden in (
+              'dispatch_release_once(', 'dispatch_install_once(', '_stage_runtime(', '_materialize_inactive(',
+          ):
+              if forbidden in runner:
+                  raise SystemExit('recovery can reach forbidden deploy/restage primitive: ' + forbidden)
+          if 'recovery intent already exists without terminal; activation will not be repeated' not in runner:
+              raise SystemExit('post-intent duplicate recovery is not fail-closed')
+          print('STAGE3_QUARANTINE_RECOVERY_POLICY_OK')
+          PY
