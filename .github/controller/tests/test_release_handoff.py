@@ -120,6 +120,7 @@ def _run_target_main(
     projection: _FakeProjection,
     serial: str | None,
     binding_key: str | None,
+    desired_local_state: bool = False,
 ) -> tuple[int, dict[str, object] | None]:
     original_argv = list(sys.argv)
     original_env = dict(os.environ)
@@ -128,11 +129,28 @@ def _run_target_main(
         output = root / "terminal.json"
         runner.IssueEvidenceStore = lambda _token: evidence
         runner.PublicDeploymentProjection = lambda _token: projection
-        runner.observe = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("phone observe called"))
-        runner.observe_runtime = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("runtime observe called"))
         runner.dispatch_release_once = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("dispatch called"))
-        runner._materialize_verified_release_apk = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("APK materialization called"))
-        runner._materialize_verified_release_runtime = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("runtime materialization called"))
+        if desired_local_state:
+            runner._materialize_verified_release_apk = lambda *_args, **_kwargs: None
+            runner._materialize_verified_release_runtime = lambda *_args, **_kwargs: SimpleNamespace(
+                release_root=root / "release",
+                required_live_release_paths=(),
+            )
+            apk = SimpleNamespace(
+                desired=True,
+                to_dict=lambda: {"desired": True, "target_binding_id": "binding"},
+            )
+            runtime = SimpleNamespace(
+                desired=True,
+                admissible_for_new_dispatch=True,
+                to_dict=lambda: {"desired": True, "admissible_for_new_dispatch": True},
+            )
+            runner._observe_composite = lambda **_kwargs: (apk, runtime)
+        else:
+            runner.observe = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("phone observe called"))
+            runner.observe_runtime = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("runtime observe called"))
+            runner._materialize_verified_release_apk = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("APK materialization called"))
+            runner._materialize_verified_release_runtime = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("runtime materialization called"))
         try:
             os.environ.clear()
             os.environ.update(original_env)
@@ -300,7 +318,7 @@ def test_missing_target_binding_emits_canonical_pre_intent_refused_terminal() ->
     assert len(projection.status_calls) == 1
 
 
-def test_pre_intent_projection_failure_still_persists_canonical_refused_terminal() -> None:
+def test_target_start_projection_failure_is_best_effort_for_locally_desired_state() -> None:
     runner = _load_runner("handoff_projection_target_runner")
     evidence = _FakeEvidence()
     projection = _FakeProjection(fail=True, error_type=runner.ProjectionError)
@@ -311,15 +329,17 @@ def test_pre_intent_projection_failure_still_persists_canonical_refused_terminal
         projection=projection,
         serial="registered-serial",
         binding_key="k" * 32,
+        desired_local_state=True,
     )
-    assert rc == 2
+    assert rc == 0
     assert terminal is not None
     assert len(evidence.terminals) == 1
-    assert terminal["state"] == "REFUSED"
+    assert terminal["state"] == "ACCEPTED"
     assert terminal["mutation_performed"] is False
-    assert terminal["postcondition_verified"] is False
+    assert terminal["postcondition_verified"] is True
     assert terminal["recovery_required"] is False
     assert terminal["facts"]["public_projection"] == {"available": False}
+    assert terminal["facts"]["preflight_observation"]["desired"] is True
     assert len(projection.status_calls) == 2
 
 
