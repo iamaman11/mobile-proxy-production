@@ -43,13 +43,26 @@ def runtime_release(root: Path) -> tuple[Path, tuple[str, ...]]:
     return release, tuple(files)
 
 
+def expect_unavailable(expected: str, operation) -> None:
+    try:
+        operation()
+    except phone_target.PhoneTargetUnavailable as exc:
+        assert str(exc) == expected
+    else:
+        raise AssertionError(f"expected PhoneTargetUnavailable: {expected}")
+
+
 def test_observe_runtime_requires_exact_current_and_all_bytes() -> None:
     with tempfile.TemporaryDirectory() as raw:
         release, required = runtime_release(Path(raw))
         target = "/data/adb/mobile-proxy-node/releases/v0.1.6"
+        calls: list[list[str]] = []
 
         def fake_read(serial, args, timeout=30):
-            if args[:4] == ["shell", "su", "0", "sh"]:
+            calls.append(list(args))
+            if args == ["shell", "su", "0", "sh", "-c", "id -u"]:
+                return SimpleNamespace(returncode=0, stdout="0\n")
+            if args[:5] == ["shell", "su", "0", "sh", "-c"]:
                 return SimpleNamespace(returncode=0, stdout=f"target=present\ncurrent={target}\n")
             relative = args[-1].split(target + "/", 1)[1]
             digest = hashlib.sha256((release / relative).read_bytes()).hexdigest()
@@ -64,6 +77,10 @@ def test_observe_runtime_requires_exact_current_and_all_bytes() -> None:
         assert observed.desired is True
         assert observed.exact_files_verified is True
         assert observed.admissible_for_new_dispatch is True
+        assert calls[0] == ["shell", "su", "0", "sh", "-c", "id -u"]
+        assert calls[1][:5] == ["shell", "su", "0", "sh", "-c"]
+        assert "target=present" in calls[1][-1]
+        assert "/data/adb/mobile-proxy-node/current" in calls[1][-1]
 
 
 def test_observe_runtime_rejects_existing_noncurrent_target_for_new_dispatch() -> None:
@@ -71,6 +88,8 @@ def test_observe_runtime_rejects_existing_noncurrent_target_for_new_dispatch() -
         release, required = runtime_release(Path(raw))
 
         def fake_read(serial, args, timeout=30):
+            if args[-1] == "id -u":
+                return SimpleNamespace(returncode=0, stdout="0\n")
             return SimpleNamespace(returncode=0, stdout="target=present\ncurrent=/data/adb/mobile-proxy-node/releases/v0.1.5\n")
 
         original = phone_target._read
@@ -83,11 +102,13 @@ def test_observe_runtime_rejects_existing_noncurrent_target_for_new_dispatch() -
         assert observed.admissible_for_new_dispatch is False
 
 
-def test_observe_runtime_rejects_unmanaged_current_even_when_target_absent() -> None:
+def test_observe_runtime_normalizes_unmanaged_current_without_exposing_path() -> None:
     with tempfile.TemporaryDirectory() as raw:
         release, required = runtime_release(Path(raw))
 
         def fake_read(serial, args, timeout=30):
+            if args[-1] == "id -u":
+                return SimpleNamespace(returncode=0, stdout="0\n")
             return SimpleNamespace(returncode=0, stdout="target=absent\ncurrent=/data/local/tmp/foreign-runtime\n")
 
         original = phone_target._read
@@ -96,8 +117,119 @@ def test_observe_runtime_rejects_unmanaged_current_even_when_target_absent() -> 
             observed = phone_target.observe_runtime(serial="serial", release_root=release, release_id="v0.1.6", required_paths=required)
         finally:
             phone_target._read = original
+        assert observed.current_target == "unmanaged"
         assert observed.desired is False
         assert observed.admissible_for_new_dispatch is False
+
+
+def test_observe_runtime_accepts_absent_target_with_no_current_for_new_dispatch() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+
+        def fake_read(serial, args, timeout=30):
+            if args[-1] == "id -u":
+                return SimpleNamespace(returncode=0, stdout="0\n")
+            return SimpleNamespace(returncode=0, stdout="target=absent\ncurrent=absent\n")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            observed = phone_target.observe_runtime(serial="serial", release_root=release, release_id="v0.1.6", required_paths=required)
+        finally:
+            phone_target._read = original
+        assert observed.target_release_exists is False
+        assert observed.current_target is None
+        assert observed.desired is False
+        assert observed.admissible_for_new_dispatch is True
+
+
+def test_observe_runtime_classifies_root_capability_nonzero_before_layout() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        calls: list[list[str]] = []
+
+        def fake_read(serial, args, timeout=30):
+            calls.append(list(args))
+            return SimpleNamespace(returncode=1, stdout="")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            expect_unavailable(
+                "rooted runtime read capability is unavailable",
+                lambda: phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required,
+                ),
+            )
+        finally:
+            phone_target._read = original
+        assert calls == [["shell", "su", "0", "sh", "-c", "id -u"]]
+
+
+def test_observe_runtime_classifies_root_capability_identity_malformed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+
+        original = phone_target._read
+        phone_target._read = lambda serial, args, timeout=30: SimpleNamespace(returncode=0, stdout="2000\n")
+        try:
+            expect_unavailable(
+                "rooted runtime read capability identity is malformed",
+                lambda: phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required,
+                ),
+            )
+        finally:
+            phone_target._read = original
+
+
+def test_observe_runtime_classifies_layout_probe_nonzero_after_root_success() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        calls: list[list[str]] = []
+
+        def fake_read(serial, args, timeout=30):
+            calls.append(list(args))
+            if args[-1] == "id -u":
+                return SimpleNamespace(returncode=0, stdout="0\n")
+            return SimpleNamespace(returncode=23, stdout="")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            expect_unavailable(
+                "rooted runtime layout observation failed",
+                lambda: phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required,
+                ),
+            )
+        finally:
+            phone_target._read = original
+        assert len(calls) == 2
+        assert calls[0] == ["shell", "su", "0", "sh", "-c", "id -u"]
+        assert calls[1][:5] == ["shell", "su", "0", "sh", "-c"]
+
+
+def test_observe_runtime_rejects_malformed_layout_output() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+
+        def fake_read(serial, args, timeout=30):
+            if args[-1] == "id -u":
+                return SimpleNamespace(returncode=0, stdout="0\n")
+            return SimpleNamespace(returncode=0, stdout="target=absent\ncurrent=absent\nunexpected=value\n")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            expect_unavailable(
+                "rooted runtime state observation is malformed",
+                lambda: phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required,
+                ),
+            )
+        finally:
+            phone_target._read = original
 
 
 def test_composite_dispatch_calls_apk_then_runtime_once() -> None:

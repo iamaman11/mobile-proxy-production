@@ -13,6 +13,7 @@ _ROOT = "/data/adb/mobile-proxy-node"
 _BOOT_HOOK = "/data/adb/service.d/99-mobile-proxy-runtime.sh"
 _RELEASE_ID = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 _SAFE_REMOTE = re.compile(r"[A-Za-z0-9_./-]+")
+_MANAGED_CURRENT = re.compile(r"/data/adb/mobile-proxy-node/releases/v[0-9]+\.[0-9]+\.[0-9]+")
 
 
 class PhoneTargetUnavailable(RuntimeError):
@@ -56,6 +57,14 @@ def _read(serial: str, arguments: list[str], *, timeout: int = 30) -> subprocess
     return _run([adb, "-s", serial, *arguments], timeout=timeout)
 
 
+def _require_root_read_capability(serial: str) -> None:
+    probe = _read(serial, ["shell", "su", "0", "sh", "-c", "id -u"], timeout=15)
+    if probe.returncode != 0:
+        raise PhoneTargetUnavailable("rooted runtime read capability is unavailable")
+    if probe.stdout.strip() != "0":
+        raise PhoneTargetUnavailable("rooted runtime read capability identity is malformed")
+
+
 def _safe_release_id(value: str) -> str:
     if _RELEASE_ID.fullmatch(value) is None:
         raise PhoneTargetUnavailable("phone runtime release id is invalid")
@@ -78,10 +87,37 @@ def _files(release_root: Path, required_paths: tuple[str, ...]) -> tuple[tuple[s
     return tuple(result)
 
 
+def _parse_runtime_layout_probe(stdout: str) -> tuple[bool, str | None]:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        raise PhoneTargetUnavailable("rooted runtime state observation is malformed")
+    values: dict[str, str] = {}
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep != "=" or key not in {"target", "current"} or key in values or not value:
+            raise PhoneTargetUnavailable("rooted runtime state observation is malformed")
+        values[key] = value
+    if values.get("target") not in {"present", "absent"} or "current" not in values:
+        raise PhoneTargetUnavailable("rooted runtime state observation is malformed")
+    current_value = values["current"]
+    if current_value == "absent":
+        current = None
+    elif current_value == "invalid":
+        current = "invalid"
+    elif _MANAGED_CURRENT.fullmatch(current_value) is not None:
+        current = current_value
+    elif current_value.startswith("/"):
+        current = "unmanaged"
+    else:
+        raise PhoneTargetUnavailable("rooted runtime state observation is malformed")
+    return values["target"] == "present", current
+
+
 def observe_runtime(*, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]) -> RuntimeObservation:
     release_id = _safe_release_id(release_id)
     files = _files(release_root, required_paths)
     target = f"{_ROOT}/releases/{release_id}"
+    _require_root_read_capability(serial)
     probe = _read(
         serial,
         [
@@ -94,16 +130,8 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
         ],
     )
     if probe.returncode != 0:
-        raise PhoneTargetUnavailable("rooted runtime state observation failed")
-    values: dict[str, str] = {}
-    for line in probe.stdout.splitlines():
-        key, sep, value = line.strip().partition("=")
-        if sep and key in {"target", "current"} and key not in values:
-            values[key] = value
-    if values.get("target") not in {"present", "absent"} or "current" not in values:
-        raise PhoneTargetUnavailable("rooted runtime state observation is malformed")
-    exists = values["target"] == "present"
-    current = None if values["current"] == "absent" else values["current"]
+        raise PhoneTargetUnavailable("rooted runtime layout observation failed")
+    exists, current = _parse_runtime_layout_probe(probe.stdout)
     exact = False
     if exists and current == target:
         exact = True
@@ -114,7 +142,7 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
                 exact = False
                 break
     desired = exists and current == target and exact
-    current_is_managed = current is None or current.startswith(f"{_ROOT}/releases/")
+    current_is_managed = current is None or (current != "unmanaged" and current.startswith(f"{_ROOT}/releases/"))
     return RuntimeObservation(
         target_release=target, target_release_exists=exists, current_target=current,
         exact_files_verified=exact, required_file_count=len(files), desired=desired,
