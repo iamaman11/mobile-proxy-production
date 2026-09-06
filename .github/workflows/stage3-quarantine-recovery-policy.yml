@@ -74,8 +74,8 @@ jobs:
               raise SystemExit('UNKNOWN reconciliation mode is not explicit')
           if 'issue-comment:5562925687' not in workflow or 'reconcile_quarantine_unknown.py' not in workflow:
               raise SystemExit('workflow is not bound to exact UNKNOWN parent and reconciliation runner')
-          if 'run_quarantine_recovery.py' in workflow:
-              raise SystemExit('current UNKNOWN workflow still exposes activation runner')
+          if 'python3 .github/scripts/run_quarantine_recovery.py' in workflow:
+              raise SystemExit('current UNKNOWN workflow still executes activation runner')
           if 'production-target-phone-production' not in workflow:
               raise SystemExit('UNKNOWN reconciliation does not share target-global lock')
           if 'continue-on-error: true' not in workflow or 'STAGE3_QUARANTINE_RECOVERY_ACCEPTED' not in workflow:
