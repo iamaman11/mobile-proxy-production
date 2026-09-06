@@ -300,27 +300,27 @@ def test_missing_target_binding_emits_canonical_pre_intent_refused_terminal() ->
     assert len(projection.status_calls) == 1
 
 
-def test_pre_intent_projection_failure_still_persists_canonical_refused_terminal() -> None:
-    runner = _load_runner("handoff_projection_target_runner")
-    evidence = _FakeEvidence()
+def test_target_start_projection_failure_is_best_effort_after_hosted_admission() -> None:
+    runner = _load_runner("handoff_projection_best_effort_runner")
     projection = _FakeProjection(fail=True, error_type=runner.ProjectionError)
-    rc, terminal = _run_target_main(
-        runner,
-        admitted=fixture(),
-        evidence=evidence,
-        projection=projection,
-        serial="registered-serial",
-        binding_key="k" * 32,
+    facts: dict[str, object] = {}
+    runner._project_execution_started(
+        projection,
+        deployment_id=42,
+        release_tag=TAG,
+        facts=facts,
     )
-    assert rc == 2
-    assert terminal is not None
-    assert len(evidence.terminals) == 1
-    assert terminal["state"] == "REFUSED"
-    assert terminal["mutation_performed"] is False
-    assert terminal["postcondition_verified"] is False
-    assert terminal["recovery_required"] is False
-    assert terminal["facts"]["public_projection"] == {"available": False}
-    assert len(projection.status_calls) == 2
+    assert facts["public_projection"] == {"available": False}
+    assert projection.status_calls == [{
+        "deployment_id": 42,
+        "state": "in_progress",
+        "description": f"{TAG} target execution started",
+    }]
+    source = (GITHUB_DIR / "scripts" / "run_phone_release_deployment.py").read_text(encoding="utf-8")
+    main_at = source.index("def main() -> int:")
+    call_at = source.index("    _project_execution_started(", main_at)
+    recovery_at = source.index('    if args.recovery_only == "true":', call_at)
+    assert call_at < recovery_at
 
 
 def main() -> int:
