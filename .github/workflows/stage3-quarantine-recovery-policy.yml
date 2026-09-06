@@ -49,7 +49,7 @@ jobs:
               raise SystemExit('quarantine continuation authority policy differs')
           if route['semantic_identity_policy'] != 'quarantined-deployment-terminal+prior-recovery-terminal+command-arguments':
               raise SystemExit('quarantine continuation semantic identity policy differs')
-          if route['idempotency_policy'] != 'bounded-lineage-generation+durable-semantic-quarantine-recovery-ledger':
+          if route['idempotency_policy'] != 'single-run-attempt+bounded-lineage-generation+durable-semantic-quarantine-recovery-ledger':
               raise SystemExit('quarantine continuation idempotency policy differs')
           if '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in route['pattern']:
               raise SystemExit('quarantine recovery route is not bound to exact failed request')
