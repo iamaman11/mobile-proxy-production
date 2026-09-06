@@ -53,7 +53,11 @@ def resolve_projection_admission(
                 reused=True,
                 observed_state=str(match.latest_state),
             )
-        if retry_authorized and match.latest_state in _RETRY_REOPENABLE_STATES:
+        if (
+            retry_authorized
+            and retry_expected_deployment_id == match.deployment_id
+            and match.latest_state in _RETRY_REOPENABLE_STATES
+        ):
             projection.status(
                 deployment_id=match.deployment_id,
                 state="queued",
