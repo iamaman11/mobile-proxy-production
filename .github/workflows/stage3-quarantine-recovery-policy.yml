@@ -24,6 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/controller/tests/test_quarantine_recovery.py
+          python3 .github/controller/tests/test_stage3_activation_switch.py
           python3 - <<'PY'
           import json
           from pathlib import Path

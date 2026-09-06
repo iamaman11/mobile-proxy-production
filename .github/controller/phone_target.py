@@ -375,7 +375,7 @@ for proc in /proc/[0-9]*; do
 done
 rm -f "$CURRENT_TMP"
 ln -s "$TARGET" "$CURRENT_TMP"
-mv -f "$CURRENT_TMP" "$ROOT/current"
+mv -Tf "$CURRENT_TMP" "$ROOT/current"
 cat > "$BOOT" <<'MOBILE_PROXY_BOOT'
 #!/system/bin/sh
 set -eu
