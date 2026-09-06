@@ -46,6 +46,7 @@ jobs:
       admitted_release_json: ${{ steps.gate.outputs.admitted_release_json }}
       release_source_sha: ${{ steps.gate.outputs.release_source_sha }}
       semantic_recovery_id: ${{ steps.gate.outputs.semantic_recovery_id }}
+      recovery_parent_terminal_ref: ${{ steps.gate.outputs.recovery_parent_terminal_ref }}
     steps:
       - name: Check out exact controller revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -135,6 +136,7 @@ jobs:
             --target '${{ inputs.target }}' \
             --release '${{ inputs.release_tag }}' \
             --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
+            --recovery-parent-terminal-ref '${{ needs.authorize.outputs.recovery_parent_terminal_ref }}' \
             --admitted-release-json '${{ needs.authorize.outputs.admitted_release_json }}' \
             --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
             --controller-revision "$GITHUB_SHA" \
@@ -165,6 +167,8 @@ jobs:
           value = json.loads(path.read_text(encoding='utf-8'))
           if value.get('schema') != 'production-quarantine-recovery-terminal.v1':
               raise SystemExit('quarantine recovery terminal schema differs')
+          if value.get('parent_recovery_terminal_ref') != 'issue-comment:5562605748':
+              raise SystemExit('quarantine recovery continuation parent differs')
           if value.get('state') != 'ACCEPTED':
               raise SystemExit('quarantine recovery did not reach ACCEPTED')
           if value.get('postcondition_verified') is not True:
