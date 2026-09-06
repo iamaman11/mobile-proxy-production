@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from quarantine_recovery import (  # noqa: E402
+    QUARANTINED_INTENT_REF,
+    QUARANTINED_REQUEST_ID,
+    QUARANTINED_TERMINAL_REF,
+    RECOVERY_INTENT_SCHEMA,
+    RECOVERY_OPERATION,
+    RECOVERY_RELEASE,
+    RECOVERY_RELEASE_ID,
+    RECOVERY_TARGET,
+    RECOVERY_TERMINAL_SCHEMA,
+    QuarantineRecoveryError,
+    recovery_semantic_id,
+    validate_recovery_intent,
+    validate_recovery_terminal,
+)
+
+SCRIPT = ROOT.parent / "scripts" / "run_quarantine_recovery.py"
+spec = importlib.util.spec_from_file_location("run_quarantine_recovery", SCRIPT)
+recovery_runner = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(recovery_runner)
+
+
+def expect_error(fn) -> None:
+    try:
+        fn()
+    except QuarantineRecoveryError:
+        return
+    raise AssertionError("expected QuarantineRecoveryError")
+
+
+def base_intent() -> dict[str, object]:
+    return {
+        "schema": RECOVERY_INTENT_SCHEMA,
+        "semantic_recovery_id": recovery_semantic_id(
+            target=RECOVERY_TARGET, release=RECOVERY_RELEASE,
+            quarantined_request_id=QUARANTINED_REQUEST_ID,
+        ),
+        "operation": RECOVERY_OPERATION,
+        "execution_id": "gh-run:1:1",
+        "controller_revision": "a" * 40,
+        "target": RECOVERY_TARGET,
+        "target_binding_id": "tb-hmac-sha256:" + "b" * 64,
+        "product_release": RECOVERY_RELEASE,
+        "release_id": RECOVERY_RELEASE_ID,
+        "quarantined_request_id": QUARANTINED_REQUEST_ID,
+        "quarantined_intent_ref": QUARANTINED_INTENT_REF,
+        "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
+        "apk_exact": True,
+        "inactive_runtime_exact": True,
+        "current_before": "/data/adb/mobile-proxy-node/releases/old",
+        "activation_may_reach_target": True,
+        "blind_retry_allowed": False,
+        "mutation_performed": False,
+    }
+
+
+def base_terminal() -> dict[str, object]:
+    return {
+        "schema": RECOVERY_TERMINAL_SCHEMA,
+        "semantic_recovery_id": recovery_semantic_id(
+            target=RECOVERY_TARGET, release=RECOVERY_RELEASE,
+            quarantined_request_id=QUARANTINED_REQUEST_ID,
+        ),
+        "operation": RECOVERY_OPERATION,
+        "execution_id": "gh-run:1:1",
+        "controller_revision": "a" * 40,
+        "target": RECOVERY_TARGET,
+        "product_release": RECOVERY_RELEASE,
+        "release_id": RECOVERY_RELEASE_ID,
+        "quarantined_request_id": QUARANTINED_REQUEST_ID,
+        "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
+        "recovery_intent_ref": "issue-comment:1",
+        "state": "ACCEPTED",
+        "mutation_performed": True,
+        "postcondition_verified": True,
+        "blocking_predicate": None,
+        "facts": {"postcondition": {}},
+        "blind_retry_allowed": False,
+    }
+
+
+def test_semantic_identity_is_exact_and_stable() -> None:
+    first = recovery_semantic_id(
+        target=RECOVERY_TARGET, release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+    )
+    second = recovery_semantic_id(
+        target=RECOVERY_TARGET, release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+    )
+    assert first == second and first.startswith("recovery-sha256:")
+    expect_error(lambda: recovery_semantic_id(
+        target=RECOVERY_TARGET, release="v0.1.8",
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+    ))
+
+
+def test_intent_requires_exact_no_blind_retry_boundary() -> None:
+    payload = base_intent()
+    validate_recovery_intent(payload)
+    broken = dict(payload)
+    broken["blind_retry_allowed"] = True
+    expect_error(lambda: validate_recovery_intent(broken))
+
+
+def test_terminal_contract_distinguishes_pre_and_post_intent_states() -> None:
+    accepted = base_terminal()
+    validate_recovery_terminal(accepted)
+    refused = dict(accepted, state="REFUSED", mutation_performed=False, postcondition_verified=False, recovery_intent_ref=None)
+    validate_recovery_terminal(refused)
+    unknown = dict(accepted, state="UNKNOWN", mutation_performed=True, postcondition_verified=False)
+    validate_recovery_terminal(unknown)
+    bad = dict(accepted, state="UNKNOWN", mutation_performed=False, postcondition_verified=False)
+    expect_error(lambda: validate_recovery_terminal(bad))
+
+
+def _fake_root_result(stdout: bytes):
+    return SimpleNamespace(status="completed", returncode=0, stdout=stdout, stderr=b"")
+
+
+def test_inactive_runtime_hashes_are_root_observed_while_current_is_old() -> None:
+    expected = "1" * 64
+    old_files = recovery_runner._files
+    old_run = recovery_runner._run_root_script
+    try:
+        recovery_runner._files = lambda release_root, required_paths: (("service.sh", Path("/tmp/service.sh"), expected),)
+        recovery_runner._run_root_script = lambda serial, script, timeout: _fake_root_result(
+            ("target=present\ncurrent=/data/adb/mobile-proxy-node/releases/old\nh0=" + expected + "\n").encode()
+        )
+        observed = recovery_runner._root_runtime_observation(
+            serial="registered", release_root=Path("/tmp/release"), release_id=RECOVERY_RELEASE,
+            required_paths=("service.sh",),
+        )
+    finally:
+        recovery_runner._files = old_files
+        recovery_runner._run_root_script = old_run
+    assert observed["target_release_exists"] is True
+    assert observed["inactive_exact_files_verified"] is True
+    assert observed["current_managed"] is True
+    assert observed["desired"] is False
+
+
+def test_inactive_runtime_hash_mismatch_fails_exact_classification() -> None:
+    expected = "1" * 64
+    old_files = recovery_runner._files
+    old_run = recovery_runner._run_root_script
+    try:
+        recovery_runner._files = lambda release_root, required_paths: (("service.sh", Path("/tmp/service.sh"), expected),)
+        recovery_runner._run_root_script = lambda serial, script, timeout: _fake_root_result(
+            ("target=present\ncurrent=/data/adb/mobile-proxy-node/releases/old\nh0=" + "2" * 64 + "\n").encode()
+        )
+        observed = recovery_runner._root_runtime_observation(
+            serial="registered", release_root=Path("/tmp/release"), release_id=RECOVERY_RELEASE,
+            required_paths=("service.sh",),
+        )
+    finally:
+        recovery_runner._files = old_files
+        recovery_runner._run_root_script = old_run
+    assert observed["inactive_exact_files_verified"] is False
+    assert observed["desired"] is False
+
+
+def test_root_observer_script_contains_no_mutation_primitive() -> None:
+    expected = "1" * 64
+    captured: list[bytes] = []
+    old_files = recovery_runner._files
+    old_run = recovery_runner._run_root_script
+    try:
+        recovery_runner._files = lambda release_root, required_paths: (("service.sh", Path("/tmp/service.sh"), expected),)
+        def run(serial, script, timeout):
+            captured.append(script)
+            return _fake_root_result(("target=present\ncurrent=/data/adb/mobile-proxy-node/releases/old\nh0=" + expected + "\n").encode())
+        recovery_runner._run_root_script = run
+        recovery_runner._root_runtime_observation(
+            serial="registered", release_root=Path("/tmp/release"), release_id=RECOVERY_RELEASE,
+            required_paths=("service.sh",),
+        )
+    finally:
+        recovery_runner._files = old_files
+        recovery_runner._run_root_script = old_run
+    text = captured[0].decode()
+    for forbidden in ("mkdir ", "cp ", "rm ", "mv ", "ln ", "kill ", "chmod ", "service.sh\n"):
+        assert forbidden not in text
+
+
+if __name__ == "__main__":
+    tests = [name for name, value in sorted(globals().items()) if name.startswith("test_") and callable(value)]
+    for name in tests:
+        globals()[name]()
+    print(f"QUARANTINE_RECOVERY_TESTS_OK count={len(tests)}")

@@ -1,0 +1,184 @@
+name: Stage 3 quarantined v0.1.7 recovery
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      quarantined_request_id:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      ANDROID_TARGET_BINDING_KEY:
+        required: true
+      MOBILE_PROXY_ADMIN_TOKEN:
+        required: true
+      MOBILE_PROXY_DEVICE_TOKEN:
+        required: true
+      MOBILE_PROXY_UI_TOKEN:
+        required: true
+      MOBILE_PROXY_RELAY_USER:
+        required: true
+      MOBILE_PROXY_RELAY_PASSWORD:
+        required: true
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  authorize:
+    name: Bind exact immutable Release and exact QUARANTINED lineage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      admitted_release_json: ${{ steps.gate.outputs.admitted_release_json }}
+      release_source_sha: ${{ steps.gate.outputs.release_source_sha }}
+      semantic_recovery_id: ${{ steps.gate.outputs.semantic_recovery_id }}
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Admit only the exact authorized quarantined deployment
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/prepare_quarantine_recovery.py \
+            --target '${{ inputs.target }}' \
+            --release '${{ inputs.release_tag }}' \
+            --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
+            --controller-revision "$GITHUB_SHA" \
+            --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+  recover:
+    name: Activate exact existing v0.1.7 runtime once after in-lock proof
+    needs: authorize
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 20
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    steps:
+      - name: Check out exact controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact immutable PRODUCT source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ needs.authorize.outputs.release_source_sha }}
+          path: product-source
+          persist-credentials: false
+
+      - name: Require exact user-local Rust toolchain before Product digest/render
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${HOME}/.cargo"
+          RUSTUP_HOME="${HOME}/.rustup"
+          PATH="${CARGO_HOME}/bin:${PATH}"
+          export CARGO_HOME RUSTUP_HOME PATH
+          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
+          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          (
+            cd product-source
+            "$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps >/dev/null
+            git diff --check
+            test -z "$(git status --porcelain --untracked-files=no)"
+          )
+          {
+            printf 'CARGO_HOME=%s\n' "$CARGO_HOME"
+            printf 'RUSTUP_HOME=%s\n' "$RUSTUP_HOME"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Execute bounded quarantine recovery
+        id: recovery
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+          ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+          MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+          MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+          MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+          MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+          MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+          MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/run_quarantine_recovery.py \
+            --target '${{ inputs.target }}' \
+            --release '${{ inputs.release_tag }}' \
+            --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
+            --admitted-release-json '${{ needs.authorize.outputs.admitted_release_json }}' \
+            --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            --controller-revision "$GITHUB_SHA" \
+            --product-root "$GITHUB_WORKSPACE/product-source" \
+            --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
+            --output "$RUNNER_TEMP/quarantine-recovery-terminal.json"
+
+      - name: Preserve bounded recovery terminal artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quarantine-recovery-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quarantine-recovery-terminal.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Enforce Stage 3 recovery ACCEPTED
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-recovery-terminal.json'
+          if not path.is_file():
+              raise SystemExit('quarantine recovery terminal is unavailable')
+          value = json.loads(path.read_text(encoding='utf-8'))
+          if value.get('schema') != 'production-quarantine-recovery-terminal.v1':
+              raise SystemExit('quarantine recovery terminal schema differs')
+          if value.get('state') != 'ACCEPTED':
+              raise SystemExit('quarantine recovery did not reach ACCEPTED')
+          if value.get('postcondition_verified') is not True:
+              raise SystemExit('ACCEPTED recovery lacks independent postcondition')
+          post = (value.get('facts') or {}).get('postcondition')
+          if not isinstance(post, dict):
+              raise SystemExit('ACCEPTED recovery lacks postcondition evidence')
+          apk = post.get('apk') or {}
+          runtime = post.get('runtime') or {}
+          if apk.get('desired') is not True or apk.get('exact_artifact_verified') is not True:
+              raise SystemExit('ACCEPTED recovery lacks exact APK proof')
+          if runtime.get('desired') is not True or runtime.get('inactive_exact_files_verified') is not True:
+              raise SystemExit('ACCEPTED recovery lacks exact rooted runtime proof')
+          if post.get('target_binding_matches_original_intent') is not True:
+              raise SystemExit('ACCEPTED recovery target binding differs')
+          print('STAGE3_QUARANTINE_RECOVERY_ACCEPTED')
+          PY

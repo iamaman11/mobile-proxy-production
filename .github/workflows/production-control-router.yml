@@ -201,3 +201,22 @@ jobs:
       execution_id: ${{ needs.deployment-ack.outputs.execution_id }}
       target: ${{ needs.deployment-ack.outputs.target }}
     secrets: inherit
+
+  recover-quarantined-v017:
+    name: Run exact Stage 3 quarantine recovery once
+    needs: route
+    if: >-
+      needs.route.outputs.route_id == 'recover-quarantined-product-release' &&
+      needs.route.outputs.operation == 'recover-quarantined-product-release' &&
+      needs.route.outputs.operation_class == 'RECOVER' &&
+      needs.route.outputs.destructive == 'true' &&
+      needs.route.outputs.read_only == 'false'
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/quarantined-release-recovery.yml
+    with:
+      target: ${{ needs.route.outputs.target }}
+      release_tag: ${{ needs.route.outputs.release_tag }}
+      quarantined_request_id: ${{ fromJSON(needs.route.outputs.arguments_json).quarantined_request_id }}
+    secrets: inherit
