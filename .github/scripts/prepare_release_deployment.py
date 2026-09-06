@@ -17,11 +17,16 @@ from durable_release_identity import (  # noqa: E402
     durable_release_identity,
     payload_matches_release_identity,
 )
-from evidence_store import EvidenceError, IssueEvidenceStore  # noqa: E402
+from evidence_store import (  # noqa: E402
+    EvidenceError,
+    INTENT_HEADING,
+    TERMINAL_HEADING,
+    IssueEvidenceStore,
+)
 from github_projection import ProjectionError, PublicDeploymentProjection  # noqa: E402
 from projection_admission import ProjectionAdmissionError, resolve_projection_admission  # noqa: E402
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
-from terminal_result import DeploymentTerminal, validate_terminal  # noqa: E402
+from terminal_result import DeploymentTerminal, TerminalContractError, validate_terminal  # noqa: E402
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -80,6 +85,39 @@ def _pre_release_refusal(*, request: dict[str, object], execution_id: str, contr
     return terminal
 
 
+def _retry_lineage_terminal(evidence: IssueEvidenceStore, request: dict[str, object]):
+    prior_request_id = request.get("retry_of_request_id")
+    if prior_request_id is None:
+        return None
+    intents = [
+        item for item in evidence.list_records(INTENT_HEADING)
+        if item.payload.get("semantic_request_id") == prior_request_id
+    ]
+    terminals = [
+        item for item in evidence.list_records(TERMINAL_HEADING)
+        if item.payload.get("semantic_request_id") == prior_request_id
+    ]
+    if intents:
+        raise EvidenceError("retry prior request has durable mutation intent")
+    if len(terminals) != 1:
+        raise EvidenceError("retry prior request must have exactly one canonical terminal")
+    record = terminals[0]
+    try:
+        validate_terminal(record.payload)
+    except TerminalContractError as exc:
+        raise EvidenceError("retry prior terminal contract is invalid") from exc
+    terminal = record.payload
+    if (
+        terminal.get("state") != "REFUSED"
+        or terminal.get("mutation_performed") is not False
+        or terminal.get("recovery_required") is not False
+        or terminal.get("target") != request.get("target")
+        or terminal.get("product_release") != request.get("product_release_tag")
+    ):
+        raise EvidenceError("retry prior terminal is not an eligible pre-mutation REFUSED result")
+    return record
+
+
 def _admission_payload(
     *,
     request: dict[str, object],
@@ -121,6 +159,11 @@ def main() -> int:
         raise SystemExit("execution id is invalid")
 
     evidence = IssueEvidenceStore(os.environ.get("GITHUB_TOKEN", ""))
+    try:
+        retry_terminal = _retry_lineage_terminal(evidence, request)
+    except EvidenceError as exc:
+        raise SystemExit("explicit REFUSED retry lineage was not admitted") from exc
+
     existing_intent, existing_terminal = evidence.request_history(str(request["request_id"]))
     if existing_terminal is not None:
         evidence.persist_duplicate_projection({
@@ -270,6 +313,9 @@ def main() -> int:
         admitted=admitted,
         deployment_id=deployment_id,
     )
+    if retry_terminal is not None:
+        admission_payload["retry_of_request_id"] = request["retry_of_request_id"]
+        admission_payload["retry_authorization_terminal_ref"] = retry_terminal.ref
     try:
         admission = evidence.persist_admission(admission_payload)
     except EvidenceError as exc:
