@@ -110,7 +110,7 @@
       "idempotency_policy": "durable-semantic-ledger",
       "operation": "deploy-product-release",
       "operation_class": "DEPLOY",
-      "pattern": "^(?=/(?:deploy [^ ]+ [^ ]+|retry-deploy phone-production [^ ]+ req-sha256:[0-9a-f]{64})$)/(?:deploy|retry-deploy) (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\\.[0-9]+\\.[0-9]+)(?: req-sha256:[0-9a-f]{64})?$",
+      "pattern": "^/(?=(?:deploy [^ ]+ [^ ]+|retry-deploy phone-production [^ ]+ req-sha256:[0-9a-f]{64})$)(?:deploy|retry-deploy) (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\\.[0-9]+\\.[0-9]+)(?: req-sha256:[0-9a-f]{64})?$",
       "physical_domains": [
         "target-runtime",
         "application-installation"
