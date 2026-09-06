@@ -26,6 +26,10 @@ class PhoneTargetUnavailable(RuntimeError):
     pass
 
 
+class PhoneTargetMutationOutcomeUnknown(PhoneTargetUnavailable):
+    pass
+
+
 @dataclass(frozen=True)
 class RootScriptResult:
     status: str
@@ -396,8 +400,11 @@ chmod 0700 "$BOOT"
 sh "$ROOT/current/service.sh"
 """.encode()
     result = _run_root_script(serial, script, timeout=150)
-    if result.status != "completed" or result.returncode != 0:
-        raise PhoneTargetUnavailable("rooted runtime atomic activation/start failed")
+    if result.status == "completed":
+        if result.returncode != 0:
+            raise PhoneTargetUnavailable("rooted runtime activation/start command failed")
+        return
+    raise PhoneTargetMutationOutcomeUnknown("rooted runtime activation/start outcome is unknown")
 
 
 def dispatch_release_once(
