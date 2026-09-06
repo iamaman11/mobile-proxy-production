@@ -186,7 +186,7 @@
       "evidence_policy": "RECOVERY_INTENT+RECOVERY_TERMINAL+POSTCONDITION",
       "handler": "workflow_call",
       "id": "recover-quarantined-product-release",
-      "idempotency_policy": "durable-semantic-quarantine-recovery-ledger",
+      "idempotency_policy": "single-run-attempt+durable-semantic-quarantine-recovery-ledger",
       "operation": "recover-quarantined-product-release",
       "operation_class": "RECOVER",
       "pattern": "^/recover-quarantined (?P<target>phone-production) (?P<release>v0\\.1\\.7) (?P<quarantined_request_id>req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7)$",
