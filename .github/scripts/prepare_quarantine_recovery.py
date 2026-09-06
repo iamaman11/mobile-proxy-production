@@ -19,11 +19,15 @@ from quarantine_recovery import (  # noqa: E402
     QUARANTINED_REQUEST_ID,
     QUARANTINED_TERMINAL_REF,
     RECOVERY_INTENT_HEADING,
+    RECOVERY_PARENT_INTENT_REF,
+    RECOVERY_PARENT_TERMINAL_REF,
     RECOVERY_RELEASE,
     RECOVERY_TARGET,
     RECOVERY_TERMINAL_HEADING,
     QuarantineRecoveryError,
     recovery_semantic_id,
+    validate_recovery_intent,
+    validate_recovery_terminal,
 )
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
 from terminal_result import TerminalContractError, validate_terminal  # noqa: E402
@@ -51,13 +55,7 @@ def _output(name: str, value: object) -> None:
 
 
 def _terminal_matches_release_identity(payload: Mapping[str, object], identity: object) -> bool:
-    """Bind a v2 terminal to the immutable Release without inventing terminal fields.
-
-    The deployment terminal owns the base Release identity at top level. The
-    complete phone-runtime durable identity is preserved in the terminal's
-    release_admission fact, so both locations must independently agree with the
-    current immutable Product Release.
-    """
+    """Bind a v2 terminal to the immutable Release without inventing terminal fields."""
     expected = durable_release_identity(identity, target=RECOVERY_TARGET)
     if any(payload.get(field) != expected[field] for field in _TERMINAL_TOP_LEVEL_RELEASE_FIELDS):
         return False
@@ -67,11 +65,42 @@ def _terminal_matches_release_identity(payload: Mapping[str, object], identity: 
     release_admission = facts.get("release_admission")
     if not isinstance(release_admission, Mapping):
         return False
-    return payload_matches_release_identity(
-        release_admission,
-        identity,
+    return payload_matches_release_identity(release_admission, identity, target=RECOVERY_TARGET)
+
+
+def _validated_parent_recovery(evidence: IssueEvidenceStore):
+    intents = [
+        item for item in evidence.list_records(RECOVERY_INTENT_HEADING)
+        if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
+    ]
+    terminals = [
+        item for item in evidence.list_records(RECOVERY_TERMINAL_HEADING)
+        if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
+    ]
+    if len(intents) != 1 or len(terminals) != 1:
+        raise QuarantineRecoveryError("bounded Stage 3 continuation requires exactly one prior recovery generation")
+    parent_intent = intents[0]
+    parent_terminal = terminals[0]
+    if parent_intent.ref != RECOVERY_PARENT_INTENT_REF or parent_terminal.ref != RECOVERY_PARENT_TERMINAL_REF:
+        raise QuarantineRecoveryError("prior recovery evidence differs from the authorized Stage 3 parent")
+    validate_recovery_intent(parent_intent.payload)
+    validate_recovery_terminal(parent_terminal.payload)
+    first_semantic_id = recovery_semantic_id(
         target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
     )
+    if parent_intent.payload.get("semantic_recovery_id") != first_semantic_id or parent_terminal.payload.get("semantic_recovery_id") != first_semantic_id:
+        raise QuarantineRecoveryError("prior recovery semantic identity differs")
+    if (
+        parent_terminal.payload.get("state") != "QUARANTINED"
+        or parent_terminal.payload.get("mutation_performed") is not True
+        or parent_terminal.payload.get("postcondition_verified") is not True
+        or parent_terminal.payload.get("blind_retry_allowed") is not False
+        or parent_terminal.payload.get("recovery_intent_ref") != RECOVERY_PARENT_INTENT_REF
+    ):
+        raise QuarantineRecoveryError("prior recovery terminal is not the exact observed Stage 3 quarantine")
+    return parent_intent, parent_terminal
 
 
 def main() -> int:
@@ -108,16 +137,7 @@ def main() -> int:
     ):
         raise QuarantineRecoveryError("deployment terminal is not the authorized v0.1.7 quarantine state")
 
-    existing_intents = [
-        item for item in evidence.list_records(RECOVERY_INTENT_HEADING)
-        if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
-    ]
-    existing_terminals = [
-        item for item in evidence.list_records(RECOVERY_TERMINAL_HEADING)
-        if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
-    ]
-    if existing_intents or existing_terminals:
-        raise QuarantineRecoveryError("quarantined deployment already has durable recovery evidence; no new activation is admitted")
+    _parent_intent, parent_terminal = _validated_parent_recovery(evidence)
 
     admitted = resolve_release(tag=RECOVERY_RELEASE, target=RECOVERY_TARGET)
     if not payload_matches_release_identity(original_intent.payload, admitted.identity, target=RECOVERY_TARGET):
@@ -129,15 +149,17 @@ def main() -> int:
         target=RECOVERY_TARGET,
         release=RECOVERY_RELEASE,
         quarantined_request_id=QUARANTINED_REQUEST_ID,
+        parent_recovery_terminal_ref=parent_terminal.ref,
     )
     _output("admitted_release_json", admitted.to_dict())
     _output("release_source_sha", admitted.identity.source_sha)
     _output("semantic_recovery_id", semantic_id)
     _output("original_intent_ref", original_intent.ref)
     _output("original_terminal_ref", original_terminal.ref)
+    _output("recovery_parent_terminal_ref", parent_terminal.ref)
     print(
-        "QUARANTINE_RECOVERY_ADMITTED "
-        f"semantic_recovery_id={semantic_id} target={RECOVERY_TARGET} release={RECOVERY_RELEASE}"
+        "QUARANTINE_RECOVERY_CONTINUATION_ADMITTED "
+        f"semantic_recovery_id={semantic_id} parent={parent_terminal.ref} target={RECOVERY_TARGET} release={RECOVERY_RELEASE}"
     )
     return 0
 
