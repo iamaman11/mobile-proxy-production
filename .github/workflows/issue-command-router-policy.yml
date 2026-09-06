@@ -53,6 +53,7 @@ jobs:
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_evidence_store.py
           python3 .github/controller/tests/test_issue_command_router.py
+          python3 .github/controller/tests/test_product_release_admission_workflow.py
           python3 .github/controller/tests/test_projection_reconciler.py
           python3 .github/controller/tests/test_release_resolver.py
           echo 'DEPLOYMENT_CONTROLLER_HOSTED_TESTS_OK'
@@ -234,10 +235,12 @@ jobs:
               'release-deployment.yml',
               'deployments_url',
               '/deploy ',
+              'com.mobileproxy.app',
+              'com.example.mobileproxy',
           )
           present = [item for item in forbidden_admission if item in admission]
           if present:
-              raise SystemExit('Product Release admission proof gained forbidden capability: ' + ', '.join(present))
+              raise SystemExit('Product Release admission proof gained forbidden capability or duplicate package authority: ' + ', '.join(present))
 
           for required in (
               'runs-on: [self-hosted, Linux, X64, android-production]',
