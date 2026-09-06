@@ -99,6 +99,42 @@ jobs:
           path: product-source
           persist-credentials: false
 
+      - name: Require exact user-local Rust toolchain before Product digest/render
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${HOME}/.cargo"
+          RUSTUP_HOME="${HOME}/.rustup"
+          PATH="${CARGO_HOME}/bin:${PATH}"
+          export CARGO_HOME RUSTUP_HOME PATH
+          test "$CARGO_HOME" = "${HOME}/.cargo"
+          test "$RUSTUP_HOME" = "${HOME}/.rustup"
+          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
+          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          (
+            cd product-source
+            "$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps >/dev/null
+            git diff --check
+            test -z "$(git status --porcelain --untracked-files=no)"
+          )
+          {
+            printf 'CARGO_HOME=%s\n' "$CARGO_HOME"
+            printf 'RUSTUP_HOME=%s\n' "$RUSTUP_HOME"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo 'deployment_rust_prerequisite=true'
+          echo 'rust_toolchain=1.95.0'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
+          echo 'product_digest_render_started=false'
+          echo 'mutation_intent=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+          echo 'secret_access=false'
+
       - name: Reconcile recovery mode from durable private ledger
         id: recovery
         env:

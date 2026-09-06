@@ -122,12 +122,78 @@ jobs:
           if not prereq < render < phone:
               raise SystemExit('reconstruction Rust prerequisite must fail closed before render and phone access')
 
+          release_path = Path('.github/workflows/release-deployment.yml')
+          if not release_path.is_file():
+              raise SystemExit('release deployment workflow is missing')
+          release = release_path.read_text(encoding='utf-8')
+          release_required = (
+              '- name: Require exact user-local Rust toolchain before Product digest/render',
+              'CARGO_HOME="${HOME}/.cargo"',
+              'RUSTUP_HOME="${HOME}/.rustup"',
+              'PATH="${CARGO_HOME}/bin:${PATH}"',
+              'export CARGO_HOME RUSTUP_HOME PATH',
+              'test "$CARGO_HOME" = "${HOME}/.cargo"',
+              'test "$RUSTUP_HOME" = "${HOME}/.rustup"',
+              'test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"',
+              'test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"',
+              '"$CARGO_HOME/bin/cargo" --version | grep -Eq \'^cargo 1\\.95\\.0([[:space:]]|$)\'',
+              '"$CARGO_HOME/bin/rustc" --version | grep -Eq \'^rustc 1\\.95\\.0([[:space:]]|$)\'',
+              '"$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps',
+              'git status --porcelain --untracked-files=no',
+              "printf 'CARGO_HOME=%s\\n' \"$CARGO_HOME\"",
+              "printf 'RUSTUP_HOME=%s\\n' \"$RUSTUP_HOME\"",
+              "printf '%s\\n' \"$CARGO_HOME/bin\" >> \"$GITHUB_PATH\"",
+              'deployment_rust_prerequisite=true',
+              'rust_toolchain=1.95.0',
+              'user_local_tooling=true',
+              'system_path_mutation=false',
+              'product_digest_render_started=false',
+              'mutation_intent=false',
+              'phone_access=false',
+              'phone_mutation=false',
+              'provider_access=false',
+              'secret_access=false',
+          )
+          release_missing = [snippet for snippet in release_required if snippet not in release]
+          if release_missing:
+              raise SystemExit('release deployment Rust prerequisite invariant missing: ' + ' | '.join(release_missing))
+
+          product_checkout = release.index('- name: Check out exact admitted PRODUCT source for normative digest/render code')
+          release_prereq = release.index('- name: Require exact user-local Rust toolchain before Product digest/render')
+          reconcile = release.index('- name: Reconcile recovery mode from durable private ledger')
+          transaction = release.index('- name: Execute controller-owned composite transaction')
+          if not product_checkout < release_prereq < reconcile < transaction:
+              raise SystemExit('release deployment Rust prerequisite must fail closed before reconciliation and transaction')
+
+          release_prereq_end = release.index('\n      - name: Reconcile recovery mode from durable private ledger', release_prereq)
+          release_prereq_block = release[release_prereq:release_prereq_end]
+          forbidden_release_prereq = (
+              'secrets.',
+              'ANDROID_PRODUCTION_SERIAL',
+              'ANDROID_TARGET_BINDING_KEY',
+              'PUBLIC_DEPLOYMENTS_TOKEN',
+              '/data/adb/',
+              ' adb ',
+              'pm install',
+              'pm uninstall',
+              'package-device-release',
+              'verify-release-integrity',
+              'sudo ',
+              'VULTR_API',
+              'GOOGLE_APPLICATION_CREDENTIALS',
+              'gcloud ',
+          )
+          release_present = [snippet for snippet in forbidden_release_prereq if snippet in release_prereq_block]
+          if release_present:
+              raise SystemExit('release deployment Rust prerequisite crossed a forbidden boundary: ' + ' | '.join(release_present))
+
           print('production runner tooling policy: accepted')
           print('rustup_version=1.28.2')
           print('rust_toolchain=1.95.0')
           print('user_local_tooling=true')
           print('system_path_mutation=false')
           print('reconstruction_rust_prerequisite=true')
+          print('release_deployment_rust_prerequisite=true')
           print('phone_access=false')
           print('provider_access=false')
           print('secret_access=false')
