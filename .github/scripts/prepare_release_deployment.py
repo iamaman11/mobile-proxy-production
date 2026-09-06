@@ -164,6 +164,14 @@ def main() -> int:
     except EvidenceError as exc:
         raise SystemExit("explicit REFUSED retry lineage was not admitted") from exc
 
+    retry_expected_deployment_id: int | None = None
+    if retry_terminal is not None:
+        candidate_id = retry_terminal.payload.get("deployment_id")
+        if candidate_id is not None:
+            if not isinstance(candidate_id, int) or candidate_id <= 0:
+                raise SystemExit("retry prior terminal public Deployment id is invalid")
+            retry_expected_deployment_id = candidate_id
+
     existing_intent, existing_terminal = evidence.request_history(str(request["request_id"]))
     if existing_terminal is not None:
         evidence.persist_duplicate_projection({
@@ -266,6 +274,8 @@ def main() -> int:
             release_tag=identity.tag,
             release_id=identity.release_id,
             durable_deployment_id=durable_deployment_id,
+            retry_authorized=retry_terminal is not None,
+            retry_expected_deployment_id=retry_expected_deployment_id,
         )
         deployment_id = decision.deployment_id
     except (ProjectionError, ProjectionAdmissionError) as exc:
