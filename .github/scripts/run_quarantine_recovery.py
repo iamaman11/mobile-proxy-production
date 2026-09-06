@@ -26,6 +26,8 @@ from quarantine_recovery import (  # noqa: E402
     RECOVERY_INTENT_HEADING,
     RECOVERY_INTENT_SCHEMA,
     RECOVERY_OPERATION,
+    RECOVERY_PARENT_INTENT_REF,
+    RECOVERY_PARENT_TERMINAL_REF,
     RECOVERY_RELEASE,
     RECOVERY_RELEASE_ID,
     RECOVERY_TARGET,
@@ -91,6 +93,37 @@ def _persist_exact(
             if reconciled is not None and reconciled.identity == expected:
                 return reconciled
             raise QuarantineRecoveryError("recovery terminal write remains ambiguous after bounded reconciliation") from second_error
+
+
+def _validated_parent_recovery(evidence: IssueEvidenceStore) -> None:
+    parent_intent = _existing_unique(
+        evidence,
+        RECOVERY_INTENT_HEADING,
+        recovery_semantic_id(
+            target=RECOVERY_TARGET,
+            release=RECOVERY_RELEASE,
+            quarantined_request_id=QUARANTINED_REQUEST_ID,
+        ),
+    )
+    if parent_intent is None or parent_intent.ref != RECOVERY_PARENT_INTENT_REF:
+        raise QuarantineRecoveryError("exact prior recovery intent is unavailable under target lock")
+    validate_recovery_intent(parent_intent.payload)
+    parent_terminal = _existing_unique(
+        evidence,
+        RECOVERY_TERMINAL_HEADING,
+        str(parent_intent.payload["semantic_recovery_id"]),
+    )
+    if parent_terminal is None or parent_terminal.ref != RECOVERY_PARENT_TERMINAL_REF:
+        raise QuarantineRecoveryError("exact prior recovery terminal is unavailable under target lock")
+    validate_recovery_terminal(parent_terminal.payload)
+    if (
+        parent_terminal.payload.get("state") != "QUARANTINED"
+        or parent_terminal.payload.get("mutation_performed") is not True
+        or parent_terminal.payload.get("postcondition_verified") is not True
+        or parent_terminal.payload.get("blind_retry_allowed") is not False
+        or parent_terminal.payload.get("recovery_intent_ref") != RECOVERY_PARENT_INTENT_REF
+    ):
+        raise QuarantineRecoveryError("prior recovery terminal is not the exact observed Stage 3 quarantine")
 
 
 def _root_runtime_observation(
@@ -165,6 +198,7 @@ def _terminal(
         "release_id": RECOVERY_RELEASE_ID,
         "quarantined_request_id": QUARANTINED_REQUEST_ID,
         "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
+        "parent_recovery_terminal_ref": RECOVERY_PARENT_TERMINAL_REF,
         "recovery_intent_ref": intent_ref,
         "state": state,
         "mutation_performed": mutation_performed,
@@ -186,6 +220,7 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--release", required=True)
     parser.add_argument("--quarantined-request-id", required=True)
+    parser.add_argument("--recovery-parent-terminal-ref", required=True)
     parser.add_argument("--admitted-release-json", required=True)
     parser.add_argument("--execution-id", required=True)
     parser.add_argument("--controller-revision", required=True)
@@ -196,6 +231,8 @@ def main() -> int:
 
     if args.target != RECOVERY_TARGET or args.release != RECOVERY_RELEASE or args.quarantined_request_id != QUARANTINED_REQUEST_ID:
         raise QuarantineRecoveryError("runtime recovery inputs differ from exact authorized quarantine")
+    if args.recovery_parent_terminal_ref != RECOVERY_PARENT_TERMINAL_REF:
+        raise QuarantineRecoveryError("runtime recovery parent differs from hosted continuation admission")
     if os.environ.get("GITHUB_SHA") != args.controller_revision:
         raise QuarantineRecoveryError("runtime recovery controller revision differs")
 
@@ -221,7 +258,13 @@ def main() -> int:
     if not payload_matches_release_identity(original_intent.payload, admitted.identity, target=RECOVERY_TARGET):
         raise QuarantineRecoveryError("original intent differs from immutable Release identity")
 
-    semantic_id = recovery_semantic_id(target=RECOVERY_TARGET, release=RECOVERY_RELEASE, quarantined_request_id=QUARANTINED_REQUEST_ID)
+    _validated_parent_recovery(evidence)
+    semantic_id = recovery_semantic_id(
+        target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+        parent_recovery_terminal_ref=RECOVERY_PARENT_TERMINAL_REF,
+    )
     existing_terminal = _existing_unique(evidence, RECOVERY_TERMINAL_HEADING, semantic_id)
     if existing_terminal is not None:
         validate_recovery_terminal(existing_terminal.payload)
@@ -240,6 +283,7 @@ def main() -> int:
     facts: dict[str, object] = {
         "original_quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
         "original_quarantined_intent_ref": QUARANTINED_INTENT_REF,
+        "parent_recovery_terminal_ref": RECOVERY_PARENT_TERMINAL_REF,
         "vm_provider_access_performed": False,
         "apk_mutation_performed": False,
         "runtime_bytes_rematerialized": False,
@@ -333,6 +377,7 @@ def main() -> int:
             "quarantined_request_id": QUARANTINED_REQUEST_ID,
             "quarantined_intent_ref": QUARANTINED_INTENT_REF,
             "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
+            "parent_recovery_terminal_ref": RECOVERY_PARENT_TERMINAL_REF,
             "apk_exact": True,
             "inactive_runtime_exact": True,
             "current_before": runtime_pre["current_target"],
@@ -346,7 +391,7 @@ def main() -> int:
 
         try:
             _activate(serial=serial, release_id=RECOVERY_RELEASE, target=target)
-        except PhoneTargetUnavailable as exc:
+        except PhoneTargetUnavailable:
             terminal = _terminal(
                 semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
                 state="UNKNOWN", mutation_performed=True, postcondition_verified=False,
@@ -372,7 +417,7 @@ def main() -> int:
                 release_id=RECOVERY_RELEASE,
                 required_paths=materialized.required_live_release_paths,
             )
-        except (AndroidObservationUnavailable, PhoneTargetUnavailable) as exc:
+        except (AndroidObservationUnavailable, PhoneTargetUnavailable):
             terminal = _terminal(
                 semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
                 state="UNKNOWN", mutation_performed=True, postcondition_verified=False,
