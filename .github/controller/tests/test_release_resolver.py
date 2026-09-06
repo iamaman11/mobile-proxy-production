@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import sys
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import release_resolver as resolver
 from release_resolver import ReleaseAdmissionError, resolve_payload
 
 TAG = "v0.1.6"
@@ -314,6 +319,158 @@ def test_wrong_version_refused() -> None:
 
 def test_legacy_manifest_v1_refused() -> None:
     expect_refused(lambda _r, manifest, _p, _d: manifest.__setitem__("format_version", 1))
+
+
+def test_contract_download_recovers_from_transient_transport_with_fixed_bound() -> None:
+    payload = b'{"format_version":2}'
+    item = asset("release-manifest.json", 3, hashlib.sha256(payload).hexdigest())
+    responses: list[object] = [
+        urllib.error.URLError("temporary transport"),
+        urllib.error.HTTPError(item["browser_download_url"], 504, "gateway timeout", None, None),
+        io.BytesIO(payload),
+    ]
+    calls = 0
+    original = resolver.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        value = responses.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    try:
+        assert resolver._download(item) == payload
+        assert calls == 3
+    finally:
+        resolver.urllib.request.urlopen = original
+
+
+def test_contract_download_transport_exhaustion_is_exactly_three_attempts() -> None:
+    payload = b"expected"
+    item = asset("release-manifest.json", 3, hashlib.sha256(payload).hexdigest())
+    calls = 0
+    original = resolver.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        raise urllib.error.URLError("temporary transport")
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            resolver._download(item)
+        except ReleaseAdmissionError as exc:
+            assert str(exc) == "release contract asset is unavailable"
+        else:
+            raise AssertionError("contract download exhaustion unexpectedly succeeded")
+        assert calls == 3
+    finally:
+        resolver.urllib.request.urlopen = original
+
+
+def test_contract_download_integrity_mismatch_is_not_retried() -> None:
+    item = asset("release-manifest.json", 3, hashlib.sha256(b"expected").hexdigest())
+    calls = 0
+    original = resolver.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        return io.BytesIO(b"different")
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            resolver._download(item)
+        except ReleaseAdmissionError as exc:
+            assert str(exc) == "release contract asset transport digest differs"
+        else:
+            raise AssertionError("contract digest mismatch unexpectedly succeeded")
+        assert calls == 1
+    finally:
+        resolver.urllib.request.urlopen = original
+
+
+def test_release_metadata_recovers_from_transient_server_failure() -> None:
+    url = "https://api.github.com/repos/iamaman11/mobile-proxy/releases/tags/v0.1.7"
+    responses: list[object] = [
+        urllib.error.HTTPError(url, 504, "gateway timeout", None, None),
+        urllib.error.URLError("temporary transport"),
+        io.BytesIO(json.dumps({"id": 1}).encode("utf-8")),
+    ]
+    calls = 0
+    original = resolver.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        value = responses.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    try:
+        assert resolver._request_json(url) == {"id": 1}
+        assert calls == 3
+    finally:
+        resolver.urllib.request.urlopen = original
+
+
+def test_release_metadata_non_transient_http_failure_is_not_retried() -> None:
+    url = "https://api.github.com/repos/iamaman11/mobile-proxy/releases/tags/v0.1.7"
+    calls = 0
+    original = resolver.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        raise urllib.error.HTTPError(url, 404, "not found", None, None)
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            resolver._request_json(url)
+        except ReleaseAdmissionError as exc:
+            assert str(exc) == "public Release metadata is unavailable"
+        else:
+            raise AssertionError("non-transient metadata HTTP failure unexpectedly succeeded")
+        assert calls == 1
+    finally:
+        resolver.urllib.request.urlopen = original
+
+
+def test_release_metadata_invalid_json_is_not_retried() -> None:
+    url = "https://api.github.com/repos/iamaman11/mobile-proxy/releases/tags/v0.1.7"
+    calls = 0
+    original = resolver.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        return io.BytesIO(b"not-json")
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            resolver._request_json(url)
+        except ReleaseAdmissionError as exc:
+            assert str(exc) == "public Release metadata is unavailable"
+        else:
+            raise AssertionError("invalid metadata JSON unexpectedly succeeded")
+        assert calls == 1
+    finally:
+        resolver.urllib.request.urlopen = original
 
 
 def main() -> int:
