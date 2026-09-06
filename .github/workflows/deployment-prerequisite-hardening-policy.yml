@@ -24,10 +24,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile \
+            .github/controller/admitted_release.py \
             .github/controller/android_target.py \
             .github/controller/evidence_store.py \
+            .github/controller/tests/test_admitted_release.py \
             .github/controller/tests/test_android_target.py \
-            .github/controller/tests/test_evidence_store.py
+            .github/controller/tests/test_evidence_store.py \
+            .github/scripts/run_phone_release_deployment.py
+          python3 .github/controller/tests/test_admitted_release.py
           python3 .github/controller/tests/test_android_target.py
           python3 .github/controller/tests/test_evidence_store.py
 
