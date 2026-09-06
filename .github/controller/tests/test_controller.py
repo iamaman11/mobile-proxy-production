@@ -24,6 +24,7 @@ from deployment_state_machine import (
 )
 from evidence_store import EvidenceRecord, INTENT_HEADING, TERMINAL_HEADING
 from phone_runtime import PhoneRuntimeRefused
+from projection_admission import ProjectionAdmissionError, resolve_projection_admission
 from terminal_result import DeploymentTerminal, validate_terminal
 
 
@@ -185,7 +186,152 @@ def test_refused_retry_lineage_admission_is_pre_release_and_fail_closed() -> Non
     lineage = source.index("_retry_lineage_terminal(evidence, request)")
     release = source.index("admitted = resolve_release(")
     projection = source.index("projection = PublicDeploymentProjection(")
-    assert lineage < release < projection
+    retry_projection = source.index("retry_authorized=retry_terminal is not None", projection)
+    assert lineage < release < projection < retry_projection
+
+
+class _FakeProjection:
+    def __init__(self, matches=()):
+        self.matches = tuple(matches)
+        self.status_calls: list[dict[str, object]] = []
+        self.create_calls: list[dict[str, object]] = []
+
+    def find_exact(self, **kwargs):
+        return self.matches
+
+    def status(self, **kwargs):
+        self.status_calls.append(dict(kwargs))
+        return 1
+
+    def create(self, **kwargs):
+        self.create_calls.append(dict(kwargs))
+        return 99
+
+
+def _projection_match(state: str | None, deployment_id: int = 2):
+    return SimpleNamespace(
+        deployment_id=deployment_id,
+        source_sha="b" * 40,
+        ref="b" * 40,
+        environment="phone-production",
+        payload={},
+        latest_state=state,
+    )
+
+
+def _projection_admit(projection: _FakeProjection, **overrides):
+    values = {
+        "projection": projection,
+        "source_sha": "b" * 40,
+        "environment": "phone-production",
+        "release_tag": "v0.1.7",
+        "release_id": 7,
+        "durable_deployment_id": None,
+    }
+    values.update(overrides)
+    return resolve_projection_admission(**values)
+
+
+def test_terminal_public_projection_remains_fail_closed_for_ordinary_deploy() -> None:
+    for state in ("failure", "error", "success", "inactive"):
+        projection = _FakeProjection([_projection_match(state)])
+        try:
+            _projection_admit(projection)
+        except ProjectionAdmissionError:
+            pass
+        else:
+            raise AssertionError(f"ordinary deploy reused terminal public projection {state}")
+        assert projection.status_calls == []
+        assert projection.create_calls == []
+
+
+def test_explicit_refused_retry_reopens_only_failure_or_error_projection_generation() -> None:
+    for state in ("failure", "error"):
+        projection = _FakeProjection([_projection_match(state)])
+        decision = _projection_admit(
+            projection,
+            retry_authorized=True,
+            retry_expected_deployment_id=2,
+        )
+        assert decision.deployment_id == 2
+        assert decision.reused is True
+        assert decision.observed_state == "queued"
+        assert projection.create_calls == []
+        assert projection.status_calls == [{
+            "deployment_id": 2,
+            "state": "queued",
+            "description": "v0.1.7 explicit REFUSED retry admitted by production controller",
+        }]
+
+
+def test_explicit_retry_does_not_reopen_success_or_inactive_projection() -> None:
+    for state in ("success", "inactive"):
+        projection = _FakeProjection([_projection_match(state)])
+        try:
+            _projection_admit(projection, retry_authorized=True)
+        except ProjectionAdmissionError:
+            pass
+        else:
+            raise AssertionError(f"retry reopened forbidden terminal public projection {state}")
+        assert projection.status_calls == []
+
+
+def test_retry_projection_requires_exact_known_deployment_identity_when_present() -> None:
+    projection = _FakeProjection([_projection_match("failure", deployment_id=2)])
+    try:
+        _projection_admit(
+            projection,
+            retry_authorized=True,
+            retry_expected_deployment_id=3,
+        )
+    except ProjectionAdmissionError as exc:
+        assert "different public Deployment" in str(exc)
+    else:
+        raise AssertionError("retry reused a public Deployment outside its prior lineage")
+    assert projection.status_calls == []
+
+
+def test_projection_admission_rejects_ambiguous_or_mismatched_public_identity() -> None:
+    multiple = _FakeProjection([
+        _projection_match("failure", deployment_id=2),
+        _projection_match("failure", deployment_id=3),
+    ])
+    try:
+        _projection_admit(multiple, retry_authorized=True)
+    except ProjectionAdmissionError as exc:
+        assert "multiple exact public Deployments" in str(exc)
+    else:
+        raise AssertionError("ambiguous public projection admitted")
+    assert multiple.status_calls == []
+
+    mismatched_durable = _FakeProjection([_projection_match("queued", deployment_id=2)])
+    try:
+        _projection_admit(mismatched_durable, durable_deployment_id=3)
+    except ProjectionAdmissionError as exc:
+        assert "different public Deployment" in str(exc)
+    else:
+        raise AssertionError("mismatched durable public Deployment admitted")
+
+
+def test_projection_retry_identity_cannot_be_supplied_without_lineage_authority() -> None:
+    projection = _FakeProjection([_projection_match("failure", deployment_id=2)])
+    try:
+        _projection_admit(projection, retry_expected_deployment_id=2)
+    except ProjectionAdmissionError as exc:
+        assert "without admitted retry lineage" in str(exc)
+    else:
+        raise AssertionError("retry identity bypassed retry lineage authority")
+    assert projection.status_calls == []
+
+
+def test_safe_nonterminal_projection_reuse_is_unchanged() -> None:
+    for state in ("queued", "in_progress"):
+        projection = _FakeProjection([_projection_match(state)])
+        decision = _projection_admit(projection)
+        assert decision.deployment_id == 2
+        assert decision.reused is True
+        assert decision.observed_state == state
+        assert projection.status_calls == []
 
 
 def test_product_subprocess_failure_classes_are_bounded_and_secret_free() -> None:
