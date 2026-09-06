@@ -1,0 +1,94 @@
+name: Production phone target observation diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-phone-target:
+    name: Diagnose registered phone observation boundary read-only
+    if: inputs.target == 'phone-production'
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    env:
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      TARGET: ${{ inputs.target }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Check out exact dispatched Controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate bounded diagnostic inputs before phone access
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$TARGET" = "phone-production"
+          python3 - <<'PY'
+          import os, re
+          value = os.environ.get("RELEASE_TAG", "")
+          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", value) is None:
+              raise SystemExit("diagnostic release id is invalid")
+          PY
+          echo 'diagnostic_read_only=true'
+          echo 'phone_mutation=false'
+          echo 'runner_mutation=false'
+
+      - name: Execute bounded Controller target observation diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/phone_target_observation_diagnostic.py \
+            --release-id "$RELEASE_TAG" \
+            --output "$RUNNER_TEMP/phone-target-observation-diagnostic.json"
+
+      - name: Verify bounded evidence contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "phone-target-observation-diagnostic.json"
+          value = json.loads(path.read_text(encoding="utf-8"))
+          if value.get("schema") != "phone-target-observation-diagnostic.v1":
+              raise SystemExit("diagnostic evidence schema differs")
+          if value.get("target") != "phone-production":
+              raise SystemExit("diagnostic target differs")
+          for key in (
+              "phone_mutation_performed",
+              "runner_mutation_performed",
+              "raw_device_identifier_recorded",
+              "raw_root_output_recorded",
+              "raw_stderr_recorded",
+              "filesystem_contents_recorded",
+              "secret_values_recorded",
+          ):
+              if value.get(key) is not False:
+                  raise SystemExit(f"unsafe diagnostic evidence flag: {key}")
+          if path.stat().st_size > 4096:
+              raise SystemExit("diagnostic evidence exceeds bound")
+          print("PHONE_TARGET_OBSERVATION_EVIDENCE_ACCEPTED")
+          PY
+
+      - name: Preserve bounded diagnostic artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: phone-target-observation-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/phone-target-observation-diagnostic.json
+          if-no-files-found: error
+          retention-days: 30
