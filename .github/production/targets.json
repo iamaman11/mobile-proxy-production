@@ -6,7 +6,8 @@
       "adapter": "android-target-v2",
       "allowed_operations": [
         "deploy-product-release",
-        "verify-product-release"
+        "verify-product-release",
+        "phone-target-observation-diagnostic"
       ],
       "physical_domains": [
         "android-package",
