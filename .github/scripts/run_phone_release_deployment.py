@@ -361,10 +361,25 @@ def main() -> int:
         )
         return 2
 
-    projection.status(
-        deployment_id=args.deployment_id, state="in_progress",
-        description=f"{admitted.identity.tag} target execution started",
-    )
+    try:
+        projection.status(
+            deployment_id=args.deployment_id, state="in_progress",
+            description=f"{admitted.identity.tag} target execution started",
+        )
+    except ProjectionError as exc:
+        if args.recovery_only == "true":
+            raise
+        state = reduce_state(_base_state_authorized(), "observation_refused", reason=str(exc))
+        terminal = _terminal_payload(
+            request=request, execution_id=args.execution_id, controller_revision=args.controller_revision,
+            admitted=admitted, deployment_id=args.deployment_id, state=state,
+            facts=facts | {"public_projection": {"available": False}}, evidence_refs=evidence_refs,
+        )
+        _persist_and_write(
+            evidence=evidence, projection=projection, output=args.output,
+            deployment_id=args.deployment_id, terminal=terminal,
+        )
+        return 2
 
     if args.recovery_only == "true":
         if existing_intent is None:
