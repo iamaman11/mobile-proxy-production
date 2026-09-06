@@ -59,31 +59,40 @@ def root_result(
     )
 
 
+def fake_adb_program(root: Path, body: str) -> Path:
+    executable = root / "adb"
+    executable.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+    executable.chmod(0o755)
+    return executable
+
+
 def test_root_script_uses_canonical_no_pty_stdin_bytes_not_adb_argv() -> None:
     script = b"if [ -e '/data/a' ]; then printf 'yes\\n'; else printf 'no\\n'; fi\n"
-    calls: list[tuple[list[str], dict[str, object]]] = []
+    with tempfile.TemporaryDirectory() as raw:
+        adb = fake_adb_program(Path(raw), "import sys\nsys.stdin.buffer.read()\n")
+        calls: list[tuple[list[str], dict[str, object]]] = []
+        real_popen = phone_target.subprocess.Popen
 
-    def fake_subprocess_run(command, **kwargs):
-        calls.append((list(command), dict(kwargs)))
-        return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
+        def spy_popen(command, **kwargs):
+            calls.append((list(command), dict(kwargs)))
+            return real_popen(command, **kwargs)
 
-    originals = (phone_target._require_device, phone_target.subprocess.run)
-    phone_target._require_device = lambda serial: "/usr/bin/adb"
-    phone_target.subprocess.run = fake_subprocess_run
-    try:
-        result = phone_target._run_root_script("serial", script, timeout=41)
-    finally:
-        phone_target._require_device, phone_target.subprocess.run = originals
+        originals = (phone_target._require_device, phone_target.subprocess.Popen)
+        phone_target._require_device = lambda serial: str(adb)
+        phone_target.subprocess.Popen = spy_popen
+        try:
+            result = phone_target._run_root_script("serial", script, timeout=41)
+        finally:
+            phone_target._require_device, phone_target.subprocess.Popen = originals
 
     assert result.status == "completed" and result.returncode == 0
     assert calls == [(
-        ["/usr/bin/adb", "-s", "serial", "shell", "-T", "su", "0"],
+        [str(adb), "-s", "serial", "shell", "-T", "su", "0"],
         {
-            "input": script,
-            "capture_output": True,
-            "text": False,
-            "timeout": 41,
-            "check": False,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "bufsize": 0,
         },
     )]
     argv = calls[0][0]
@@ -114,44 +123,75 @@ def test_root_script_rejects_oversized_controller_script() -> None:
     assert called is False
 
 
-def test_root_script_bounds_output_and_fails_closed() -> None:
-    def fake_subprocess_run(command, **kwargs):
-        return SimpleNamespace(
-            returncode=0,
-            stdout=b"A" * (phone_target._MAX_ROOT_OUTPUT_BYTES + 10),
-            stderr=b"",
+def test_root_script_bounds_both_streams_while_draining_without_deadlock() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        adb = fake_adb_program(
+            Path(raw),
+            "import sys\n"
+            "sys.stdin.buffer.read()\n"
+            "size = 256 * 1024\n"
+            "sys.stderr.buffer.write(b'B' * size)\n"
+            "sys.stderr.buffer.flush()\n"
+            "sys.stdout.buffer.write(b'A' * size)\n"
+            "sys.stdout.buffer.flush()\n",
         )
-
-    originals = (phone_target._require_device, phone_target.subprocess.run)
-    phone_target._require_device = lambda serial: "/usr/bin/adb"
-    phone_target.subprocess.run = fake_subprocess_run
-    try:
-        result = phone_target._run_root_script("serial", b"printf ok\n")
-    finally:
-        phone_target._require_device, phone_target.subprocess.run = originals
+        original = phone_target._require_device
+        phone_target._require_device = lambda serial: str(adb)
+        try:
+            result = phone_target._run_root_script("serial", b"printf ok\n", timeout=5)
+        finally:
+            phone_target._require_device = original
 
     assert result.status == "transport_error"
     assert result.returncode is None
+    assert result.stdout == b"A" * phone_target._MAX_ROOT_OUTPUT_BYTES
+    assert result.stderr == b"B" * phone_target._MAX_ROOT_OUTPUT_BYTES
     assert result.stdout_truncated is True
-    assert len(result.stdout) == phone_target._MAX_ROOT_OUTPUT_BYTES
+    assert result.stderr_truncated is True
+
+
+def test_root_script_nonzero_preserves_bounded_stderr() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        adb = fake_adb_program(
+            Path(raw),
+            "import sys\n"
+            "sys.stdin.buffer.read()\n"
+            "sys.stderr.buffer.write(b'stderr=ok\\n')\n"
+            "sys.stderr.buffer.flush()\n"
+            "raise SystemExit(23)\n",
+        )
+        original = phone_target._require_device
+        phone_target._require_device = lambda serial: str(adb)
+        try:
+            result = phone_target._run_root_script("serial", b"exit 23\n", timeout=5)
+        finally:
+            phone_target._require_device = original
+
+    assert result.status == "completed"
+    assert result.returncode == 23
+    assert result.stdout == b""
+    assert result.stderr == b"stderr=ok\n"
+    assert result.stdout_truncated is False and result.stderr_truncated is False
 
 
 def test_root_script_timeout_is_ambiguous_not_completed() -> None:
-    def fake_subprocess_run(command, **kwargs):
-        raise subprocess.TimeoutExpired(
-            cmd=command,
-            timeout=kwargs["timeout"],
-            output=b"partial",
-            stderr=b"bounded-error",
+    with tempfile.TemporaryDirectory() as raw:
+        adb = fake_adb_program(
+            Path(raw),
+            "import sys, time\n"
+            "sys.stdin.buffer.read()\n"
+            "sys.stdout.buffer.write(b'partial')\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.stderr.buffer.write(b'bounded-error')\n"
+            "sys.stderr.buffer.flush()\n"
+            "time.sleep(10)\n",
         )
-
-    originals = (phone_target._require_device, phone_target.subprocess.run)
-    phone_target._require_device = lambda serial: "/usr/bin/adb"
-    phone_target.subprocess.run = fake_subprocess_run
-    try:
-        result = phone_target._run_root_script("serial", b"sleep 1\n", timeout=1)
-    finally:
-        phone_target._require_device, phone_target.subprocess.run = originals
+        original = phone_target._require_device
+        phone_target._require_device = lambda serial: str(adb)
+        try:
+            result = phone_target._run_root_script("serial", b"sleep 1\n", timeout=1)
+        finally:
+            phone_target._require_device = original
 
     assert result.status == "timeout"
     assert result.returncode is None
