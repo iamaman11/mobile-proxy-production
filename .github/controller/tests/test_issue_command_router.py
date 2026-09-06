@@ -79,12 +79,14 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "verify-product-release",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
+        "recover-quarantined-product-release",
     }
     assert set(targets) == {"phone-production", "vm-production"}
     assert targets["phone-production"]["active"] is True
     assert targets["phone-production"]["allowed_operations"] == [
         "deploy-product-release",
         "verify-product-release",
+        "recover-quarantined-product-release",
     ]
     assert targets["vm-production"]["active"] is False
     assert targets["vm-production"]["allowed_operations"] == ["deploy-product-release"]
@@ -174,15 +176,16 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
     assert workflow == "public-deployment-projection-observer.yml"
     assert ref == "main"
     assert inputs == {}
-    try:
-        dispatcher.build_dispatch(
-            "deploy-product-release",
-            '{"release":"v0.1.4","target":"phone-production"}',
-        )
-    except dispatcher.DispatchRefused:
-        pass
-    else:
-        raise AssertionError("generic dispatcher accepted destructive deployment route")
+    for route_id, arguments in (
+        ("deploy-product-release", '{"release":"v0.1.4","target":"phone-production"}'),
+        ("recover-quarantined-product-release", '{"quarantined_request_id":"req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7","release":"v0.1.7","target":"phone-production"}'),
+    ):
+        try:
+            dispatcher.build_dispatch(route_id, arguments)
+        except dispatcher.DispatchRefused:
+            pass
+        else:
+            raise AssertionError("generic dispatcher accepted destructive route")
     try:
         dispatcher.build_dispatch("observe-public-deployment-projection", '{"extra":"x"}')
     except dispatcher.DispatchRefused:
@@ -230,6 +233,31 @@ def test_runner_tooling_route_is_exact_and_bounded() -> None:
     assert json.loads(route.arguments_json) == {"canonical_sha": SHA}
     refused("/runner-android-build-tools-bootstrap main")
     refused(f"/runner-android-build-tools-bootstrap {SHA} extra")
+
+
+def test_quarantine_recovery_route_is_exact_and_destructive() -> None:
+    request_id = "req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7"
+    route = accepted(f"/recover-quarantined phone-production v0.1.7 {request_id}")
+    assert route.route_id == "recover-quarantined-product-release"
+    assert route.handler == "workflow_call"
+    assert route.workflow == ".github/workflows/quarantined-release-recovery.yml"
+    assert route.operation == "recover-quarantined-product-release"
+    assert route.operation_class == "RECOVER"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.destructive is True and route.read_only is False
+    assert "semantic" in route.idempotency_policy
+    assert "UNKNOWN" in route.recovery_policy and "no-blind-retry" in route.recovery_policy
+    assert json.loads(route.arguments_json) == {
+        "quarantined_request_id": request_id,
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused(f"/recover-quarantined phone-production v0.1.8 {request_id}")
+    refused(f"/recover-quarantined vm-production v0.1.7 {request_id}")
+    refused("/recover-quarantined phone-production v0.1.7 req-sha256:" + "0" * 64)
+    refused(f"/recover-quarantined phone-production v0.1.7 {request_id} extra")
+    refused(f"/recover-quarantined phone-production v0.1.7 {request_id}", run_attempt=2)
 
 
 def test_repository_issue_author_sha_and_clean_line_are_fail_closed() -> None:
@@ -352,6 +380,8 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "needs.route.outputs.destructive == 'false'",
         "./.github/workflows/release-deployment.yml",
         "./.github/workflows/production-runner-android-build-tools-bootstrap.yml",
+        "./.github/workflows/quarantined-release-recovery.yml",
+        "recover-quarantined-product-release",
         "actions: write",
         "issues: write",
     )
