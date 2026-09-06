@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   validate-stage3-quarantine-recovery:
-    name: Validate exact quarantined v0.1.7 activation-only recovery
+    name: Validate exact Stage 3 UNKNOWN read-only reconciliation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,12 +19,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prove recovery ledger, route and activation-only boundary
+      - name: Prove exact UNKNOWN lineage and zero mutation capability
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/controller/tests/test_quarantine_recovery.py
           python3 .github/controller/tests/test_stage3_activation_switch.py
+          python3 .github/controller/tests/test_unknown_reconciliation.py
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -33,51 +34,60 @@ jobs:
           targets = json.loads(Path('.github/production/targets.json').read_text(encoding='utf-8'))
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/quarantined-release-recovery.yml').read_text(encoding='utf-8')
-          prepare = Path('.github/scripts/prepare_quarantine_recovery.py').read_text(encoding='utf-8')
-          runner = Path('.github/scripts/run_quarantine_recovery.py').read_text(encoding='utf-8')
+          prepare = Path('.github/scripts/prepare_quarantine_reconciliation.py').read_text(encoding='utf-8')
+          runner = Path('.github/scripts/run_quarantine_reconciliation.py').read_text(encoding='utf-8')
+          observer = Path('.github/controller/quarantine_phone_observer.py').read_text(encoding='utf-8')
           ledger = Path('.github/controller/quarantine_recovery.py').read_text(encoding='utf-8')
 
           routes = [r for r in registry['routes'] if r['id'] == 'recover-quarantined-product-release']
           if len(routes) != 1:
-              raise SystemExit('exact quarantine recovery route is missing or duplicated')
+              raise SystemExit('exact Stage 3 recovery route is missing or duplicated')
           route = routes[0]
           if route['operation_class'] != 'RECOVER' or not route['destructive'] or route['read_only']:
-              raise SystemExit('quarantine recovery safety classification differs')
+              raise SystemExit('existing recovery ingress classification drifted')
           if route['concurrency_domain'] != 'target-global-mutation':
-              raise SystemExit('quarantine recovery lacks target-global mutation serialization')
-          if route['authority_policy'] != 'private-issue1-owner+controller-main-exact+exact-quarantined-v017+exact-prior-recovery-terminal':
-              raise SystemExit('quarantine continuation authority policy differs')
-          if route['semantic_identity_policy'] != 'quarantined-deployment-terminal+prior-recovery-terminal+command-arguments':
-              raise SystemExit('quarantine continuation semantic identity policy differs')
-          if route['idempotency_policy'] != 'single-run-attempt+bounded-lineage-generation+durable-semantic-quarantine-recovery-ledger':
-              raise SystemExit('quarantine continuation idempotency policy differs')
-          if '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in route['pattern']:
-              raise SystemExit('quarantine recovery route is not bound to exact failed request')
-          if 'v0\\.1\\.7' not in route['pattern']:
-              raise SystemExit('quarantine recovery route is not bound to exact release')
+              raise SystemExit('Stage 3 reconciliation lost target-global serialization')
+          if '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in route['pattern'] or 'v0\\.1\\.7' not in route['pattern']:
+              raise SystemExit('Stage 3 route is not exact request/release bound')
           if 'recover-quarantined-product-release' not in targets['targets']['phone-production']['allowed_operations']:
-              raise SystemExit('phone target does not explicitly admit quarantine recovery operation')
+              raise SystemExit('phone target does not admit the existing Stage 3 recovery route')
           if 'recover-quarantined-v017' not in router or 'quarantined-release-recovery.yml' not in router:
-              raise SystemExit('sole Issue #1 router does not own recovery invocation')
-          if 'production-target-phone-production' not in workflow:
-              raise SystemExit('recovery does not share the phone target serialization domain')
-          if 'recovery_parent_terminal_ref' not in workflow or '--recovery-parent-terminal-ref' not in workflow:
-              raise SystemExit('hosted recovery parent is not carried into target execution')
-          if 'continue-on-error: true' not in workflow or 'STAGE3_QUARANTINE_RECOVERY_ACCEPTED' not in workflow:
-              raise SystemExit('recovery terminal enforcement is incomplete')
+              raise SystemExit('sole Issue #1 router does not own Stage 3 invocation')
+
           for required in (
-              'QUARANTINED_TERMINAL_REF', 'RECOVERY_PARENT_INTENT_REF', 'RECOVERY_PARENT_TERMINAL_REF',
-              'RECOVERY_INTENT_HEADING', 'RECOVERY_TERMINAL_HEADING', 'parent_recovery_terminal_ref',
-              'blind_retry_allowed', '_validated_parent_recovery', '_root_runtime_observation', '_activate(',
+              'production-target-phone-production',
+              'prepare_quarantine_reconciliation.py',
+              'run_quarantine_reconciliation.py',
+              "issue-comment:5562925687",
+              'STAGE3_UNKNOWN_RECONCILIATION_ACCEPTED',
+              'continue-on-error: true',
           ):
+              if required not in workflow:
+                  raise SystemExit('UNKNOWN reconciliation workflow contract missing ' + required)
+
+          for required in (
+              'RECOVERY_UNKNOWN_INTENT_REF', 'RECOVERY_UNKNOWN_TERMINAL_REF',
+              'state'):
               if required not in prepare + runner + ledger:
-                  raise SystemExit('recovery continuation contract missing ' + required)
-          for forbidden in (
-              'dispatch_release_once(', 'dispatch_install_once(', '_stage_runtime(', '_materialize_inactive(',
-          ):
-              if forbidden in runner:
-                  raise SystemExit('recovery can reach forbidden deploy/restage primitive: ' + forbidden)
-          if 'recovery intent already exists without terminal; activation will not be repeated' not in runner:
-              raise SystemExit('post-intent duplicate recovery is not fail-closed')
-          print('STAGE3_QUARANTINE_RECOVERY_POLICY_OK')
+                  raise SystemExit('UNKNOWN reconciliation lineage contract missing ' + required)
+          if 'UNKNOWN reconciliation is read-only and cannot create a recovery intent' not in ledger:
+              raise SystemExit('UNKNOWN parent is not structurally barred from mutation intent')
+          if 'UNKNOWN reconciliation terminal must be read-only with verified postcondition' not in ledger:
+              raise SystemExit('UNKNOWN reconciliation terminal is not structurally read-only')
+
+          forbidden = (
+              '_activate(', 'dispatch_release_once(', 'dispatch_install_once(',
+              '_stage_runtime(', '_materialize_inactive(', 'RECOVERY_INTENT_SCHEMA',
+              'mkdir ', 'cp ', 'rm ', 'mv ', 'ln ', 'kill ', 'chmod ', 'pm install',
+          )
+          for name, source in (('runner', runner), ('observer', observer)):
+              present = [item for item in forbidden if item in source]
+              if present:
+                  raise SystemExit(f'{name} exposes forbidden UNKNOWN reconciliation mutation capability: {present!r}')
+
+          if 'observe_exact_inactive_runtime(' not in runner or '_run_root_script(' not in observer:
+              raise SystemExit('read-only rooted runtime observation is not wired')
+          if 'durable_mutation_intent_created' not in runner or 'mutation_performed' not in runner:
+              raise SystemExit('read-only evidence markers are incomplete')
+          print('STAGE3_UNKNOWN_RECONCILIATION_POLICY_OK')
           PY
