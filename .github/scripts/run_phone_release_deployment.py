@@ -17,6 +17,7 @@ from typing import Mapping
 CONTROLLER = Path(__file__).resolve().parents[1] / "controller"
 sys.path.insert(0, str(CONTROLLER))
 
+from admitted_release import parse_admitted_release  # noqa: E402
 from android_target import (  # noqa: E402
     AndroidArtifactRefused,
     AndroidObservationUnavailable,
@@ -37,7 +38,7 @@ from product_runtime_renderer import (  # noqa: E402
     verify_product_source,
     verify_release_component_digests,
 )
-from release_resolver import resolve_release  # noqa: E402
+from release_resolver import ReleaseAdmissionError  # noqa: E402
 from terminal_result import DeploymentTerminal, validate_terminal  # noqa: E402
 
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -262,8 +263,30 @@ def _persist_and_write(
     output: Path, deployment_id: int, terminal: dict[str, object],
 ) -> None:
     evidence.persist_terminal(terminal)
-    _project_terminal(projection, deployment_id, terminal)
+    try:
+        _project_terminal(projection, deployment_id, terminal)
+    except ProjectionError:
+        pass
     output.write_text(json.dumps(terminal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _persist_pre_intent_refusal(
+    *, request: dict[str, object], execution_id: str, controller_revision: str,
+    admitted: object, deployment_id: int, facts: dict[str, object],
+    evidence_refs: list[str], evidence: IssueEvidenceStore,
+    projection: PublicDeploymentProjection, output: Path, reason: str,
+) -> dict[str, object]:
+    state = reduce_state(_base_state_authorized(), "observation_refused", reason=reason)
+    terminal = _terminal_payload(
+        request=request, execution_id=execution_id, controller_revision=controller_revision,
+        admitted=admitted, deployment_id=deployment_id, state=state,
+        facts=facts, evidence_refs=evidence_refs,
+    )
+    _persist_and_write(
+        evidence=evidence, projection=projection, output=output,
+        deployment_id=deployment_id, terminal=terminal,
+    )
+    return terminal
 
 
 def _observe_composite(*, serial: str, binding_key: str, admitted: object, materialized: object) -> tuple[object, object]:
@@ -308,15 +331,20 @@ def main() -> int:
     if args.deployment_id <= 0:
         raise SystemExit("public Deployment id is invalid")
 
-    expected_admitted = json.loads(args.admitted_release_json)
-    admitted = resolve_release(tag=str(request["product_release_tag"]), target="phone-production")
-    if admitted.to_dict() != expected_admitted:
-        raise SystemExit("Release identity changed between hosted admission and target execution")
-
-    serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
-    binding_key = os.environ.get("ANDROID_TARGET_BINDING_KEY", "")
-    if not serial or not binding_key:
-        raise SystemExit("registered Android production target binding is unavailable")
+    try:
+        expected_admitted = json.loads(args.admitted_release_json)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("hosted admitted Release envelope is invalid JSON") from exc
+    if not isinstance(expected_admitted, Mapping):
+        raise SystemExit("hosted admitted Release envelope is not an object")
+    try:
+        admitted = parse_admitted_release(
+            expected_admitted,
+            tag=str(request["product_release_tag"]),
+            target="phone-production",
+        )
+    except ReleaseAdmissionError as exc:
+        raise SystemExit(f"hosted admitted Release envelope refused: {exc}") from exc
 
     evidence = IssueEvidenceStore(os.environ.get("GITHUB_TOKEN", ""))
     projection = PublicDeploymentProjection(os.environ.get("PUBLIC_DEPLOYMENTS_TOKEN", ""))
@@ -325,10 +353,6 @@ def main() -> int:
         args.output.write_text(json.dumps(existing_terminal.payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0
 
-    projection.status(
-        deployment_id=args.deployment_id, state="in_progress",
-        description=f"{admitted.identity.tag} target execution started",
-    )
     source_ref = f"issue-comment:{request['provenance']['comment_id']}"
     evidence_refs = [source_ref]
     facts: dict[str, object] = {
@@ -343,6 +367,35 @@ def main() -> int:
             "immutability_control": admitted.immutability_control,
         }
     }
+
+    serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
+    binding_key = os.environ.get("ANDROID_TARGET_BINDING_KEY", "")
+    if not serial or not binding_key:
+        if existing_intent is not None:
+            raise SystemExit("registered Android production target binding is unavailable after durable mutation intent")
+        _persist_pre_intent_refusal(
+            request=request, execution_id=args.execution_id, controller_revision=args.controller_revision,
+            admitted=admitted, deployment_id=args.deployment_id, facts=facts,
+            evidence_refs=evidence_refs, evidence=evidence, projection=projection, output=args.output,
+            reason="registered Android production target binding is unavailable",
+        )
+        return 2
+
+    try:
+        projection.status(
+            deployment_id=args.deployment_id, state="in_progress",
+            description=f"{admitted.identity.tag} target execution started",
+        )
+    except ProjectionError as exc:
+        if existing_intent is not None:
+            raise SystemExit("public Deployment projection is unavailable after durable mutation intent") from exc
+        _persist_pre_intent_refusal(
+            request=request, execution_id=args.execution_id, controller_revision=args.controller_revision,
+            admitted=admitted, deployment_id=args.deployment_id, facts=facts,
+            evidence_refs=evidence_refs, evidence=evidence, projection=projection, output=args.output,
+            reason="public Deployment projection is unavailable before durable mutation intent",
+        )
+        return 2
 
     if args.recovery_only == "true":
         if existing_intent is None:
