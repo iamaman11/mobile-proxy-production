@@ -43,6 +43,127 @@ def runtime_release(root: Path) -> tuple[Path, tuple[str, ...]]:
     return release, tuple(files)
 
 
+def test_observe_runtime_root_precondition_and_empty_layout_are_exact_and_read_only() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        target = "/data/adb/mobile-proxy-node/releases/v0.1.6"
+        expected_layout = (
+            f"if [ -e '{target}' ] || [ -L '{target}' ]; then echo target=present; else echo target=absent; fi; "
+            "if [ -L '/data/adb/mobile-proxy-node/current' ]; then printf 'current='; readlink '/data/adb/mobile-proxy-node/current'; "
+            "elif [ -e '/data/adb/mobile-proxy-node/current' ]; then echo current=invalid; else echo current=absent; fi"
+        )
+        calls: list[list[str]] = []
+
+        def fake_read(serial, args, timeout=30):
+            calls.append(list(args))
+            if args == ["shell", "su", "0", "sh", "-c", "true"]:
+                return SimpleNamespace(returncode=0, stdout="")
+            if args == ["shell", "su", "0", "sh", "-c", expected_layout]:
+                return SimpleNamespace(returncode=0, stdout="target=absent\ncurrent=absent\n")
+            raise AssertionError(f"unexpected read: {args!r}")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            observed = phone_target.observe_runtime(
+                serial="serial", release_root=release, release_id="v0.1.6", required_paths=required
+            )
+        finally:
+            phone_target._read = original
+        assert calls == [
+            ["shell", "su", "0", "sh", "-c", "true"],
+            ["shell", "su", "0", "sh", "-c", expected_layout],
+        ]
+        assert observed.target_release_exists is False
+        assert observed.current_target is None
+        assert observed.desired is False
+        assert observed.admissible_for_new_dispatch is True
+        assert observed.mode == "read_only"
+
+
+def test_observe_runtime_classifies_root_capability_nonzero_before_layout() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        calls: list[list[str]] = []
+
+        def fake_read(serial, args, timeout=30):
+            calls.append(list(args))
+            return SimpleNamespace(returncode=7, stdout="ignored", stderr="ignored")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            try:
+                phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required
+                )
+            except phone_target.PhoneTargetUnavailable as error:
+                assert str(error) == "rooted runtime capability unavailable"
+            else:
+                raise AssertionError("root capability failure was not classified")
+        finally:
+            phone_target._read = original
+        assert calls == [["shell", "su", "0", "sh", "-c", "true"]]
+
+
+def test_observe_runtime_classifies_layout_probe_nonzero_after_root_success() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        calls: list[list[str]] = []
+
+        def fake_read(serial, args, timeout=30):
+            calls.append(list(args))
+            if len(calls) == 1:
+                return SimpleNamespace(returncode=0, stdout="")
+            return SimpleNamespace(returncode=9, stdout="ignored", stderr="ignored")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            try:
+                phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required
+                )
+            except phone_target.PhoneTargetUnavailable as error:
+                assert str(error) == "rooted runtime layout observation failed"
+            else:
+                raise AssertionError("layout probe failure was not classified")
+        finally:
+            phone_target._read = original
+        assert calls[0] == ["shell", "su", "0", "sh", "-c", "true"]
+        assert calls[1][:5] == ["shell", "su", "0", "sh", "-c"]
+        assert len(calls) == 2
+
+
+def test_observe_runtime_classifies_malformed_layout_without_exposing_output() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        calls = 0
+
+        def fake_read(serial, args, timeout=30):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return SimpleNamespace(returncode=0, stdout="")
+            return SimpleNamespace(returncode=0, stdout="arbitrary-root-output\n")
+
+        original = phone_target._read
+        phone_target._read = fake_read
+        try:
+            try:
+                phone_target.observe_runtime(
+                    serial="serial", release_root=release, release_id="v0.1.6", required_paths=required
+                )
+            except phone_target.PhoneTargetUnavailable as error:
+                assert str(error) == "rooted runtime state observation is malformed"
+                assert "arbitrary-root-output" not in str(error)
+            else:
+                raise AssertionError("malformed layout was not classified")
+        finally:
+            phone_target._read = original
+        assert calls == 2
+
+
 def test_observe_runtime_requires_exact_current_and_all_bytes() -> None:
     with tempfile.TemporaryDirectory() as raw:
         release, required = runtime_release(Path(raw))
