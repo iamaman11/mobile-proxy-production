@@ -355,9 +355,10 @@ set -eu
 umask 077
 ROOT='{_ROOT}'
 TARGET='{target}'
-CURRENT_TMP="$ROOT/.current-{release_id}"
 BOOT='{_BOOT_HOOK}'
 [ -d "$TARGET" ]
+command -v ln >/dev/null
+command -v readlink >/dev/null
 if [ -f "$ROOT/logs/runtime-watchdog.pid" ]; then
   pid="$(cat "$ROOT/logs/runtime-watchdog.pid" 2>/dev/null || true)"
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
@@ -373,9 +374,8 @@ for proc in /proc/[0-9]*; do
     ;;
   esac
 done
-rm -f "$CURRENT_TMP"
-ln -s "$TARGET" "$CURRENT_TMP"
-mv -Tf "$CURRENT_TMP" "$ROOT/current"
+ln -sfn "$TARGET" "$ROOT/current"
+[ "$(readlink "$ROOT/current")" = "$TARGET" ]
 cat > "$BOOT" <<'MOBILE_PROXY_BOOT'
 #!/system/bin/sh
 set -eu
