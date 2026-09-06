@@ -4,6 +4,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ _ROOT_LAYOUT_OBSERVATION_FAILED = "rooted runtime layout observation failed"
 _ROOT_LAYOUT_OBSERVATION_MALFORMED = "rooted runtime state observation is malformed"
 _MAX_ROOT_SCRIPT_BYTES = 16 * 1024
 _MAX_ROOT_OUTPUT_BYTES = 4 * 1024
+_ROOT_DRAIN_CHUNK_BYTES = 8 * 1024
 
 
 class PhoneTargetUnavailable(RuntimeError):
@@ -91,11 +93,29 @@ def _read(
     return _run([adb, "-s", serial, *arguments], timeout=timeout, input_text=input_text)
 
 
-def _clip_root_output(value: bytes | None) -> tuple[bytes, bool]:
-    raw = value or b""
-    if len(raw) <= _MAX_ROOT_OUTPUT_BYTES:
-        return raw, False
-    return raw[:_MAX_ROOT_OUTPUT_BYTES], True
+def _drain_root_stream(stream, retained: bytearray, truncated: list[bool]) -> None:
+    try:
+        while True:
+            chunk = stream.read(_ROOT_DRAIN_CHUNK_BYTES)
+            if not chunk:
+                return
+            remaining = max(0, _MAX_ROOT_OUTPUT_BYTES - len(retained))
+            if remaining:
+                retained.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated[0] = True
+    finally:
+        stream.close()
+
+
+def _write_root_script_input(stream, script: bytes) -> None:
+    try:
+        stream.write(script)
+        stream.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        stream.close()
 
 
 def _run_root_script(serial: str, script: bytes, *, timeout: int = 30) -> RootScriptResult:
@@ -104,44 +124,82 @@ def _run_root_script(serial: str, script: bytes, *, timeout: int = 30) -> RootSc
     adb = _require_device(serial)
     command = [adb, "-s", serial, "shell", "-T", "su", "0"]
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            input=script,
-            capture_output=True,
-            text=False,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout, stdout_truncated = _clip_root_output(exc.stdout)
-        stderr, stderr_truncated = _clip_root_output(exc.stderr)
-        return RootScriptResult(
-            status="timeout",
-            returncode=None,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
         )
     except OSError:
         return RootScriptResult(status="spawn_error", returncode=None, stdout=b"", stderr=b"")
 
-    stdout, stdout_truncated = _clip_root_output(completed.stdout)
-    stderr, stderr_truncated = _clip_root_output(completed.stderr)
-    if stdout_truncated or stderr_truncated:
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        return RootScriptResult(status="spawn_error", returncode=None, stdout=b"", stderr=b"")
+
+    stdout = bytearray()
+    stderr = bytearray()
+    stdout_truncated = [False]
+    stderr_truncated = [False]
+    stdout_thread = threading.Thread(
+        target=_drain_root_stream,
+        args=(process.stdout, stdout, stdout_truncated),
+        name="root-stdout-drain",
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_root_stream,
+        args=(process.stderr, stderr, stderr_truncated),
+        name="root-stderr-drain",
+    )
+    stdin_thread = threading.Thread(
+        target=_write_root_script_input,
+        args=(process.stdin, script),
+        name="root-stdin-write",
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    stdin_thread.start()
+
+    timed_out = False
+    returncode: int | None = None
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        process.wait()
+    finally:
+        stdin_thread.join()
+        stdout_thread.join()
+        stderr_thread.join()
+
+    result_stdout = bytes(stdout)
+    result_stderr = bytes(stderr)
+    if timed_out:
+        return RootScriptResult(
+            status="timeout",
+            returncode=None,
+            stdout=result_stdout,
+            stderr=result_stderr,
+            stdout_truncated=stdout_truncated[0],
+            stderr_truncated=stderr_truncated[0],
+        )
+    if stdout_truncated[0] or stderr_truncated[0]:
         return RootScriptResult(
             status="transport_error",
             returncode=None,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+            stdout=result_stdout,
+            stderr=result_stderr,
+            stdout_truncated=stdout_truncated[0],
+            stderr_truncated=stderr_truncated[0],
         )
     return RootScriptResult(
         status="completed",
-        returncode=completed.returncode,
-        stdout=stdout,
-        stderr=stderr,
+        returncode=returncode,
+        stdout=result_stdout,
+        stderr=result_stderr,
     )
 
 
