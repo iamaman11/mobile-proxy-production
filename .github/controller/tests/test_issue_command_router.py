@@ -76,12 +76,18 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert command_value["extension_rules"]["dispatch_workflow_must_be_read_only"] is True
     assert {item["id"] for item in routes if item["enabled"]} == {
         "observe-public-deployment-projection",
+        "verify-product-release",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
     }
     assert set(targets) == {"phone-production", "vm-production"}
     assert targets["phone-production"]["active"] is True
+    assert targets["phone-production"]["allowed_operations"] == [
+        "deploy-product-release",
+        "verify-product-release",
+    ]
     assert targets["vm-production"]["active"] is False
+    assert targets["vm-production"]["allowed_operations"] == ["deploy-product-release"]
     for route in routes:
         assert route["authority_policy"]
         assert route["target_capability_policy"]
@@ -101,6 +107,65 @@ def test_observer_route_is_exact_read_only_and_rerun_safe() -> None:
     assert route.arguments_json == "{}"
     refused("/observe-public-deployment-projection extra")
     refused(run_attempt=2)
+
+
+def test_release_verify_route_is_hosted_read_only_and_bounded() -> None:
+    route = accepted("/verify-release phone-production v0.1.7")
+    assert route.route_id == "verify-product-release"
+    assert route.handler == "dispatch_workflow"
+    assert route.workflow == ".github/workflows/product-release-admission-proof.yml"
+    assert route.ref == "main"
+    assert route.operation == "verify-product-release"
+    assert route.operation_class == "RELEASE_VERIFY"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.read_only is True and route.destructive is False
+    assert route.idempotency_policy == "single-run-attempt"
+    assert json.loads(route.arguments_json) == {
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused("/verify-release vm-production v0.1.7")
+    refused("/verify-release phone-production 0.1.7")
+    refused("/verify-release phone-production v0.1")
+    refused("/verify-release phone-production v0.1.7 extra")
+    refused("/verify-release phone-production v0.1.7;echo")
+    refused("/verify-release phone-production v0.1.7\n/deploy phone-production v0.1.7")
+    refused("/verify-release phone-production v0.1.7", run_attempt=2)
+
+    dispatcher = load_dispatcher()
+    workflow, ref, inputs = dispatcher.build_dispatch(
+        "verify-product-release",
+        '{"release":"v0.1.7","target":"phone-production"}',
+    )
+    assert workflow == "product-release-admission-proof.yml"
+    assert ref == "main"
+    assert inputs == {"release_tag": "v0.1.7", "target": "phone-production"}
+
+    source = (WORKFLOWS / "product-release-admission-proof.yml").read_text(encoding="utf-8")
+    for required in (
+        "workflow_dispatch:",
+        "runs-on: ubuntu-latest",
+        "from release_resolver import resolve_release",
+        "resolve_release(tag=release_tag, target=target)",
+        "PRODUCT_RELEASE_ADMISSION_ACCEPTED",
+        '"phone_access": False',
+        '"deployment_created": False',
+        '"deployment_intent_created": False',
+    ):
+        assert required in source
+    for forbidden in (
+        "environment:",
+        "secrets.",
+        "self-hosted",
+        "android-production",
+        "adb ",
+        "prepare_release_deployment",
+        "finalize_deployment_projection",
+        "release-deployment.yml",
+        "api.github.com/repos/iamaman11/mobile-proxy-production/deployments",
+    ):
+        assert forbidden not in source
 
 
 def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:

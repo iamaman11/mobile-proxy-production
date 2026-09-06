@@ -94,6 +94,7 @@ jobs:
           workflows = Path('.github/workflows')
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           deployment = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
+          admission = (workflows / 'product-release-admission-proof.yml').read_text(encoding='utf-8')
           registry_path = Path('.github/production/command-control-registry.json')
           targets_path = Path('.github/production/targets.json')
 
@@ -163,6 +164,7 @@ jobs:
           active = [item for item in routes if item.get('enabled') is True]
           if {item['id'] for item in active} != {
               'observe-public-deployment-projection',
+              'verify-product-release',
               'deploy-product-release',
               'runner-android-build-tools-bootstrap',
           }:
@@ -177,12 +179,65 @@ jobs:
               raise SystemExit('deployment idempotency drifted')
           if deploy.get('recovery_policy') != 'UNKNOWN-read-only-reconcile-no-blind-retry':
               raise SystemExit('deployment UNKNOWN recovery drifted')
+
+          verify = next((item for item in active if item.get('id') == 'verify-product-release'), None)
+          if verify is None:
+              raise SystemExit('Product Release admission route is missing')
+          if (
+              verify.get('handler') != 'dispatch_workflow'
+              or verify.get('operation_class') != 'RELEASE_VERIFY'
+              or verify.get('read_only') is not True
+              or verify.get('destructive') is not False
+              or verify.get('requires_phone') is not False
+              or verify.get('requires_vm') is not False
+              or verify.get('requires_release') is not True
+              or verify.get('physical_domains') != []
+              or verify.get('allowed_targets') != ['phone-production']
+          ):
+              raise SystemExit('Product Release admission route safety contract differs')
+
           if targets['phone-production'].get('active') is not True:
               raise SystemExit('phone target is not active')
           if targets['phone-production'].get('serialization_domain') != 'production-target-phone-production':
               raise SystemExit('phone target serialization drifted')
+          if targets['phone-production'].get('allowed_operations') != [
+              'deploy-product-release',
+              'verify-product-release',
+          ]:
+              raise SystemExit('phone target operation allowlist differs')
           if targets['vm-production'].get('active') is not False or targets['vm-production'].get('adapter') != 'deferred':
               raise SystemExit('VM target is not fail-closed/deferred')
+          if targets['vm-production'].get('allowed_operations') != ['deploy-product-release']:
+              raise SystemExit('VM target operation allowlist drifted')
+
+          required_admission = (
+              'workflow_dispatch:',
+              'runs-on: ubuntu-latest',
+              'from release_resolver import resolve_release',
+              'resolve_release(tag=release_tag, target=target)',
+              'PRODUCT_RELEASE_ADMISSION_ACCEPTED',
+              '"phone_access": False',
+              '"deployment_created": False',
+              '"deployment_intent_created": False',
+          )
+          missing = [item for item in required_admission if item not in admission]
+          if missing:
+              raise SystemExit('Product Release admission proof contract incomplete: ' + ', '.join(missing))
+          forbidden_admission = (
+              'environment:',
+              'secrets.',
+              'self-hosted',
+              'android-production',
+              ' adb ',
+              'prepare_release_deployment',
+              'finalize_deployment_projection',
+              'release-deployment.yml',
+              'deployments_url',
+              '/deploy ',
+          )
+          present = [item for item in forbidden_admission if item in admission]
+          if present:
+              raise SystemExit('Product Release admission proof gained forbidden capability: ' + ', '.join(present))
 
           for required in (
               'runs-on: [self-hosted, Linux, X64, android-production]',
@@ -243,6 +298,7 @@ jobs:
               raise SystemExit(f'composite adapter must contain exactly one APK destructive primitive; got {len(primitive_calls)}')
 
           print('SOLE_COMMAND_CONTROL_INGRESS_OK')
+          print('PRODUCT_RELEASE_ADMISSION_READ_ONLY_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
           print('VM_TARGET_DEFERRED_OK')
           PY

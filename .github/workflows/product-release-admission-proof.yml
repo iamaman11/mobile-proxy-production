@@ -1,0 +1,99 @@
+name: Product Release admission proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Allowlisted deployment target whose Product Release identity is verified read-only
+        required: true
+        type: string
+      release_tag:
+        description: Immutable Product Release semantic tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-release:
+    name: Verify immutable Product Release without deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact Controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve immutable Product Release read-only
+        env:
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          target = os.environ["TARGET"]
+          release_tag = os.environ["RELEASE_TAG"]
+          if target != "phone-production":
+              raise SystemExit("release admission proof target must be exactly phone-production")
+
+          controller = Path(".github/controller").resolve()
+          sys.path.insert(0, str(controller))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag=release_tag, target=target)
+          identity = admitted.identity
+          if identity.tag != release_tag or identity.immutable is not True:
+              raise SystemExit("admitted Product Release identity differs")
+          if identity.phone_runtime_artifact_name != f"mobile-proxy-phone-production-runtime-{release_tag}.tar.gz":
+              raise SystemExit("admitted phone runtime identity differs")
+          if admitted.android_package != "com.mobileproxy.app":
+              raise SystemExit("admitted Android package differs")
+
+          evidence = {
+              "schema": "product-release-admission-proof.v1",
+              "accepted": True,
+              "controller_revision": os.environ["GITHUB_SHA"],
+              "target": target,
+              "tag": identity.tag,
+              "release_id": identity.release_id,
+              "source_sha": identity.source_sha,
+              "artifact_name": identity.artifact_name,
+              "artifact_digest": identity.artifact_digest,
+              "phone_runtime_artifact_name": identity.phone_runtime_artifact_name,
+              "phone_runtime_artifact_digest": identity.phone_runtime_artifact_digest,
+              "phone_runtime_inventory_digest": identity.phone_runtime_inventory_digest,
+              "android_package": admitted.android_package,
+              "android_version_name": admitted.android_version_name,
+              "android_version_code": admitted.android_version_code,
+              "immutability_control": admitted.immutability_control,
+              "phone_access": False,
+              "deployment_created": False,
+              "deployment_intent_created": False,
+          }
+          evidence_path = Path(os.environ["RUNNER_TEMP"]) / "product-release-admission-proof.json"
+          evidence_path.write_text(json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Product Release admission proof\n")
+              summary.write(f"- Accepted: true\n")
+              summary.write(f"- Target: {target}\n")
+              summary.write(f"- Release tag: {identity.tag}\n")
+              summary.write(f"- Release id: {identity.release_id}\n")
+              summary.write(f"- Source SHA: {identity.source_sha}\n")
+              summary.write(f"- Product artifact: {identity.artifact_name}\n")
+              summary.write(f"- Phone runtime artifact: {identity.phone_runtime_artifact_name}\n")
+              summary.write("- GitHub Deployment created: false\n")
+              summary.write("- Phone access performed: false\n")
+          print(
+              "PRODUCT_RELEASE_ADMISSION_ACCEPTED "
+              f"target={target} tag={identity.tag} release_id={identity.release_id} source_sha={identity.source_sha}"
+          )
+          PY

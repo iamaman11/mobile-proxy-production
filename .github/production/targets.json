@@ -5,7 +5,8 @@
       "active": true,
       "adapter": "android-target-v2",
       "allowed_operations": [
-        "deploy-product-release"
+        "deploy-product-release",
+        "verify-product-release"
       ],
       "physical_domains": [
         "android-package",
