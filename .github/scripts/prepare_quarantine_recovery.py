@@ -7,11 +7,12 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Mapping
 
 CONTROLLER = Path(__file__).resolve().parents[1] / "controller"
 sys.path.insert(0, str(CONTROLLER))
 
-from durable_release_identity import payload_matches_release_identity  # noqa: E402
+from durable_release_identity import durable_release_identity, payload_matches_release_identity  # noqa: E402
 from evidence_store import EvidenceError, IssueEvidenceStore  # noqa: E402
 from quarantine_recovery import (  # noqa: E402
     QUARANTINED_INTENT_REF,
@@ -29,6 +30,13 @@ from terminal_result import TerminalContractError, validate_terminal  # noqa: E4
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _EXECUTION = re.compile(r"gh-run:[1-9][0-9]*:[1-9][0-9]*")
+_TERMINAL_TOP_LEVEL_RELEASE_FIELDS = (
+    "target",
+    "product_release",
+    "release_id",
+    "release_source_sha",
+    "artifact_digest",
+)
 
 
 def _output(name: str, value: object) -> None:
@@ -40,6 +48,30 @@ def _output(name: str, value: object) -> None:
         raise QuarantineRecoveryError("workflow output must be one line")
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(f"{name}={text}\n")
+
+
+def _terminal_matches_release_identity(payload: Mapping[str, object], identity: object) -> bool:
+    """Bind a v2 terminal to the immutable Release without inventing terminal fields.
+
+    The deployment terminal owns the base Release identity at top level. The
+    complete phone-runtime durable identity is preserved in the terminal's
+    release_admission fact, so both locations must independently agree with the
+    current immutable Product Release.
+    """
+    expected = durable_release_identity(identity, target=RECOVERY_TARGET)
+    if any(payload.get(field) != expected[field] for field in _TERMINAL_TOP_LEVEL_RELEASE_FIELDS):
+        return False
+    facts = payload.get("facts")
+    if not isinstance(facts, Mapping):
+        return False
+    release_admission = facts.get("release_admission")
+    if not isinstance(release_admission, Mapping):
+        return False
+    return payload_matches_release_identity(
+        release_admission,
+        identity,
+        target=RECOVERY_TARGET,
+    )
 
 
 def main() -> int:
@@ -90,7 +122,7 @@ def main() -> int:
     admitted = resolve_release(tag=RECOVERY_RELEASE, target=RECOVERY_TARGET)
     if not payload_matches_release_identity(original_intent.payload, admitted.identity, target=RECOVERY_TARGET):
         raise QuarantineRecoveryError("quarantined deployment intent conflicts with current immutable Release identity")
-    if not payload_matches_release_identity(original_terminal.payload, admitted.identity, target=RECOVERY_TARGET):
+    if not _terminal_matches_release_identity(original_terminal.payload, admitted.identity):
         raise QuarantineRecoveryError("quarantined deployment terminal conflicts with current immutable Release identity")
 
     semantic_id = recovery_semantic_id(

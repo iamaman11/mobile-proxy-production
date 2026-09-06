@@ -9,6 +9,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from durable_release_identity import durable_release_identity  # noqa: E402
 from quarantine_recovery import (  # noqa: E402
     QUARANTINED_INTENT_REF,
     QUARANTINED_REQUEST_ID,
@@ -30,6 +31,12 @@ spec = importlib.util.spec_from_file_location("run_quarantine_recovery", SCRIPT)
 recovery_runner = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(recovery_runner)
+
+PREPARE_SCRIPT = ROOT.parent / "scripts" / "prepare_quarantine_recovery.py"
+prepare_spec = importlib.util.spec_from_file_location("prepare_quarantine_recovery", PREPARE_SCRIPT)
+prepare_recovery = importlib.util.module_from_spec(prepare_spec)
+assert prepare_spec.loader is not None
+prepare_spec.loader.exec_module(prepare_recovery)
 
 
 def expect_error(fn) -> None:
@@ -124,6 +131,36 @@ def test_terminal_contract_distinguishes_pre_and_post_intent_states() -> None:
     validate_recovery_terminal(unknown)
     bad = dict(accepted, state="UNKNOWN", mutation_performed=False, postcondition_verified=False)
     expect_error(lambda: validate_recovery_terminal(bad))
+
+
+def test_quarantined_terminal_identity_uses_schema_owned_runtime_fact() -> None:
+    identity = SimpleNamespace(
+        tag=RECOVERY_RELEASE,
+        release_id=RECOVERY_RELEASE_ID,
+        source_sha="a" * 40,
+        artifact_digest="b3:" + "b" * 64,
+        phone_runtime_artifact_name=f"mobile-proxy-phone-production-runtime-{RECOVERY_RELEASE}.tar.gz",
+        phone_runtime_artifact_digest="b3:" + "c" * 64,
+        phone_runtime_inventory_path="phone-production-runtime/components.json",
+        phone_runtime_inventory_digest="b3:" + "d" * 64,
+    )
+    durable = durable_release_identity(identity, target=RECOVERY_TARGET)
+    terminal = {
+        key: durable[key]
+        for key in ("target", "product_release", "release_id", "release_source_sha", "artifact_digest")
+    }
+    terminal["facts"] = {"release_admission": dict(durable)}
+    assert prepare_recovery._terminal_matches_release_identity(terminal, identity) is True
+
+    runtime_mismatch = dict(durable)
+    runtime_mismatch["phone_runtime_artifact_digest"] = "b3:" + "e" * 64
+    broken_runtime = dict(terminal)
+    broken_runtime["facts"] = {"release_admission": runtime_mismatch}
+    assert prepare_recovery._terminal_matches_release_identity(broken_runtime, identity) is False
+
+    broken_source = dict(terminal)
+    broken_source["release_source_sha"] = "f" * 40
+    assert prepare_recovery._terminal_matches_release_identity(broken_source, identity) is False
 
 
 def _fake_root_result(stdout: bytes):
