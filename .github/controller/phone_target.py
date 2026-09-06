@@ -44,19 +44,43 @@ def _adb() -> str:
     return value
 
 
-def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], *, timeout: int, input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+        return subprocess.run(
+            command,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PhoneTargetUnavailable("phone target transport unavailable") from exc
 
 
-def _read(serial: str, arguments: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+def _read(
+    serial: str,
+    arguments: list[str],
+    *,
+    timeout: int = 30,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     adb = _adb()
     state = _run([adb, "-s", serial, "get-state"], timeout=15)
     if state.returncode != 0 or state.stdout.strip() != "device":
         raise PhoneTargetUnavailable("registered phone target is not in device state")
-    return _run([adb, "-s", serial, *arguments], timeout=timeout)
+    return _run([adb, "-s", serial, *arguments], timeout=timeout, input_text=input_text)
+
+
+def _run_root_script(serial: str, script: str, *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    return _read(
+        serial,
+        ["shell", "su", "0", "sh", "-s"],
+        timeout=timeout,
+        input_text=script,
+    )
 
 
 def _safe_release_id(value: str) -> str:
@@ -88,16 +112,13 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
     root_capability = _read(serial, ["shell", "su", "0", "sh", "-c", "true"])
     if root_capability.returncode != 0:
         raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
-    probe = _read(
+    probe = _run_root_script(
         serial,
-        [
-            "shell", "su", "0", "sh", "-c",
-            (
-                f"if [ -e '{target}' ] || [ -L '{target}' ]; then echo target=present; else echo target=absent; fi; "
-                f"if [ -L '{_ROOT}/current' ]; then printf 'current='; readlink '{_ROOT}/current'; "
-                "elif [ -e '" + _ROOT + "/current' ]; then echo current=invalid; else echo current=absent; fi"
-            ),
-        ],
+        (
+            f"if [ -e '{target}' ] || [ -L '{target}' ]; then echo target=present; else echo target=absent; fi; "
+            f"if [ -L '{_ROOT}/current' ]; then printf 'current='; readlink '{_ROOT}/current'; "
+            "elif [ -e '" + _ROOT + "/current' ]; then echo current=invalid; else echo current=absent; fi"
+        ),
     )
     if probe.returncode != 0:
         raise PhoneTargetUnavailable(_ROOT_LAYOUT_OBSERVATION_FAILED)
@@ -161,7 +182,7 @@ cp -pR "$STAGE/." "$TARGET/"
 find "$TARGET" -type f -exec chmod 0600 {{}} +
 chmod 0700 "$TARGET/service.sh" "$TARGET/bin/runtime-supervisor" "$TARGET/bin/host-daemon" "$TARGET/bin/sing-box"
 """
-    result = _read(serial, ["shell", "su", "0", "sh", "-c", script], timeout=180)
+    result = _run_root_script(serial, script, timeout=180)
     if result.returncode != 0:
         raise PhoneTargetUnavailable("rooted runtime inactive release materialization failed")
     for relative, _local, expected in files:
@@ -218,7 +239,7 @@ MOBILE_PROXY_BOOT
 chmod 0700 "$BOOT"
 sh "$ROOT/current/service.sh"
 """
-    result = _read(serial, ["shell", "su", "0", "sh", "-c", script], timeout=150)
+    result = _run_root_script(serial, script, timeout=150)
     if result.returncode != 0:
         raise PhoneTargetUnavailable("rooted runtime atomic activation/start failed")
 
