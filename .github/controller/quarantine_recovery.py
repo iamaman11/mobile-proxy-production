@@ -19,6 +19,12 @@ QUARANTINED_INTENT_REF = "issue-comment:5562280938"
 QUARANTINED_TERMINAL_REF = "issue-comment:5562289272"
 RECOVERY_PARENT_INTENT_REF = "issue-comment:5562604412"
 RECOVERY_PARENT_TERMINAL_REF = "issue-comment:5562605748"
+RECOVERY_UNKNOWN_INTENT_REF = "issue-comment:5562924241"
+RECOVERY_UNKNOWN_TERMINAL_REF = "issue-comment:5562925687"
+_ALLOWED_PARENT_RECOVERY_TERMINAL_REFS = frozenset({
+    RECOVERY_PARENT_TERMINAL_REF,
+    RECOVERY_UNKNOWN_TERMINAL_REF,
+})
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _RECOVERY_ID = re.compile(r"recovery-sha256:[0-9a-f]{64}")
@@ -39,7 +45,7 @@ def recovery_semantic_id(
 ) -> str:
     if target != RECOVERY_TARGET or release != RECOVERY_RELEASE or quarantined_request_id != QUARANTINED_REQUEST_ID:
         raise QuarantineRecoveryError("recovery identity differs from authorized quarantined v0.1.7 state")
-    if parent_recovery_terminal_ref is not None and parent_recovery_terminal_ref != RECOVERY_PARENT_TERMINAL_REF:
+    if parent_recovery_terminal_ref is not None and parent_recovery_terminal_ref not in _ALLOWED_PARENT_RECOVERY_TERMINAL_REFS:
         raise QuarantineRecoveryError("recovery parent terminal differs from the bounded Stage 3 continuation")
     identity: dict[str, object] = {
         "schema": RECOVERY_SCHEMA,
