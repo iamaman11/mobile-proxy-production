@@ -1,14 +1,14 @@
 # mobile-proxy-production
 
-Private production deployment/controller repository for `iamaman11/mobile-proxy`.
+Production deployment/controller repository for `iamaman11/mobile-proxy`.
 
 ## Repository boundary
 
 `iamaman11/mobile-proxy` is the **product repository**. It owns application source, product runtime logic, product Quality, build, Git tags, GitHub Releases, release manifests/provenance and product documentation.
 
-`iamaman11/mobile-proxy-production` is the **deployment controller**. It owns:
+`iamaman11/mobile-proxy-production` is the **deployment controller**. Its source/policy repository is public; confidentiality attaches to secrets, private target bindings, raw target identifiers, credentials and sensitive runtime values rather than repository visibility. The controller owns:
 
-- private Issue #1 production command surface;
+- Issue #1 production command surface and bounded canonical deployment evidence;
 - deployment State Machine and Transaction Kernel;
 - deployment operation contracts;
 - observers and Android target adapter (VM adapter only after Android proof);
@@ -19,7 +19,7 @@ Private production deployment/controller repository for `iamaman11/mobile-proxy`
 - automatic result classification;
 - safe GitHub Deployment projection into the public product repository.
 
-This repository must not copy or independently develop product source. The product/controller boundary is normative in `docs/adr/0001-product-release-deployment-controller-boundary.md`.
+This repository must not copy or independently develop product source. The current cross-repository authority boundary is normative in PRODUCT `docs/operations/project-authority.md` and its v2 machine contracts. `docs/adr/0001-product-release-deployment-controller-boundary.md` records the accepted ownership decision but does not override newer PRODUCT v2 authority.
 
 ## Production input
 
@@ -29,20 +29,28 @@ Production never deploys "current public main". A deployment selects one exact p
 /deploy phone-production vX.Y.Z
 ```
 
+A distinct explicit retry command exists only for a previously proven pre-mutation phone refusal:
+
+```text
+/retry-deploy phone-production vX.Y.Z <prior-semantic-request-id>
+```
+
+The retry command is not a generic workflow replay. It is admitted only when trusted durable Issue #1 history proves exactly one matching prior `REFUSED` terminal with `mutation_performed=false`, `recovery_required=false`, and no durable mutation intent. The new request receives its own semantic request id bound to the prior semantic request id. `UNKNOWN`, `RECOVERED`, `QUARANTINED`, mutation-bearing, intent-bearing, mismatched or malformed prior history is not eligible, and retry is never automatic.
+
 The controller resolves and verifies the exact Release tag, source commit, target artifact, SHA-256 digest, release manifest and provenance before target access. `latest` is not deployment authority.
 
 Runtime version identity is deliberately split:
 
 ```text
 product_release      = tag + release_id + source_sha + artifact_digest + provenance
-controller_revision  = exact private repository SHA
+controller_revision  = exact controller repository SHA
 ```
 
 A new product commit therefore does not make the physical target stale by itself.
 
 ## Deployment State Machine
 
-The private controller owns the deployment State Machine:
+The controller owns the deployment State Machine:
 
 ```text
 REQUEST
@@ -69,7 +77,7 @@ Core guarantees:
 
 ## Canonical execution truth
 
-Private durable terminal evidence is the execution truth. Each v2 deployment terminal is machine-readable and records the operation, semantic request ID, execution ID, controller revision, target, product Release identity, public Deployment ID, state/current step, facts, blocking predicates, mutation/postcondition/recovery fields, next allowed operation and evidence references.
+Controller durable terminal evidence is the execution truth. Each v2 deployment terminal is machine-readable and records the operation, semantic request ID, execution ID, controller revision, target, product Release identity, public Deployment ID, state/current step, facts, blocking predicates, mutation/postcondition/recovery fields, next allowed operation and evidence references.
 
 Historical v1 Issue #1 terminals, including prior UNKNOWN/recovery evidence, are immutable historical records. The v2 controller uses separate evidence headings/schema and does not reinterpret or rewrite them.
 
@@ -94,15 +102,18 @@ The projection credential must be separate from product-source credentials and l
 
 ## Current command surface
 
-Issue #1 has one production ingress for v2 deployment:
+Issue #1 has one production ingress for v2 deployment. Its destructive deployment handler accepts exactly these bounded forms:
 
 ```text
 /deploy <target> <vX.Y.Z>
+/retry-deploy phone-production <vX.Y.Z> <prior-semantic-request-id>
 ```
+
+Ordinary `/deploy` keeps its existing semantic identity. The explicit retry form is a new lineage-bound request and is restricted to the proven pre-mutation `REFUSED` case described above.
 
 For now only `phone-production` can proceed beyond authorization. `vm-production` fails closed before Release projection or target access until the Android path has been proved end-to-end and a small reusable VM adapter is intentionally added.
 
-Normal execution is automatic after one Issue #1 command: immediate ACK → Release admission → public Deployment queued/in-progress → target lock → observation → durable intent → at-most-one dispatch → independent verification → optional read-only UNKNOWN recovery → private canonical terminal → public terminal status.
+Normal execution is automatic after one admitted Issue #1 command: immediate ACK → Release admission → public Deployment queued/in-progress → target lock → observation → durable intent → at-most-one dispatch → independent verification → optional read-only UNKNOWN recovery → controller canonical terminal → public terminal status.
 
 Development Issue `iamaman11/mobile-proxy#179` is an architecture/migration/audit tracker only. It is not a runtime cursor and is not part of v2 semantic request identity.
 
