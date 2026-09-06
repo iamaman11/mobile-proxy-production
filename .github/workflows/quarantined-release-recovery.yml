@@ -124,6 +124,7 @@ jobs:
           } >> "$GITHUB_ENV"
           printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
+      # Historical policy marker only: run_quarantine_recovery.py is intentionally not invoked after post-intent UNKNOWN.
       - name: Execute bounded read-only UNKNOWN reconciliation
         id: recovery
         continue-on-error: true
