@@ -369,13 +369,13 @@ for proc in /proc/[0-9]*; do
   [ -r "$proc/exe" ] || continue
   exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
   case "$exe" in "$ROOT"/releases/*/bin/runtime-supervisor|"$ROOT"/releases/*/bin/host-daemon|"$ROOT"/releases/*/bin/sing-box)
-    kill -TERM "${{proc#/proc/}}" 2>/dev/null || true
+    kill -TERM "${proc#/proc/}" 2>/dev/null || true
     ;;
   esac
 done
 rm -f "$CURRENT_TMP"
 ln -s "$TARGET" "$CURRENT_TMP"
-mv -f "$CURRENT_TMP" "$ROOT/current"
+mv -Tf "$CURRENT_TMP" "$ROOT/current"
 cat > "$BOOT" <<'MOBILE_PROXY_BOOT'
 #!/system/bin/sh
 set -eu
