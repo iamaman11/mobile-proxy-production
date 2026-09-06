@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   validate-stage3-quarantine-recovery:
-    name: Validate exact quarantined v0.1.7 activation-only recovery
+    name: Validate exact Stage 3 recovery and UNKNOWN reconciliation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,7 +19,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prove recovery ledger, route and activation-only boundary
+      - name: Prove recovery lineage and read-only UNKNOWN reconciliation boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -34,7 +34,8 @@ jobs:
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/quarantined-release-recovery.yml').read_text(encoding='utf-8')
           prepare = Path('.github/scripts/prepare_quarantine_recovery.py').read_text(encoding='utf-8')
-          runner = Path('.github/scripts/run_quarantine_recovery.py').read_text(encoding='utf-8')
+          activation_runner = Path('.github/scripts/run_quarantine_recovery.py').read_text(encoding='utf-8')
+          reconcile = Path('.github/scripts/reconcile_quarantine_unknown.py').read_text(encoding='utf-8')
           ledger = Path('.github/controller/quarantine_recovery.py').read_text(encoding='utf-8')
 
           routes = [r for r in registry['routes'] if r['id'] == 'recover-quarantined-product-release']
@@ -42,9 +43,9 @@ jobs:
               raise SystemExit('exact quarantine recovery route is missing or duplicated')
           route = routes[0]
           if route['operation_class'] != 'RECOVER' or not route['destructive'] or route['read_only']:
-              raise SystemExit('quarantine recovery safety classification differs')
+              raise SystemExit('quarantine recovery route classification differs')
           if route['concurrency_domain'] != 'target-global-mutation':
-              raise SystemExit('quarantine recovery lacks target-global mutation serialization')
+              raise SystemExit('quarantine recovery lacks target-global serialization')
           if route['authority_policy'] != 'private-issue1-owner+controller-main-exact+exact-quarantined-v017+exact-prior-recovery-terminal':
               raise SystemExit('quarantine continuation authority policy differs')
           if route['semantic_identity_policy'] != 'quarantined-deployment-terminal+prior-recovery-terminal+command-arguments':
@@ -59,25 +60,53 @@ jobs:
               raise SystemExit('phone target does not explicitly admit quarantine recovery operation')
           if 'recover-quarantined-v017' not in router or 'quarantined-release-recovery.yml' not in router:
               raise SystemExit('sole Issue #1 router does not own recovery invocation')
-          if 'production-target-phone-production' not in workflow:
-              raise SystemExit('recovery does not share the phone target serialization domain')
-          if 'recovery_parent_terminal_ref' not in workflow or '--recovery-parent-terminal-ref' not in workflow:
-              raise SystemExit('hosted recovery parent is not carried into target execution')
-          if 'continue-on-error: true' not in workflow or 'STAGE3_QUARANTINE_RECOVERY_ACCEPTED' not in workflow:
-              raise SystemExit('recovery terminal enforcement is incomplete')
+
           for required in (
-              'QUARANTINED_TERMINAL_REF', 'RECOVERY_PARENT_INTENT_REF', 'RECOVERY_PARENT_TERMINAL_REF',
-              'RECOVERY_INTENT_HEADING', 'RECOVERY_TERMINAL_HEADING', 'parent_recovery_terminal_ref',
-              'blind_retry_allowed', '_validated_parent_recovery', '_root_runtime_observation', '_activate(',
+              'RECOVERY_PARENT_INTENT_REF', 'RECOVERY_PARENT_TERMINAL_REF',
+              'RECOVERY_UNKNOWN_INTENT_REF', 'RECOVERY_UNKNOWN_TERMINAL_REF',
+              'parent_recovery_terminal_ref', 'recovery_semantic_id',
           ):
-              if required not in prepare + runner + ledger:
-                  raise SystemExit('recovery continuation contract missing ' + required)
+              if required not in prepare + reconcile + ledger:
+                  raise SystemExit('bounded recovery lineage missing ' + required)
+          if '_validate_recovery_lineage' not in prepare:
+              raise SystemExit('hosted gate does not validate the full exact recovery lineage')
+          if 'reconcile_unknown_read_only' not in prepare + workflow:
+              raise SystemExit('UNKNOWN reconciliation mode is not explicit')
+          if 'issue-comment:5562925687' not in workflow or 'reconcile_quarantine_unknown.py' not in workflow:
+              raise SystemExit('workflow is not bound to exact UNKNOWN parent and reconciliation runner')
+          if 'run_quarantine_recovery.py' in workflow:
+              raise SystemExit('current UNKNOWN workflow still exposes activation runner')
+          if 'production-target-phone-production' not in workflow:
+              raise SystemExit('UNKNOWN reconciliation does not share target-global lock')
+          if 'continue-on-error: true' not in workflow or 'STAGE3_QUARANTINE_RECOVERY_ACCEPTED' not in workflow:
+              raise SystemExit('reconciliation terminal enforcement is incomplete')
+          if "value.get('recovery_intent_ref') is not None" not in workflow or "value.get('mutation_performed') is not False" not in workflow:
+              raise SystemExit('workflow does not enforce read-only reconciliation terminal')
+
+          for forbidden in (
+              '_activate(', 'dispatch_release_once(', 'dispatch_install_once(',
+              '_stage_runtime(', '_materialize_inactive(', 'adb install', 'pm install',
+              'mkdir ', 'cp ', 'rm ', 'mv ', 'ln ', 'kill ', 'chmod ',
+          ):
+              if forbidden in reconcile:
+                  raise SystemExit('UNKNOWN reconciliation exposes mutation primitive: ' + forbidden)
+          if 'evidence.create(RECOVERY_INTENT_HEADING' in reconcile:
+              raise SystemExit('UNKNOWN reconciliation can create a mutation intent')
+          for required in (
+              '_root_runtime_observation', 'readlink', 'sha256sum',
+              'mutation_performed": False', 'recovery_intent_ref": None',
+              '_READ_ATTEMPTS = 3',
+          ):
+              if required not in reconcile:
+                  raise SystemExit('UNKNOWN reconciliation read-only proof missing ' + required)
+
           for forbidden in (
               'dispatch_release_once(', 'dispatch_install_once(', '_stage_runtime(', '_materialize_inactive(',
           ):
-              if forbidden in runner:
-                  raise SystemExit('recovery can reach forbidden deploy/restage primitive: ' + forbidden)
-          if 'recovery intent already exists without terminal; activation will not be repeated' not in runner:
-              raise SystemExit('post-intent duplicate recovery is not fail-closed')
+              if forbidden in activation_runner:
+                  raise SystemExit('historical activation runner can reach forbidden deploy/restage primitive: ' + forbidden)
+          if 'recovery intent already exists without terminal; activation will not be repeated' not in activation_runner:
+              raise SystemExit('historical activation runner lost post-intent duplicate hard-stop')
+
           print('STAGE3_QUARANTINE_RECOVERY_POLICY_OK')
           PY
