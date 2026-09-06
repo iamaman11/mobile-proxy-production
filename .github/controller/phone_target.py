@@ -16,10 +16,22 @@ _SAFE_REMOTE = re.compile(r"[A-Za-z0-9_./-]+")
 _ROOT_CAPABILITY_UNAVAILABLE = "rooted runtime capability unavailable"
 _ROOT_LAYOUT_OBSERVATION_FAILED = "rooted runtime layout observation failed"
 _ROOT_LAYOUT_OBSERVATION_MALFORMED = "rooted runtime state observation is malformed"
+_MAX_ROOT_SCRIPT_BYTES = 16 * 1024
+_MAX_ROOT_OUTPUT_BYTES = 4 * 1024
 
 
 class PhoneTargetUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RootScriptResult:
+    status: str
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,14 @@ def _run(
         raise PhoneTargetUnavailable("phone target transport unavailable") from exc
 
 
+def _require_device(serial: str) -> str:
+    adb = _adb()
+    state = _run([adb, "-s", serial, "get-state"], timeout=15)
+    if state.returncode != 0 or state.stdout.strip() != "device":
+        raise PhoneTargetUnavailable("registered phone target is not in device state")
+    return adb
+
+
 def _read(
     serial: str,
     arguments: list[str],
@@ -67,20 +87,96 @@ def _read(
     timeout: int = 30,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    adb = _adb()
-    state = _run([adb, "-s", serial, "get-state"], timeout=15)
-    if state.returncode != 0 or state.stdout.strip() != "device":
-        raise PhoneTargetUnavailable("registered phone target is not in device state")
+    adb = _require_device(serial)
     return _run([adb, "-s", serial, *arguments], timeout=timeout, input_text=input_text)
 
 
-def _run_root_script(serial: str, script: str, *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    return _read(
-        serial,
-        ["shell", "su", "0", "sh", "-s"],
-        timeout=timeout,
-        input_text=script,
+def _clip_root_output(value: bytes | None) -> tuple[bytes, bool]:
+    raw = value or b""
+    if len(raw) <= _MAX_ROOT_OUTPUT_BYTES:
+        return raw, False
+    return raw[:_MAX_ROOT_OUTPUT_BYTES], True
+
+
+def _run_root_script(serial: str, script: bytes, *, timeout: int = 30) -> RootScriptResult:
+    if not isinstance(script, bytes) or not script or len(script) > _MAX_ROOT_SCRIPT_BYTES:
+        raise PhoneTargetUnavailable("rooted runtime script is invalid")
+    adb = _require_device(serial)
+    command = [adb, "-s", serial, "shell", "-T", "su", "0"]
+    try:
+        completed = subprocess.run(
+            command,
+            input=script,
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout, stdout_truncated = _clip_root_output(exc.stdout)
+        stderr, stderr_truncated = _clip_root_output(exc.stderr)
+        return RootScriptResult(
+            status="timeout",
+            returncode=None,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+        )
+    except OSError:
+        return RootScriptResult(status="spawn_error", returncode=None, stdout=b"", stderr=b"")
+
+    stdout, stdout_truncated = _clip_root_output(completed.stdout)
+    stderr, stderr_truncated = _clip_root_output(completed.stderr)
+    if stdout_truncated or stderr_truncated:
+        return RootScriptResult(
+            status="transport_error",
+            returncode=None,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+        )
+    return RootScriptResult(
+        status="completed",
+        returncode=completed.returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
+
+
+def _probe_root_capability(serial: str) -> None:
+    success = _run_root_script(
+        serial,
+        (
+            b"set -eu\n"
+            b"[ \"$(id -u)\" = \"0\" ]\n"
+            b"printf 'root=0\\n'\n"
+            b"if [ 1 -eq 1 ]; then printf 'grammar=ok\\n'; fi\n"
+            b"command -v readlink >/dev/null\n"
+            b"command -v test >/dev/null\n"
+            b"printf 'tools=ok\\n'\n"
+        ),
+    )
+    if (
+        success.status != "completed"
+        or success.returncode != 0
+        or success.stdout != b"root=0\ngrammar=ok\ntools=ok\n"
+        or success.stderr != b""
+    ):
+        raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
+
+    nonzero = _run_root_script(
+        serial,
+        b"printf 'stderr=ok\\n' >&2\nexit 23\n",
+    )
+    if (
+        nonzero.status != "completed"
+        or nonzero.returncode != 23
+        or nonzero.stdout != b""
+        or nonzero.stderr != b"stderr=ok\n"
+    ):
+        raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
 
 
 def _safe_release_id(value: str) -> str:
@@ -109,21 +205,23 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
     release_id = _safe_release_id(release_id)
     files = _files(release_root, required_paths)
     target = f"{_ROOT}/releases/{release_id}"
-    root_capability = _read(serial, ["shell", "su", "0", "sh", "-c", "true"])
-    if root_capability.returncode != 0:
-        raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
+    _probe_root_capability(serial)
     probe = _run_root_script(
         serial,
         (
             f"if [ -e '{target}' ] || [ -L '{target}' ]; then echo target=present; else echo target=absent; fi; "
             f"if [ -L '{_ROOT}/current' ]; then printf 'current='; readlink '{_ROOT}/current'; "
             "elif [ -e '" + _ROOT + "/current' ]; then echo current=invalid; else echo current=absent; fi"
-        ),
+        ).encode(),
     )
-    if probe.returncode != 0:
+    if probe.status != "completed" or probe.returncode != 0:
         raise PhoneTargetUnavailable(_ROOT_LAYOUT_OBSERVATION_FAILED)
+    try:
+        output = probe.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PhoneTargetUnavailable(_ROOT_LAYOUT_OBSERVATION_MALFORMED) from exc
     values: dict[str, str] = {}
-    for line in probe.stdout.splitlines():
+    for line in output.splitlines():
         key, sep, value = line.strip().partition("=")
         if sep and key in {"target", "current"} and key not in values:
             values[key] = value
@@ -181,9 +279,9 @@ mkdir "$TARGET"
 cp -pR "$STAGE/." "$TARGET/"
 find "$TARGET" -type f -exec chmod 0600 {{}} +
 chmod 0700 "$TARGET/service.sh" "$TARGET/bin/runtime-supervisor" "$TARGET/bin/host-daemon" "$TARGET/bin/sing-box"
-"""
+""".encode()
     result = _run_root_script(serial, script, timeout=180)
-    if result.returncode != 0:
+    if result.status != "completed" or result.returncode != 0:
         raise PhoneTargetUnavailable("rooted runtime inactive release materialization failed")
     for relative, _local, expected in files:
         result = _read(serial, ["shell", "sha256sum", f"{target}/{relative}"])
@@ -205,7 +303,7 @@ BOOT='{_BOOT_HOOK}'
 if [ -f "$ROOT/logs/runtime-watchdog.pid" ]; then
   pid="$(cat "$ROOT/logs/runtime-watchdog.pid" 2>/dev/null || true)"
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
-    cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline")"
+    cmd="$(tr '\\000' ' ' < "/proc/$pid/cmdline")"
     case "$cmd" in *"$ROOT/logs/runtime-watchdog.sh"*"$ROOT/current"*) kill -TERM "$pid" 2>/dev/null || true ;; esac
   fi
 fi
@@ -238,9 +336,9 @@ exit 1
 MOBILE_PROXY_BOOT
 chmod 0700 "$BOOT"
 sh "$ROOT/current/service.sh"
-"""
+""".encode()
     result = _run_root_script(serial, script, timeout=150)
-    if result.returncode != 0:
+    if result.status != "completed" or result.returncode != 0:
         raise PhoneTargetUnavailable("rooted runtime atomic activation/start failed")
 
 
