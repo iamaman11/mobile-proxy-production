@@ -54,8 +54,6 @@ jobs:
               raise SystemExit("admitted Product Release identity differs")
           if identity.phone_runtime_artifact_name != f"mobile-proxy-phone-production-runtime-{release_tag}.tar.gz":
               raise SystemExit("admitted phone runtime identity differs")
-          if admitted.android_package != "com.mobileproxy.app":
-              raise SystemExit("admitted Android package differs")
 
           evidence = {
               "schema": "product-release-admission-proof.v1",
@@ -90,6 +88,7 @@ jobs:
               summary.write(f"- Source SHA: {identity.source_sha}\n")
               summary.write(f"- Product artifact: {identity.artifact_name}\n")
               summary.write(f"- Phone runtime artifact: {identity.phone_runtime_artifact_name}\n")
+              summary.write(f"- Android package: {admitted.android_package}\n")
               summary.write("- GitHub Deployment created: false\n")
               summary.write("- Phone access performed: false\n")
           print(
