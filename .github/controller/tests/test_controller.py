@@ -125,12 +125,12 @@ def test_retry_command_is_exactly_one_existing_destructive_route() -> None:
         raise AssertionError(f"invalid retry command reached deployment route: {command}")
 
 
-def _refused_terminal(prior: str, *, target: str = "phone-production", release: str = "v0.1.7", mutation: bool = False, recovery: bool = False, state: str = REFUSED) -> dict[str, object]:
+def _refused_terminal(prior: str, *, target: str = "phone-production", release: str = "v0.1.7", mutation: bool = False, recovery: bool = False, state: str = REFUSED, deployment_id: int | None = 2) -> dict[str, object]:
     terminal = DeploymentTerminal(
         operation="deploy-product-release", semantic_request_id=prior,
         execution_id="gh-run:123:1", controller_revision="a" * 40, target=target,
         product_release=release, release_id=1, release_source_sha="b" * 40,
-        artifact_digest="b3:" + "c" * 64, deployment_id=2, state=state, current_step="OBSERVE",
+        artifact_digest="b3:" + "c" * 64, deployment_id=deployment_id, state=state, current_step="OBSERVE",
         blocking_predicates=("bounded_test_refusal",), mutation_performed=mutation,
         postcondition_verified=False, recovery_required=recovery,
         next_allowed_operation="fix_blocking_predicates_then_reissue",
@@ -185,9 +185,88 @@ def test_refused_retry_lineage_admission_is_pre_release_and_fail_closed() -> Non
     source = (GITHUB_DIR / "scripts" / "prepare_release_deployment.py").read_text(encoding="utf-8")
     lineage = source.index("_retry_lineage_terminal(evidence, request)")
     release = source.index("admitted = resolve_release(")
+    projection_lineage = source.index("_retry_projection_deployment_id(", release)
     projection = source.index("projection = PublicDeploymentProjection(")
     retry_projection = source.index("retry_authorized=retry_terminal is not None", projection)
-    assert lineage < release < projection < retry_projection
+    assert lineage < release < projection_lineage < projection < retry_projection
+
+
+def _test_release_identity():
+    return SimpleNamespace(
+        tag="v0.1.7",
+        release_id=1,
+        source_sha="b" * 40,
+        artifact_digest="b3:" + "c" * 64,
+    )
+
+
+def test_retry_projection_lineage_recovers_safe_ancestor_when_immediate_terminal_has_no_deployment_id() -> None:
+    prepare = _load_script("controller_test_retry_projection_lineage", GITHUB_DIR / "scripts" / "prepare_release_deployment.py")
+    immediate_id = "req-sha256:" + "5" * 64
+    ancestor_id = "req-sha256:" + "4" * 64
+    immediate = EvidenceRecord(20, TERMINAL_HEADING, _refused_terminal(immediate_id, deployment_id=None))
+    ancestor = EvidenceRecord(21, TERMINAL_HEADING, _refused_terminal(ancestor_id, deployment_id=2))
+    evidence = _FakeEvidence(terminals=[ancestor, immediate])
+    candidate = prepare._retry_projection_deployment_id(
+        evidence,
+        immediate,
+        _test_release_identity(),
+        target="phone-production",
+    )
+    assert candidate == 2
+
+
+def test_retry_projection_lineage_rejects_any_mutation_intent_on_candidate_deployment() -> None:
+    prepare = _load_script("controller_test_retry_projection_intent", GITHUB_DIR / "scripts" / "prepare_release_deployment.py")
+    prior = "req-sha256:" + "4" * 64
+    terminal = EvidenceRecord(30, TERMINAL_HEADING, _refused_terminal(prior, deployment_id=2))
+    intent = EvidenceRecord(31, INTENT_HEADING, {"deployment_id": 2, "semantic_request_id": "req-sha256:" + "9" * 64})
+    try:
+        prepare._retry_projection_deployment_id(
+            _FakeEvidence(terminals=[terminal], intents=[intent]),
+            terminal,
+            _test_release_identity(),
+            target="phone-production",
+        )
+    except Exception as exc:
+        assert "crossed durable mutation intent" in str(exc)
+    else:
+        raise AssertionError("mutation-bearing public Deployment lineage was admitted for retry")
+
+
+def test_retry_projection_lineage_rejects_ambiguous_or_mutation_bearing_terminal_history() -> None:
+    prepare = _load_script("controller_test_retry_projection_terminal", GITHUB_DIR / "scripts" / "prepare_release_deployment.py")
+    first = EvidenceRecord(40, TERMINAL_HEADING, _refused_terminal("req-sha256:" + "4" * 64, deployment_id=2))
+    second = EvidenceRecord(41, TERMINAL_HEADING, _refused_terminal("req-sha256:" + "5" * 64, deployment_id=3))
+    immediate = EvidenceRecord(42, TERMINAL_HEADING, _refused_terminal("req-sha256:" + "6" * 64, deployment_id=None))
+    try:
+        prepare._retry_projection_deployment_id(
+            _FakeEvidence(terminals=[first, second, immediate]),
+            immediate,
+            _test_release_identity(),
+            target="phone-production",
+        )
+    except Exception as exc:
+        assert "ambiguous prior public Deployment lineage" in str(exc)
+    else:
+        raise AssertionError("multiple prior public Deployments were admitted for retry")
+
+    unsafe_payload = _refused_terminal("req-sha256:" + "7" * 64, deployment_id=2)
+    unsafe_payload["state"] = UNKNOWN
+    unsafe_payload["mutation_performed"] = True
+    unsafe_payload["recovery_required"] = True
+    unsafe = EvidenceRecord(43, TERMINAL_HEADING, unsafe_payload)
+    try:
+        prepare._retry_projection_deployment_id(
+            _FakeEvidence(terminals=[first, unsafe]),
+            first,
+            _test_release_identity(),
+            target="phone-production",
+        )
+    except Exception as exc:
+        assert "mutation-bearing or ambiguous terminal" in str(exc)
+    else:
+        raise AssertionError("ambiguous terminal history was admitted for retry")
 
 
 class _FakeProjection:
@@ -245,35 +324,49 @@ def test_terminal_public_projection_remains_fail_closed_for_ordinary_deploy() ->
         assert projection.create_calls == []
 
 
-def test_explicit_refused_retry_reopens_only_failure_or_error_projection_generation() -> None:
-    for state in ("failure", "error"):
-        projection = _FakeProjection([_projection_match(state)])
-        decision = _projection_admit(
-            projection,
-            retry_authorized=True,
-            retry_expected_deployment_id=2,
-        )
-        assert decision.deployment_id == 2
-        assert decision.reused is True
-        assert decision.observed_state == "queued"
-        assert projection.create_calls == []
-        assert projection.status_calls == [{
-            "deployment_id": 2,
-            "state": "queued",
-            "description": "v0.1.7 explicit REFUSED retry admitted by production controller",
-        }]
+def test_explicit_refused_retry_reopens_only_failure_projection_with_proven_deployment_lineage() -> None:
+    projection = _FakeProjection([_projection_match("failure")])
+    decision = _projection_admit(
+        projection,
+        retry_authorized=True,
+        retry_expected_deployment_id=2,
+    )
+    assert decision.deployment_id == 2
+    assert decision.reused is True
+    assert decision.observed_state == "queued"
+    assert projection.create_calls == []
+    assert projection.status_calls == [{
+        "deployment_id": 2,
+        "state": "queued",
+        "description": "v0.1.7 explicit REFUSED retry admitted by production controller",
+    }]
 
 
-def test_explicit_retry_does_not_reopen_success_or_inactive_projection() -> None:
-    for state in ("success", "inactive"):
+def test_explicit_retry_does_not_reopen_error_success_or_inactive_projection() -> None:
+    for state in ("error", "success", "inactive"):
         projection = _FakeProjection([_projection_match(state)])
         try:
-            _projection_admit(projection, retry_authorized=True)
+            _projection_admit(
+                projection,
+                retry_authorized=True,
+                retry_expected_deployment_id=2,
+            )
         except ProjectionAdmissionError:
             pass
         else:
             raise AssertionError(f"retry reopened forbidden terminal public projection {state}")
         assert projection.status_calls == []
+
+
+def test_retry_cannot_reopen_terminal_projection_without_proven_public_deployment_lineage() -> None:
+    projection = _FakeProjection([_projection_match("failure")])
+    try:
+        _projection_admit(projection, retry_authorized=True)
+    except ProjectionAdmissionError:
+        pass
+    else:
+        raise AssertionError("retry reopened terminal public projection without private Deployment lineage")
+    assert projection.status_calls == []
 
 
 def test_retry_projection_requires_exact_known_deployment_identity_when_present() -> None:
@@ -297,7 +390,7 @@ def test_projection_admission_rejects_ambiguous_or_mismatched_public_identity() 
         _projection_match("failure", deployment_id=3),
     ])
     try:
-        _projection_admit(multiple, retry_authorized=True)
+        _projection_admit(multiple, retry_authorized=True, retry_expected_deployment_id=2)
     except ProjectionAdmissionError as exc:
         assert "multiple exact public Deployments" in str(exc)
     else:
