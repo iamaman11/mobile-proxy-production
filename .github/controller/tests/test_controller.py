@@ -324,26 +324,27 @@ def test_terminal_public_projection_remains_fail_closed_for_ordinary_deploy() ->
         assert projection.create_calls == []
 
 
-def test_explicit_refused_retry_reopens_only_failure_projection_with_proven_deployment_lineage() -> None:
-    projection = _FakeProjection([_projection_match("failure")])
-    decision = _projection_admit(
-        projection,
-        retry_authorized=True,
-        retry_expected_deployment_id=2,
-    )
-    assert decision.deployment_id == 2
-    assert decision.reused is True
-    assert decision.observed_state == "queued"
-    assert projection.create_calls == []
-    assert projection.status_calls == [{
-        "deployment_id": 2,
-        "state": "queued",
-        "description": "v0.1.7 explicit REFUSED retry admitted by production controller",
-    }]
+def test_explicit_refused_retry_reopens_failure_or_error_projection_with_proven_deployment_lineage() -> None:
+    for state in ("failure", "error"):
+        projection = _FakeProjection([_projection_match(state)])
+        decision = _projection_admit(
+            projection,
+            retry_authorized=True,
+            retry_expected_deployment_id=2,
+        )
+        assert decision.deployment_id == 2
+        assert decision.reused is True
+        assert decision.observed_state == "queued"
+        assert projection.create_calls == []
+        assert projection.status_calls == [{
+            "deployment_id": 2,
+            "state": "queued",
+            "description": "v0.1.7 explicit REFUSED retry admitted by production controller",
+        }]
 
 
-def test_explicit_retry_does_not_reopen_error_success_or_inactive_projection() -> None:
-    for state in ("error", "success", "inactive"):
+def test_explicit_retry_does_not_reopen_success_or_inactive_projection() -> None:
+    for state in ("success", "inactive"):
         projection = _FakeProjection([_projection_match(state)])
         try:
             _projection_admit(
