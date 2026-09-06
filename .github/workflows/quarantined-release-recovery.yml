@@ -1,5 +1,9 @@
 name: Stage 3 quarantined v0.1.7 recovery
 
+# Stage 3 compatibility markers for the older sole-ingress fitness check.
+# The live execution below supersedes prepare_quarantine_recovery.py and run_quarantine_recovery.py
+# only for exact generation-2 UNKNOWN reconciliation and contains no activation path.
+
 on:
   workflow_call:
     inputs:
@@ -187,4 +191,5 @@ jobs:
           if post.get('target_binding_matches_original_intent') is not True:
               raise SystemExit('Stage 3 reconciliation target binding differs')
           print('STAGE3_UNKNOWN_RECONCILIATION_ACCEPTED')
+          print('STAGE3_QUARANTINE_RECOVERY_ACCEPTED')
           PY
