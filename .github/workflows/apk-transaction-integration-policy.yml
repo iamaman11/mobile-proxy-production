@@ -26,6 +26,7 @@ jobs:
           set -euo pipefail
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_release_resolver.py
+          python3 .github/controller/tests/test_release_handoff.py
           python3 .github/controller/tests/test_phone_runtime.py
           python3 .github/controller/tests/test_product_runtime_renderer.py
           python3 .github/controller/tests/test_phone_target.py
