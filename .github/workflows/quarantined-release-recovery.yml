@@ -39,7 +39,7 @@ env:
 
 jobs:
   authorize:
-    name: Bind exact immutable Release and exact QUARANTINED lineage
+    name: Bind exact immutable Release and exact UNKNOWN recovery lineage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -47,6 +47,7 @@ jobs:
       release_source_sha: ${{ steps.gate.outputs.release_source_sha }}
       semantic_recovery_id: ${{ steps.gate.outputs.semantic_recovery_id }}
       recovery_parent_terminal_ref: ${{ steps.gate.outputs.recovery_parent_terminal_ref }}
+      recovery_mode: ${{ steps.gate.outputs.recovery_mode }}
     steps:
       - name: Check out exact controller revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -54,7 +55,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Admit only the exact authorized quarantined deployment
+      - name: Admit only the exact post-intent UNKNOWN lineage
         id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -68,8 +69,15 @@ jobs:
             --controller-revision "$GITHUB_SHA" \
             --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
 
+      - name: Require read-only UNKNOWN reconciliation mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          test '${{ steps.gate.outputs.recovery_mode }}' = 'reconcile_unknown_read_only'
+          test '${{ steps.gate.outputs.recovery_parent_terminal_ref }}' = 'issue-comment:5562925687'
+
   recover:
-    name: Activate exact existing v0.1.7 runtime once after in-lock proof
+    name: Reconcile exact UNKNOWN v0.1.7 state read-only under target lock
     needs: authorize
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 20
@@ -116,7 +124,8 @@ jobs:
           } >> "$GITHUB_ENV"
           printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Execute bounded quarantine recovery
+      # Historical policy marker only: run_quarantine_recovery.py is intentionally not invoked after post-intent UNKNOWN.
+      - name: Execute bounded read-only UNKNOWN reconciliation
         id: recovery
         continue-on-error: true
         env:
@@ -132,11 +141,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/run_quarantine_recovery.py \
+          test '${{ needs.authorize.outputs.recovery_mode }}' = 'reconcile_unknown_read_only'
+          python3 .github/scripts/reconcile_quarantine_unknown.py \
             --target '${{ inputs.target }}' \
             --release '${{ inputs.release_tag }}' \
             --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
             --recovery-parent-terminal-ref '${{ needs.authorize.outputs.recovery_parent_terminal_ref }}' \
+            --semantic-recovery-id '${{ needs.authorize.outputs.semantic_recovery_id }}' \
             --admitted-release-json '${{ needs.authorize.outputs.admitted_release_json }}' \
             --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
             --controller-revision "$GITHUB_SHA" \
@@ -167,13 +178,18 @@ jobs:
           value = json.loads(path.read_text(encoding='utf-8'))
           if value.get('schema') != 'production-quarantine-recovery-terminal.v1':
               raise SystemExit('quarantine recovery terminal schema differs')
-          if value.get('parent_recovery_terminal_ref') != 'issue-comment:5562605748':
-              raise SystemExit('quarantine recovery continuation parent differs')
+          if value.get('parent_recovery_terminal_ref') != 'issue-comment:5562925687':
+              raise SystemExit('UNKNOWN reconciliation parent differs')
+          if value.get('recovery_intent_ref') is not None or value.get('mutation_performed') is not False:
+              raise SystemExit('UNKNOWN reconciliation is not read-only')
           if value.get('state') != 'ACCEPTED':
-              raise SystemExit('quarantine recovery did not reach ACCEPTED')
+              raise SystemExit('UNKNOWN reconciliation did not reach ACCEPTED')
           if value.get('postcondition_verified') is not True:
               raise SystemExit('ACCEPTED recovery lacks independent postcondition')
-          post = (value.get('facts') or {}).get('postcondition')
+          facts = value.get('facts') or {}
+          if facts.get('reconciliation_mode') != 'read_only':
+              raise SystemExit('ACCEPTED recovery lacks read-only reconciliation proof')
+          post = facts.get('postcondition')
           if not isinstance(post, dict):
               raise SystemExit('ACCEPTED recovery lacks postcondition evidence')
           apk = post.get('apk') or {}
