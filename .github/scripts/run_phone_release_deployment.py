@@ -258,6 +258,23 @@ def _project_terminal(projection: PublicDeploymentProjection, deployment_id: int
     )
 
 
+def _project_execution_started(
+    projection: PublicDeploymentProjection,
+    *,
+    deployment_id: int,
+    release_tag: str,
+    facts: dict[str, object],
+) -> None:
+    try:
+        projection.status(
+            deployment_id=deployment_id,
+            state="in_progress",
+            description=f"{release_tag} target execution started",
+        )
+    except ProjectionError:
+        facts["public_projection"] = {"available": False}
+
+
 def _persist_and_write(
     *, evidence: IssueEvidenceStore, projection: PublicDeploymentProjection,
     output: Path, deployment_id: int, terminal: dict[str, object],
@@ -361,25 +378,12 @@ def main() -> int:
         )
         return 2
 
-    try:
-        projection.status(
-            deployment_id=args.deployment_id, state="in_progress",
-            description=f"{admitted.identity.tag} target execution started",
-        )
-    except ProjectionError as exc:
-        if args.recovery_only == "true":
-            raise
-        state = reduce_state(_base_state_authorized(), "observation_refused", reason=str(exc))
-        terminal = _terminal_payload(
-            request=request, execution_id=args.execution_id, controller_revision=args.controller_revision,
-            admitted=admitted, deployment_id=args.deployment_id, state=state,
-            facts=facts | {"public_projection": {"available": False}}, evidence_refs=evidence_refs,
-        )
-        _persist_and_write(
-            evidence=evidence, projection=projection, output=args.output,
-            deployment_id=args.deployment_id, terminal=terminal,
-        )
-        return 2
+    _project_execution_started(
+        projection,
+        deployment_id=args.deployment_id,
+        release_tag=admitted.identity.tag,
+        facts=facts,
+    )
 
     if args.recovery_only == "true":
         if existing_intent is None:
