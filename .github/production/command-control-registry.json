@@ -45,6 +45,47 @@
     },
     {
       "allowed_targets": [
+        "phone-production"
+      ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+release-admission-read-only",
+      "concurrency_domain": "none",
+      "destructive": false,
+      "dispatch_inputs": {
+        "release_tag": "release",
+        "target": "target"
+      },
+      "enabled": true,
+      "evidence_policy": "bounded-product-release-admission",
+      "handler": "dispatch_workflow",
+      "id": "verify-product-release",
+      "idempotency_policy": "single-run-attempt",
+      "operation": "verify-product-release",
+      "operation_class": "RELEASE_VERIFY",
+      "pattern": "^/verify-release (?P<target>phone-production) (?P<release>v[0-9]+\\.[0-9]+\\.[0-9]+)$",
+      "physical_domains": [],
+      "read_only": true,
+      "recovery_policy": "fail-closed-on-admission-error",
+      "ref": "main",
+      "ref_policy": "controller-main-exact",
+      "requires_phone": false,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "command-arguments",
+      "target_capability_policy": "phone-production-release-admission",
+      "workflow": ".github/workflows/product-release-admission-proof.yml"
+    },
+    {
+      "allowed_targets": [
         "phone-production",
         "vm-production"
       ],
