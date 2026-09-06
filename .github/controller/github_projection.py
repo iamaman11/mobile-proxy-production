@@ -11,6 +11,7 @@ PUBLIC_REPOSITORY = "iamaman11/mobile-proxy"
 API = f"https://api.github.com/repos/{PUBLIC_REPOSITORY}"
 _PAGE_SIZE = 100
 _MAX_PAGES = 100
+_READ_TRANSPORT_ATTEMPTS = 3
 _STATUS_STATES = frozenset({"error", "failure", "inactive", "in_progress", "pending", "queued", "success"})
 
 
@@ -49,23 +50,36 @@ class PublicDeploymentProjection:
         method: str,
         payload: Mapping[str, Any] | None = None,
     ) -> Any:
-        request = urllib.request.Request(
-            API + path,
-            data=None if payload is None else json.dumps(payload).encode("utf-8"),
-            method=method,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-                "User-Agent": "mobile-proxy-production-deployment-projection-v2",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)
-        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-            raise ProjectionError("public GitHub Deployment projection failed") from exc
+        read_only = method.upper() == "GET" and payload is None
+        attempts = _READ_TRANSPORT_ATTEMPTS if read_only else 1
+        for attempt in range(attempts):
+            request = urllib.request.Request(
+                API + path,
+                data=None if payload is None else json.dumps(payload).encode("utf-8"),
+                method=method,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "mobile-proxy-production-deployment-projection-v2",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return json.load(response)
+            except urllib.error.HTTPError as exc:
+                transient = exc.code == 429 or 500 <= exc.code < 600
+                if read_only and transient and attempt + 1 < attempts:
+                    continue
+                raise ProjectionError("public GitHub Deployment projection failed") from exc
+            except (OSError, urllib.error.URLError) as exc:
+                if read_only and attempt + 1 < attempts:
+                    continue
+                raise ProjectionError("public GitHub Deployment projection failed") from exc
+            except json.JSONDecodeError as exc:
+                raise ProjectionError("public GitHub Deployment projection failed") from exc
+        raise AssertionError("bounded public Deployment read retry loop exhausted unexpectedly")
 
     @staticmethod
     def _payload_mapping(value: object) -> Mapping[str, Any] | None:

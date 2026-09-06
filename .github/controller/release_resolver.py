@@ -30,6 +30,7 @@ _PHONE_RUNTIME_ABI = {
     "elf_machine": 40,
 }
 _SING_BOX_ARCHIVE_DOMAIN = "mobile-proxy/upstream-sing-box-archive/v1"
+_READ_TRANSPORT_ATTEMPTS = 3
 
 
 class ReleaseAdmissionError(RuntimeError):
@@ -59,23 +60,37 @@ class AdmittedRelease:
         return result
 
 
+def _transient_http_error(exc: urllib.error.HTTPError) -> bool:
+    return exc.code == 429 or 500 <= exc.code < 600
+
+
 def _request_json(url: str) -> Mapping[str, Any]:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "mobile-proxy-production-release-resolver-v2",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            value = json.load(response)
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise ReleaseAdmissionError("public Release metadata is unavailable") from exc
-    if not isinstance(value, Mapping):
-        raise ReleaseAdmissionError("public Release metadata is invalid")
-    return value
+    for attempt in range(_READ_TRANSPORT_ATTEMPTS):
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "mobile-proxy-production-release-resolver-v2",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                value = json.load(response)
+        except urllib.error.HTTPError as exc:
+            if _transient_http_error(exc) and attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                continue
+            raise ReleaseAdmissionError("public Release metadata is unavailable") from exc
+        except (OSError, urllib.error.URLError) as exc:
+            if attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                continue
+            raise ReleaseAdmissionError("public Release metadata is unavailable") from exc
+        except json.JSONDecodeError as exc:
+            raise ReleaseAdmissionError("public Release metadata is unavailable") from exc
+        if not isinstance(value, Mapping):
+            raise ReleaseAdmissionError("public Release metadata is invalid")
+        return value
+    raise AssertionError("bounded public Release metadata retry loop exhausted unexpectedly")
 
 
 def _asset_transport_sha256(asset: Mapping[str, Any]) -> str:
@@ -91,22 +106,30 @@ def _download(asset: Mapping[str, Any]) -> bytes:
     url = str(asset.get("browser_download_url", ""))
     if not url.startswith(f"https://github.com/{PUBLIC_REPOSITORY}/releases/download/"):
         raise ReleaseAdmissionError("release asset download URL differs")
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "mobile-proxy-production-release-resolver-v2"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = response.read(2_000_001)
-    except (OSError, urllib.error.URLError) as exc:
-        raise ReleaseAdmissionError("release contract asset is unavailable") from exc
-    if len(data) > 2_000_000:
-        raise ReleaseAdmissionError("release contract asset exceeds bounded size")
-    expected = _asset_transport_sha256(asset)
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != expected:
-        raise ReleaseAdmissionError("release contract asset transport digest differs")
-    return data
+    for attempt in range(_READ_TRANSPORT_ATTEMPTS):
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "mobile-proxy-production-release-resolver-v2"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = response.read(2_000_001)
+        except urllib.error.HTTPError as exc:
+            if _transient_http_error(exc) and attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                continue
+            raise ReleaseAdmissionError("release contract asset is unavailable") from exc
+        except (OSError, urllib.error.URLError) as exc:
+            if attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                continue
+            raise ReleaseAdmissionError("release contract asset is unavailable") from exc
+        if len(data) > 2_000_000:
+            raise ReleaseAdmissionError("release contract asset exceeds bounded size")
+        expected = _asset_transport_sha256(asset)
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != expected:
+            raise ReleaseAdmissionError("release contract asset transport digest differs")
+        return data
+    raise AssertionError("bounded Release contract asset retry loop exhausted unexpectedly")
 
 
 def _positive(value: object, label: str) -> int:
