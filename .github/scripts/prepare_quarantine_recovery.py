@@ -24,6 +24,8 @@ from quarantine_recovery import (  # noqa: E402
     RECOVERY_RELEASE,
     RECOVERY_TARGET,
     RECOVERY_TERMINAL_HEADING,
+    RECOVERY_UNKNOWN_INTENT_REF,
+    RECOVERY_UNKNOWN_TERMINAL_REF,
     QuarantineRecoveryError,
     recovery_semantic_id,
     validate_recovery_intent,
@@ -41,6 +43,7 @@ _TERMINAL_TOP_LEVEL_RELEASE_FIELDS = (
     "release_source_sha",
     "artifact_digest",
 )
+_RECONCILE_MODE = "reconcile_unknown_read_only"
 
 
 def _output(name: str, value: object) -> None:
@@ -68,18 +71,7 @@ def _terminal_matches_release_identity(payload: Mapping[str, object], identity: 
     return payload_matches_release_identity(release_admission, identity, target=RECOVERY_TARGET)
 
 
-def _validated_parent_recovery(evidence: IssueEvidenceStore):
-    initial_semantic_id = recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-    )
-    continuation_semantic_id = recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-        parent_recovery_terminal_ref=RECOVERY_PARENT_TERMINAL_REF,
-    )
+def _records(evidence: IssueEvidenceStore):
     intents = [
         item for item in evidence.list_records(RECOVERY_INTENT_HEADING)
         if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
@@ -88,46 +80,89 @@ def _validated_parent_recovery(evidence: IssueEvidenceStore):
         item for item in evidence.list_records(RECOVERY_TERMINAL_HEADING)
         if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
     ]
-    allowed = {initial_semantic_id, continuation_semantic_id}
+    return intents, terminals
+
+
+def _one(records, semantic_id: str, *, kind: str):
+    selected = [item for item in records if item.payload.get("semantic_recovery_id") == semantic_id]
+    if len(selected) != 1:
+        raise QuarantineRecoveryError(f"exact {kind} recovery evidence is unavailable or duplicated")
+    return selected[0]
+
+
+def _validate_recovery_lineage(evidence: IssueEvidenceStore):
+    initial_semantic_id = recovery_semantic_id(
+        target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+    )
+    activation_semantic_id = recovery_semantic_id(
+        target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+        parent_recovery_terminal_ref=RECOVERY_PARENT_TERMINAL_REF,
+    )
+    reconciliation_semantic_id = recovery_semantic_id(
+        target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+        parent_recovery_terminal_ref=RECOVERY_UNKNOWN_TERMINAL_REF,
+    )
+    intents, terminals = _records(evidence)
+    allowed = {initial_semantic_id, activation_semantic_id, reconciliation_semantic_id}
     if any(item.payload.get("semantic_recovery_id") not in allowed for item in intents + terminals):
         raise QuarantineRecoveryError("unexpected recovery lineage exists for the quarantined deployment")
 
-    parent_intents = [item for item in intents if item.payload.get("semantic_recovery_id") == initial_semantic_id]
-    parent_terminals = [item for item in terminals if item.payload.get("semantic_recovery_id") == initial_semantic_id]
-    if len(parent_intents) != 1 or len(parent_terminals) != 1:
-        raise QuarantineRecoveryError("bounded Stage 3 continuation requires exactly one prior recovery generation")
-    parent_intent = parent_intents[0]
-    parent_terminal = parent_terminals[0]
-    if parent_intent.ref != RECOVERY_PARENT_INTENT_REF or parent_terminal.ref != RECOVERY_PARENT_TERMINAL_REF:
-        raise QuarantineRecoveryError("prior recovery evidence differs from the authorized Stage 3 parent")
-    validate_recovery_intent(parent_intent.payload)
-    validate_recovery_terminal(parent_terminal.payload)
+    first_intent = _one(intents, initial_semantic_id, kind="first intent")
+    first_terminal = _one(terminals, initial_semantic_id, kind="first terminal")
+    if first_intent.ref != RECOVERY_PARENT_INTENT_REF or first_terminal.ref != RECOVERY_PARENT_TERMINAL_REF:
+        raise QuarantineRecoveryError("first recovery generation differs from the authorized Stage 3 lineage")
+    validate_recovery_intent(first_intent.payload)
+    validate_recovery_terminal(first_terminal.payload)
     if (
-        parent_terminal.payload.get("state") != "QUARANTINED"
-        or parent_terminal.payload.get("mutation_performed") is not True
-        or parent_terminal.payload.get("postcondition_verified") is not True
-        or parent_terminal.payload.get("blind_retry_allowed") is not False
-        or parent_terminal.payload.get("recovery_intent_ref") != RECOVERY_PARENT_INTENT_REF
+        first_terminal.payload.get("state") != "QUARANTINED"
+        or first_terminal.payload.get("mutation_performed") is not True
+        or first_terminal.payload.get("postcondition_verified") is not True
+        or first_terminal.payload.get("blind_retry_allowed") is not False
+        or first_terminal.payload.get("recovery_intent_ref") != RECOVERY_PARENT_INTENT_REF
     ):
-        raise QuarantineRecoveryError("prior recovery terminal is not the exact observed Stage 3 quarantine")
+        raise QuarantineRecoveryError("first recovery terminal is not the exact observed Stage 3 quarantine")
 
-    continuation_intents = [item for item in intents if item.payload.get("semantic_recovery_id") == continuation_semantic_id]
-    continuation_terminals = [item for item in terminals if item.payload.get("semantic_recovery_id") == continuation_semantic_id]
-    if len(continuation_intents) > 1 or len(continuation_terminals) > 1:
-        raise QuarantineRecoveryError("conflicting bounded continuation evidence exists")
-    for item in continuation_intents:
-        validate_recovery_intent(item.payload)
-        if item.payload.get("parent_recovery_terminal_ref") != RECOVERY_PARENT_TERMINAL_REF:
-            raise QuarantineRecoveryError("continuation intent parent differs")
-    for item in continuation_terminals:
-        validate_recovery_terminal(item.payload)
-        if item.payload.get("parent_recovery_terminal_ref") != RECOVERY_PARENT_TERMINAL_REF:
-            raise QuarantineRecoveryError("continuation terminal parent differs")
-        intent_ref = item.payload.get("recovery_intent_ref")
-        if intent_ref is not None:
-            if len(continuation_intents) != 1 or continuation_intents[0].ref != intent_ref:
-                raise QuarantineRecoveryError("continuation terminal intent lineage differs")
-    return parent_intent, parent_terminal
+    unknown_intent = _one(intents, activation_semantic_id, kind="UNKNOWN child intent")
+    unknown_terminal = _one(terminals, activation_semantic_id, kind="UNKNOWN child terminal")
+    if unknown_intent.ref != RECOVERY_UNKNOWN_INTENT_REF or unknown_terminal.ref != RECOVERY_UNKNOWN_TERMINAL_REF:
+        raise QuarantineRecoveryError("UNKNOWN recovery generation differs from the exact Stage 3 evidence")
+    validate_recovery_intent(unknown_intent.payload)
+    validate_recovery_terminal(unknown_terminal.payload)
+    if (
+        unknown_intent.payload.get("parent_recovery_terminal_ref") != RECOVERY_PARENT_TERMINAL_REF
+        or unknown_terminal.payload.get("parent_recovery_terminal_ref") != RECOVERY_PARENT_TERMINAL_REF
+        or unknown_terminal.payload.get("state") != "UNKNOWN"
+        or unknown_terminal.payload.get("mutation_performed") is not True
+        or unknown_terminal.payload.get("postcondition_verified") is not False
+        or unknown_terminal.payload.get("blind_retry_allowed") is not False
+        or unknown_terminal.payload.get("recovery_intent_ref") != RECOVERY_UNKNOWN_INTENT_REF
+        or unknown_terminal.payload.get("blocking_predicate") != "activation outcome is unknown"
+    ):
+        raise QuarantineRecoveryError("recovery parent is not the exact post-intent UNKNOWN Stage 3 terminal")
+
+    reconcile_intents = [item for item in intents if item.payload.get("semantic_recovery_id") == reconciliation_semantic_id]
+    if reconcile_intents:
+        raise QuarantineRecoveryError("read-only UNKNOWN reconciliation must never create a recovery intent")
+    reconcile_terminals = [item for item in terminals if item.payload.get("semantic_recovery_id") == reconciliation_semantic_id]
+    if len(reconcile_terminals) > 1:
+        raise QuarantineRecoveryError("conflicting UNKNOWN reconciliation terminals exist")
+    if reconcile_terminals:
+        terminal = reconcile_terminals[0]
+        validate_recovery_terminal(terminal.payload)
+        if (
+            terminal.payload.get("parent_recovery_terminal_ref") != RECOVERY_UNKNOWN_TERMINAL_REF
+            or terminal.payload.get("mutation_performed") is not False
+            or terminal.payload.get("recovery_intent_ref") is not None
+        ):
+            raise QuarantineRecoveryError("existing UNKNOWN reconciliation terminal violates read-only lineage")
+
+    return unknown_terminal, reconciliation_semantic_id
 
 
 def main() -> int:
@@ -164,7 +199,7 @@ def main() -> int:
     ):
         raise QuarantineRecoveryError("deployment terminal is not the authorized v0.1.7 quarantine state")
 
-    _parent_intent, parent_terminal = _validated_parent_recovery(evidence)
+    unknown_terminal, semantic_id = _validate_recovery_lineage(evidence)
 
     admitted = resolve_release(tag=RECOVERY_RELEASE, target=RECOVERY_TARGET)
     if not payload_matches_release_identity(original_intent.payload, admitted.identity, target=RECOVERY_TARGET):
@@ -172,21 +207,16 @@ def main() -> int:
     if not _terminal_matches_release_identity(original_terminal.payload, admitted.identity):
         raise QuarantineRecoveryError("quarantined deployment terminal conflicts with current immutable Release identity")
 
-    semantic_id = recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-        parent_recovery_terminal_ref=parent_terminal.ref,
-    )
     _output("admitted_release_json", admitted.to_dict())
     _output("release_source_sha", admitted.identity.source_sha)
     _output("semantic_recovery_id", semantic_id)
     _output("original_intent_ref", original_intent.ref)
     _output("original_terminal_ref", original_terminal.ref)
-    _output("recovery_parent_terminal_ref", parent_terminal.ref)
+    _output("recovery_parent_terminal_ref", unknown_terminal.ref)
+    _output("recovery_mode", _RECONCILE_MODE)
     print(
-        "QUARANTINE_RECOVERY_CONTINUATION_ADMITTED "
-        f"semantic_recovery_id={semantic_id} parent={parent_terminal.ref} target={RECOVERY_TARGET} release={RECOVERY_RELEASE}"
+        "QUARANTINE_UNKNOWN_RECONCILIATION_ADMITTED "
+        f"semantic_recovery_id={semantic_id} parent={unknown_terminal.ref} target={RECOVERY_TARGET} release={RECOVERY_RELEASE}"
     )
     return 0
 
