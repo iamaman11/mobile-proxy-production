@@ -46,6 +46,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _EXECUTION = re.compile(r"gh-run:[1-9][0-9]*:[1-9][0-9]*")
 _RELEASE_URL_PREFIX = "https://github.com/iamaman11/mobile-proxy/releases/download/"
 _MAX_RELEASE_ASSET_BYTES = 250 * 1024 * 1024
+_RELEASE_ASSET_DOWNLOAD_ATTEMPTS = 3
 _RUNTIME_SECRET_FIELDS = (
     "adminTokenEnv", "deviceTokenEnv", "uiTokenEnv", "relayUserEnv",
     "relayPasswordEnv", "reverseTunnelCertDerB64Env",
@@ -78,26 +79,31 @@ def _download_release_asset(*, url: str, destination: Path, expected_transport_s
         raise PhoneRuntimeRefused(f"{label} Release asset URL differs")
     if _SHA256.fullmatch(expected_transport_sha256) is None:
         raise PhoneRuntimeRefused(f"{label} Release transport digest is invalid")
-    request = urllib.request.Request(url, headers={"User-Agent": "mobile-proxy-production-controller-v2"})
-    digest = hashlib.sha256()
-    total = 0
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > _MAX_RELEASE_ASSET_BYTES:
-                    raise PhoneRuntimeRefused(f"{label} Release asset exceeds size bound")
-                digest.update(chunk)
-                handle.write(chunk)
-    except PhoneRuntimeRefused:
-        raise
-    except (OSError, urllib.error.URLError) as exc:
-        raise PhoneRuntimeRefused(f"{label} Release asset download failed") from exc
-    if total <= 0 or not hmac.compare_digest(digest.hexdigest(), expected_transport_sha256):
-        raise PhoneRuntimeRefused(f"{label} Release transport digest differs after download")
+    for attempt in range(_RELEASE_ASSET_DOWNLOAD_ATTEMPTS):
+        request = urllib.request.Request(url, headers={"User-Agent": "mobile-proxy-production-controller-v2"})
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_RELEASE_ASSET_BYTES:
+                        raise PhoneRuntimeRefused(f"{label} Release asset exceeds size bound")
+                    digest.update(chunk)
+                    handle.write(chunk)
+        except PhoneRuntimeRefused:
+            raise
+        except (OSError, urllib.error.URLError) as exc:
+            if attempt + 1 >= _RELEASE_ASSET_DOWNLOAD_ATTEMPTS:
+                raise PhoneRuntimeRefused(f"{label} Release asset download failed") from exc
+            continue
+        if total <= 0 or not hmac.compare_digest(digest.hexdigest(), expected_transport_sha256):
+            raise PhoneRuntimeRefused(f"{label} Release transport digest differs after download")
+        return
+    raise AssertionError("bounded Release asset download attempts exhausted without terminal classification")
 
 
 def _materialize_verified_release_apk(admitted: object, apk: Path, facts: dict[str, object]) -> None:

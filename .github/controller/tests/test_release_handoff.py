@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -341,6 +343,97 @@ def test_target_start_projection_failure_is_best_effort_for_locally_desired_stat
     assert terminal["facts"]["public_projection"] == {"available": False}
     assert terminal["facts"]["preflight_observation"]["desired"] is True
     assert len(projection.status_calls) == 2
+
+
+def test_release_asset_download_retries_bounded_transport_failures_then_verifies_bytes() -> None:
+    runner = _load_runner("handoff_download_retry_runner")
+    payload = b"immutable-release-asset-bytes"
+    expected = hashlib.sha256(payload).hexdigest()
+    calls: list[tuple[str, int]] = []
+    original = runner.urllib.request.urlopen
+
+    def fake_urlopen(request, timeout=0):
+        calls.append((request.full_url, timeout))
+        if len(calls) < runner._RELEASE_ASSET_DOWNLOAD_ATTEMPTS:
+            raise runner.urllib.error.URLError("transient transport failure")
+        return io.BytesIO(payload)
+
+    runner.urllib.request.urlopen = fake_urlopen
+    try:
+        with tempfile.TemporaryDirectory(prefix="release-download-retry-") as td:
+            destination = Path(td) / APK
+            runner._download_release_asset(
+                url=PREFIX + APK,
+                destination=destination,
+                expected_transport_sha256=expected,
+                label="Android APK",
+            )
+            assert destination.read_bytes() == payload
+    finally:
+        runner.urllib.request.urlopen = original
+    assert len(calls) == runner._RELEASE_ASSET_DOWNLOAD_ATTEMPTS == 3
+    assert all(url == PREFIX + APK and timeout == 60 for url, timeout in calls)
+
+
+def test_release_asset_download_exhaustion_remains_bounded_refused() -> None:
+    runner = _load_runner("handoff_download_exhaustion_runner")
+    calls = 0
+    original = runner.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        calls += 1
+        assert timeout == 60
+        raise runner.urllib.error.URLError("persistent transport failure")
+
+    runner.urllib.request.urlopen = fake_urlopen
+    try:
+        with tempfile.TemporaryDirectory(prefix="release-download-exhaustion-") as td:
+            try:
+                runner._download_release_asset(
+                    url=PREFIX + APK,
+                    destination=Path(td) / APK,
+                    expected_transport_sha256="6" * 64,
+                    label="Android APK",
+                )
+            except runner.PhoneRuntimeRefused as exc:
+                assert str(exc) == "Android APK Release asset download failed"
+            else:
+                raise AssertionError("persistent transport failure escaped bounded REFUSED classification")
+    finally:
+        runner.urllib.request.urlopen = original
+    assert calls == runner._RELEASE_ASSET_DOWNLOAD_ATTEMPTS == 3
+
+
+def test_release_asset_integrity_mismatch_is_not_retried() -> None:
+    runner = _load_runner("handoff_download_integrity_runner")
+    payload = b"wrong-immutable-release-asset-bytes"
+    calls = 0
+    original = runner.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        calls += 1
+        assert timeout == 60
+        return io.BytesIO(payload)
+
+    runner.urllib.request.urlopen = fake_urlopen
+    try:
+        with tempfile.TemporaryDirectory(prefix="release-download-integrity-") as td:
+            try:
+                runner._download_release_asset(
+                    url=PREFIX + APK,
+                    destination=Path(td) / APK,
+                    expected_transport_sha256=hashlib.sha256(b"expected-other-bytes").hexdigest(),
+                    label="Android APK",
+                )
+            except runner.PhoneRuntimeRefused as exc:
+                assert str(exc) == "Android APK Release transport digest differs after download"
+            else:
+                raise AssertionError("integrity mismatch was accepted")
+    finally:
+        runner.urllib.request.urlopen = original
+    assert calls == 1
 
 
 def main() -> int:
