@@ -19,11 +19,14 @@ QUARANTINED_INTENT_REF = "issue-comment:5562280938"
 QUARANTINED_TERMINAL_REF = "issue-comment:5562289272"
 RECOVERY_PARENT_INTENT_REF = "issue-comment:5562604412"
 RECOVERY_PARENT_TERMINAL_REF = "issue-comment:5562605748"
+RECOVERY_UNKNOWN_INTENT_REF = "issue-comment:5562924241"
+RECOVERY_UNKNOWN_TERMINAL_REF = "issue-comment:5562925687"
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _RECOVERY_ID = re.compile(r"recovery-sha256:[0-9a-f]{64}")
 _EXECUTION = re.compile(r"gh-run:[1-9][0-9]*:[1-9][0-9]*")
 _ALLOWED_STATES = frozenset({"ACCEPTED", "REFUSED", "UNKNOWN", "QUARANTINED"})
+_ALLOWED_PARENT_TERMINALS = frozenset({RECOVERY_PARENT_TERMINAL_REF, RECOVERY_UNKNOWN_TERMINAL_REF})
 
 
 class QuarantineRecoveryError(RuntimeError):
@@ -39,8 +42,8 @@ def recovery_semantic_id(
 ) -> str:
     if target != RECOVERY_TARGET or release != RECOVERY_RELEASE or quarantined_request_id != QUARANTINED_REQUEST_ID:
         raise QuarantineRecoveryError("recovery identity differs from authorized quarantined v0.1.7 state")
-    if parent_recovery_terminal_ref is not None and parent_recovery_terminal_ref != RECOVERY_PARENT_TERMINAL_REF:
-        raise QuarantineRecoveryError("recovery parent terminal differs from the bounded Stage 3 continuation")
+    if parent_recovery_terminal_ref is not None and parent_recovery_terminal_ref not in _ALLOWED_PARENT_TERMINALS:
+        raise QuarantineRecoveryError("recovery parent terminal differs from the bounded Stage 3 lineage")
     identity: dict[str, object] = {
         "schema": RECOVERY_SCHEMA,
         "operation": RECOVERY_OPERATION,
@@ -83,6 +86,8 @@ def validate_recovery_intent(payload: Mapping[str, object]) -> None:
         raise QuarantineRecoveryError("recovery intent parent request differs")
     if payload.get("quarantined_intent_ref") != QUARANTINED_INTENT_REF or payload.get("quarantined_terminal_ref") != QUARANTINED_TERMINAL_REF:
         raise QuarantineRecoveryError("recovery intent parent evidence differs")
+    if payload.get("parent_recovery_terminal_ref") == RECOVERY_UNKNOWN_TERMINAL_REF:
+        raise QuarantineRecoveryError("UNKNOWN reconciliation is read-only and cannot create a recovery intent")
     _validate_semantic_identity(payload, kind="intent")
     if _EXECUTION.fullmatch(str(payload.get("execution_id", ""))) is None or _SHA.fullmatch(str(payload.get("controller_revision", ""))) is None:
         raise QuarantineRecoveryError("recovery intent execution provenance is invalid")
@@ -123,6 +128,13 @@ def validate_recovery_terminal(payload: Mapping[str, object]) -> None:
         raise QuarantineRecoveryError("UNKNOWN recovery must follow activation attempt")
     if state == "QUARANTINED" and postcondition_verified is not True:
         raise QuarantineRecoveryError("QUARANTINED recovery lacks observed postcondition")
+    if payload.get("parent_recovery_terminal_ref") == RECOVERY_UNKNOWN_TERMINAL_REF:
+        if state not in {"ACCEPTED", "REFUSED"}:
+            raise QuarantineRecoveryError("UNKNOWN reconciliation terminal must resolve to ACCEPTED or REFUSED")
+        if mutation_performed is not False or postcondition_verified is not True:
+            raise QuarantineRecoveryError("UNKNOWN reconciliation terminal must be read-only with verified postcondition")
+        if payload.get("recovery_intent_ref") is not None:
+            raise QuarantineRecoveryError("UNKNOWN reconciliation terminal cannot reference a new mutation intent")
     facts = payload.get("facts")
     if not isinstance(facts, Mapping):
         raise QuarantineRecoveryError("recovery terminal facts are invalid")
