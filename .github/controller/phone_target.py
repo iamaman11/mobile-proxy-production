@@ -13,6 +13,9 @@ _ROOT = "/data/adb/mobile-proxy-node"
 _BOOT_HOOK = "/data/adb/service.d/99-mobile-proxy-runtime.sh"
 _RELEASE_ID = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 _SAFE_REMOTE = re.compile(r"[A-Za-z0-9_./-]+")
+_ROOT_CAPABILITY_UNAVAILABLE = "rooted runtime capability unavailable"
+_ROOT_LAYOUT_OBSERVATION_FAILED = "rooted runtime layout observation failed"
+_ROOT_LAYOUT_OBSERVATION_MALFORMED = "rooted runtime state observation is malformed"
 
 
 class PhoneTargetUnavailable(RuntimeError):
@@ -82,6 +85,9 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
     release_id = _safe_release_id(release_id)
     files = _files(release_root, required_paths)
     target = f"{_ROOT}/releases/{release_id}"
+    root_capability = _read(serial, ["shell", "su", "0", "sh", "-c", "true"])
+    if root_capability.returncode != 0:
+        raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
     probe = _read(
         serial,
         [
@@ -94,14 +100,14 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
         ],
     )
     if probe.returncode != 0:
-        raise PhoneTargetUnavailable("rooted runtime state observation failed")
+        raise PhoneTargetUnavailable(_ROOT_LAYOUT_OBSERVATION_FAILED)
     values: dict[str, str] = {}
     for line in probe.stdout.splitlines():
         key, sep, value = line.strip().partition("=")
         if sep and key in {"target", "current"} and key not in values:
             values[key] = value
     if values.get("target") not in {"present", "absent"} or "current" not in values:
-        raise PhoneTargetUnavailable("rooted runtime state observation is malformed")
+        raise PhoneTargetUnavailable(_ROOT_LAYOUT_OBSERVATION_MALFORMED)
     exists = values["target"] == "present"
     current = None if values["current"] == "absent" else values["current"]
     exact = False
