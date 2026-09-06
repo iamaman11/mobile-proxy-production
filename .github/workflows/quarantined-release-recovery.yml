@@ -39,7 +39,7 @@ env:
 
 jobs:
   authorize:
-    name: Bind exact immutable Release and exact QUARANTINED lineage
+    name: Bind exact immutable Release and exact generation-2 UNKNOWN
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -54,14 +54,14 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Admit only the exact authorized quarantined deployment
+      - name: Admit only exact UNKNOWN reconciliation lineage
         id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/prepare_quarantine_recovery.py \
+          python3 .github/scripts/prepare_quarantine_reconciliation.py \
             --target '${{ inputs.target }}' \
             --release '${{ inputs.release_tag }}' \
             --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
@@ -69,7 +69,7 @@ jobs:
             --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
 
   recover:
-    name: Activate exact existing v0.1.7 runtime once after in-lock proof
+    name: Reconcile exact generation-2 UNKNOWN read-only
     needs: authorize
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 20
@@ -116,8 +116,8 @@ jobs:
           } >> "$GITHUB_ENV"
           printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Execute bounded quarantine recovery
-        id: recovery
+      - name: Execute read-only UNKNOWN reconciliation
+        id: reconciliation
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -132,7 +132,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/run_quarantine_recovery.py \
+          python3 .github/scripts/run_quarantine_reconciliation.py \
             --target '${{ inputs.target }}' \
             --release '${{ inputs.release_tag }}' \
             --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
@@ -142,18 +142,18 @@ jobs:
             --controller-revision "$GITHUB_SHA" \
             --product-root "$GITHUB_WORKSPACE/product-source" \
             --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
-            --output "$RUNNER_TEMP/quarantine-recovery-terminal.json"
+            --output "$RUNNER_TEMP/quarantine-reconciliation-terminal.json"
 
-      - name: Preserve bounded recovery terminal artifact
+      - name: Preserve bounded reconciliation terminal artifact
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: quarantine-recovery-terminal-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/quarantine-recovery-terminal.json
+          name: quarantine-reconciliation-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quarantine-reconciliation-terminal.json
           if-no-files-found: ignore
           retention-days: 90
 
-      - name: Enforce Stage 3 recovery ACCEPTED
+      - name: Enforce Stage 3 reconciliation ACCEPTED
         if: always()
         shell: bash
         run: |
@@ -161,28 +161,30 @@ jobs:
           python3 - <<'PY'
           import json, os
           from pathlib import Path
-          path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-recovery-terminal.json'
+          path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-reconciliation-terminal.json'
           if not path.is_file():
-              raise SystemExit('quarantine recovery terminal is unavailable')
+              raise SystemExit('Stage 3 reconciliation terminal is unavailable')
           value = json.loads(path.read_text(encoding='utf-8'))
           if value.get('schema') != 'production-quarantine-recovery-terminal.v1':
-              raise SystemExit('quarantine recovery terminal schema differs')
-          if value.get('parent_recovery_terminal_ref') != 'issue-comment:5562605748':
-              raise SystemExit('quarantine recovery continuation parent differs')
-          if value.get('state') != 'ACCEPTED':
-              raise SystemExit('quarantine recovery did not reach ACCEPTED')
-          if value.get('postcondition_verified') is not True:
-              raise SystemExit('ACCEPTED recovery lacks independent postcondition')
+              raise SystemExit('Stage 3 reconciliation terminal schema differs')
+          if value.get('parent_recovery_terminal_ref') != 'issue-comment:5562925687':
+              raise SystemExit('Stage 3 reconciliation UNKNOWN parent differs')
+          if value.get('recovery_intent_ref') is not None or value.get('mutation_performed') is not False:
+              raise SystemExit('Stage 3 UNKNOWN reconciliation crossed a mutation boundary')
+          if value.get('state') != 'ACCEPTED' or value.get('postcondition_verified') is not True:
+              raise SystemExit('Stage 3 UNKNOWN reconciliation did not reach ACCEPTED')
           post = (value.get('facts') or {}).get('postcondition')
           if not isinstance(post, dict):
-              raise SystemExit('ACCEPTED recovery lacks postcondition evidence')
+              raise SystemExit('Stage 3 reconciliation lacks postcondition evidence')
           apk = post.get('apk') or {}
           runtime = post.get('runtime') or {}
           if apk.get('desired') is not True or apk.get('exact_artifact_verified') is not True:
-              raise SystemExit('ACCEPTED recovery lacks exact APK proof')
+              raise SystemExit('Stage 3 reconciliation lacks exact APK proof')
           if runtime.get('desired') is not True or runtime.get('inactive_exact_files_verified') is not True:
-              raise SystemExit('ACCEPTED recovery lacks exact rooted runtime proof')
+              raise SystemExit('Stage 3 reconciliation lacks exact rooted runtime proof')
+          if runtime.get('current_relation') != 'target':
+              raise SystemExit('Stage 3 reconciliation current runtime is not exact v0.1.7')
           if post.get('target_binding_matches_original_intent') is not True:
-              raise SystemExit('ACCEPTED recovery target binding differs')
-          print('STAGE3_QUARANTINE_RECOVERY_ACCEPTED')
+              raise SystemExit('Stage 3 reconciliation target binding differs')
+          print('STAGE3_UNKNOWN_RECONCILIATION_ACCEPTED')
           PY
