@@ -77,6 +77,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert {item["id"] for item in routes if item["enabled"]} == {
         "observe-public-deployment-projection",
         "verify-product-release",
+        "phone-target-observation-diagnostic",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
     }
@@ -85,6 +86,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert targets["phone-production"]["allowed_operations"] == [
         "deploy-product-release",
         "verify-product-release",
+        "phone-target-observation-diagnostic",
     ]
     assert targets["vm-production"]["active"] is False
     assert targets["vm-production"]["allowed_operations"] == ["deploy-product-release"]
