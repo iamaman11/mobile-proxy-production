@@ -69,6 +69,17 @@ def _terminal_matches_release_identity(payload: Mapping[str, object], identity: 
 
 
 def _validated_parent_recovery(evidence: IssueEvidenceStore):
+    initial_semantic_id = recovery_semantic_id(
+        target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+    )
+    continuation_semantic_id = recovery_semantic_id(
+        target=RECOVERY_TARGET,
+        release=RECOVERY_RELEASE,
+        quarantined_request_id=QUARANTINED_REQUEST_ID,
+        parent_recovery_terminal_ref=RECOVERY_PARENT_TERMINAL_REF,
+    )
     intents = [
         item for item in evidence.list_records(RECOVERY_INTENT_HEADING)
         if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
@@ -77,21 +88,20 @@ def _validated_parent_recovery(evidence: IssueEvidenceStore):
         item for item in evidence.list_records(RECOVERY_TERMINAL_HEADING)
         if item.payload.get("quarantined_request_id") == QUARANTINED_REQUEST_ID
     ]
-    if len(intents) != 1 or len(terminals) != 1:
+    allowed = {initial_semantic_id, continuation_semantic_id}
+    if any(item.payload.get("semantic_recovery_id") not in allowed for item in intents + terminals):
+        raise QuarantineRecoveryError("unexpected recovery lineage exists for the quarantined deployment")
+
+    parent_intents = [item for item in intents if item.payload.get("semantic_recovery_id") == initial_semantic_id]
+    parent_terminals = [item for item in terminals if item.payload.get("semantic_recovery_id") == initial_semantic_id]
+    if len(parent_intents) != 1 or len(parent_terminals) != 1:
         raise QuarantineRecoveryError("bounded Stage 3 continuation requires exactly one prior recovery generation")
-    parent_intent = intents[0]
-    parent_terminal = terminals[0]
+    parent_intent = parent_intents[0]
+    parent_terminal = parent_terminals[0]
     if parent_intent.ref != RECOVERY_PARENT_INTENT_REF or parent_terminal.ref != RECOVERY_PARENT_TERMINAL_REF:
         raise QuarantineRecoveryError("prior recovery evidence differs from the authorized Stage 3 parent")
     validate_recovery_intent(parent_intent.payload)
     validate_recovery_terminal(parent_terminal.payload)
-    first_semantic_id = recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-    )
-    if parent_intent.payload.get("semantic_recovery_id") != first_semantic_id or parent_terminal.payload.get("semantic_recovery_id") != first_semantic_id:
-        raise QuarantineRecoveryError("prior recovery semantic identity differs")
     if (
         parent_terminal.payload.get("state") != "QUARANTINED"
         or parent_terminal.payload.get("mutation_performed") is not True
@@ -100,6 +110,23 @@ def _validated_parent_recovery(evidence: IssueEvidenceStore):
         or parent_terminal.payload.get("recovery_intent_ref") != RECOVERY_PARENT_INTENT_REF
     ):
         raise QuarantineRecoveryError("prior recovery terminal is not the exact observed Stage 3 quarantine")
+
+    continuation_intents = [item for item in intents if item.payload.get("semantic_recovery_id") == continuation_semantic_id]
+    continuation_terminals = [item for item in terminals if item.payload.get("semantic_recovery_id") == continuation_semantic_id]
+    if len(continuation_intents) > 1 or len(continuation_terminals) > 1:
+        raise QuarantineRecoveryError("conflicting bounded continuation evidence exists")
+    for item in continuation_intents:
+        validate_recovery_intent(item.payload)
+        if item.payload.get("parent_recovery_terminal_ref") != RECOVERY_PARENT_TERMINAL_REF:
+            raise QuarantineRecoveryError("continuation intent parent differs")
+    for item in continuation_terminals:
+        validate_recovery_terminal(item.payload)
+        if item.payload.get("parent_recovery_terminal_ref") != RECOVERY_PARENT_TERMINAL_REF:
+            raise QuarantineRecoveryError("continuation terminal parent differs")
+        intent_ref = item.payload.get("recovery_intent_ref")
+        if intent_ref is not None:
+            if len(continuation_intents) != 1 or continuation_intents[0].ref != intent_ref:
+                raise QuarantineRecoveryError("continuation terminal intent lineage differs")
     return parent_intent, parent_terminal
 
 
