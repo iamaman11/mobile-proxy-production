@@ -69,6 +69,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json
+          import re
           from pathlib import Path
 
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
@@ -98,6 +99,7 @@ jobs:
               'operation_class': 'DEPLOY',
               'read_only': False,
               'destructive': True,
+              'authority_policy': 'private-issue1-owner+controller-main-exact+release-admission+explicit-refused-retry-lineage',
               'semantic_identity_policy': 'existing-deployment-request-v2',
               'idempotency_policy': 'durable-semantic-ledger',
               'recovery_policy': 'UNKNOWN-read-only-reconcile-no-blind-retry',
@@ -105,9 +107,26 @@ jobs:
           for field, expected in expected_contract.items():
               if deploy_contract.get(field) != expected:
                   raise SystemExit(f'deployment command contract drifted: {field}')
-          expected_pattern = r'^/deploy (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\.[0-9]+\.[0-9]+)$'
+          expected_pattern = r'^/(?=(?:deploy [^ ]+ [^ ]+|retry-deploy phone-production [^ ]+ req-sha256:[0-9a-f]{64})$)(?:deploy|retry-deploy) (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\.[0-9]+\.[0-9]+)(?: req-sha256:[0-9a-f]{64})?$'
           if deploy_contract.get('pattern') != expected_pattern:
               raise SystemExit('deployment command syntax drifted')
+          route_re = re.compile(expected_pattern)
+          prior = 'req-sha256:' + ('b' * 64)
+          allowed_commands = (
+              '/deploy phone-production v0.1.7',
+              '/deploy vm-production v0.1.7',
+              f'/retry-deploy phone-production v0.1.7 {prior}',
+          )
+          blocked_commands = (
+              '/retry-deploy phone-production v0.1.7',
+              f'/retry-deploy vm-production v0.1.7 {prior}',
+              f'/deploy phone-production v0.1.7 {prior}',
+              '/retry-deploy phone-production v0.1.7 gh-run:123:1',
+          )
+          if any(route_re.fullmatch(command) is None for command in allowed_commands):
+              raise SystemExit('bounded deployment command syntax rejects an allowed command')
+          if any(route_re.fullmatch(command) is not None for command in blocked_commands):
+              raise SystemExit('bounded deployment command syntax admits a forbidden retry form')
 
           required_router = (
               'Build existing cursor-free semantic deployment request',

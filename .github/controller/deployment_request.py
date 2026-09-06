@@ -51,26 +51,35 @@ class DeploymentRequest:
     product_release_tag: str
     mutating: bool
     provenance: RequestProvenance
+    retry_of_request_id: str | None = None
 
     def semantic_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema": self.schema,
             "operation": self.operation,
             "target": self.target,
             "product_release_tag": self.product_release_tag,
         }
+        if self.retry_of_request_id is not None:
+            payload["retry_of_request_id"] = self.retry_of_request_id
+        return payload
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        if self.retry_of_request_id is None:
+            value.pop("retry_of_request_id")
+        return value
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def build_deployment_request(
-    *, target: str,
+def _build_request(
+    *,
+    target: str,
     product_release_tag: str,
     provenance: RequestProvenance,
+    retry_of_request_id: str | None,
 ) -> DeploymentRequest:
     provenance.validate()
     target = target.strip()
@@ -79,13 +88,23 @@ def build_deployment_request(
         raise DeploymentRequestError("unsupported deployment target")
     if _TAG_RE.fullmatch(tag) is None:
         raise DeploymentRequestError("release tag must be exact semantic version vX.Y.Z")
-    semantic = {
+    if retry_of_request_id is not None:
+        retry_of_request_id = retry_of_request_id.strip()
+        if _REQUEST_RE.fullmatch(retry_of_request_id) is None:
+            raise DeploymentRequestError("retry lineage semantic request id is invalid")
+        if target != "phone-production":
+            raise DeploymentRequestError("pre-mutation REFUSED retry is currently admitted only for phone-production")
+    semantic: dict[str, object] = {
         "schema": SCHEMA,
         "operation": "deploy-product-release",
         "target": target,
         "product_release_tag": tag,
     }
+    if retry_of_request_id is not None:
+        semantic["retry_of_request_id"] = retry_of_request_id
     request_id = "req-sha256:" + _canonical_digest(semantic)
+    if retry_of_request_id == request_id:
+        raise DeploymentRequestError("retry lineage cannot reference the new semantic request itself")
     request = DeploymentRequest(
         schema=SCHEMA,
         request_id=request_id,
@@ -94,9 +113,39 @@ def build_deployment_request(
         product_release_tag=tag,
         mutating=True,
         provenance=provenance,
+        retry_of_request_id=retry_of_request_id,
     )
     validate_deployment_request(request.to_dict())
     return request
+
+
+def build_deployment_request(
+    *,
+    target: str,
+    product_release_tag: str,
+    provenance: RequestProvenance,
+) -> DeploymentRequest:
+    return _build_request(
+        target=target,
+        product_release_tag=product_release_tag,
+        provenance=provenance,
+        retry_of_request_id=None,
+    )
+
+
+def build_retry_deployment_request(
+    *,
+    target: str,
+    product_release_tag: str,
+    retry_of_request_id: str,
+    provenance: RequestProvenance,
+) -> DeploymentRequest:
+    return _build_request(
+        target=target,
+        product_release_tag=product_release_tag,
+        provenance=provenance,
+        retry_of_request_id=retry_of_request_id,
+    )
 
 
 def validate_deployment_request(value: Mapping[str, object]) -> None:
@@ -113,12 +162,26 @@ def validate_deployment_request(value: Mapping[str, object]) -> None:
     request_id = str(value.get("request_id", ""))
     if _REQUEST_RE.fullmatch(request_id) is None:
         raise DeploymentRequestError("semantic request id is invalid")
-    semantic = {
+    retry_raw = value.get("retry_of_request_id")
+    retry_of_request_id: str | None
+    if retry_raw is None:
+        retry_of_request_id = None
+    else:
+        retry_of_request_id = str(retry_raw)
+        if _REQUEST_RE.fullmatch(retry_of_request_id) is None:
+            raise DeploymentRequestError("retry lineage semantic request id is invalid")
+        if target != "phone-production":
+            raise DeploymentRequestError("pre-mutation REFUSED retry is currently admitted only for phone-production")
+        if retry_of_request_id == request_id:
+            raise DeploymentRequestError("retry lineage cannot reference the new semantic request itself")
+    semantic: dict[str, object] = {
         "schema": SCHEMA,
         "operation": "deploy-product-release",
         "target": target,
         "product_release_tag": tag,
     }
+    if retry_of_request_id is not None:
+        semantic["retry_of_request_id"] = retry_of_request_id
     if request_id != "req-sha256:" + _canonical_digest(semantic):
         raise DeploymentRequestError("semantic request id does not recompute")
     provenance = value.get("provenance")

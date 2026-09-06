@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -14,9 +13,11 @@ from deployment_request import (  # noqa: E402
     DeploymentRequestError,
     RequestProvenance,
     build_deployment_request,
+    build_retry_deployment_request,
 )
 
-COMMAND = "/deploy"
+DEPLOY_COMMAND = "/deploy"
+RETRY_COMMAND = "/retry-deploy"
 
 
 class RouteRefused(ValueError):
@@ -33,13 +34,24 @@ def classify(
     if command_body != command_body.strip() or "\n" in command_body or "\r" in command_body or "\x00" in command_body:
         raise RouteRefused("deployment command must be exactly one clean line")
     tokens = command_body.split()
-    if len(tokens) != 3 or tokens[0] != COMMAND:
-        raise RouteRefused("expected exact command: /deploy <target> <vX.Y.Z>")
+    provenance = RequestProvenance(repository, issue_number, comment_id, actor)
     try:
-        return build_deployment_request(
-            target=tokens[1],
-            product_release_tag=tokens[2],
-            provenance=RequestProvenance(repository, issue_number, comment_id, actor),
+        if len(tokens) == 3 and tokens[0] == DEPLOY_COMMAND:
+            return build_deployment_request(
+                target=tokens[1],
+                product_release_tag=tokens[2],
+                provenance=provenance,
+            )
+        if len(tokens) == 4 and tokens[0] == RETRY_COMMAND:
+            return build_retry_deployment_request(
+                target=tokens[1],
+                product_release_tag=tokens[2],
+                retry_of_request_id=tokens[3],
+                provenance=provenance,
+            )
+        raise RouteRefused(
+            "expected exact command: /deploy <target> <vX.Y.Z> or "
+            "/retry-deploy phone-production <vX.Y.Z> <prior-request-id>"
         )
     except DeploymentRequestError as exc:
         raise RouteRefused(str(exc)) from exc

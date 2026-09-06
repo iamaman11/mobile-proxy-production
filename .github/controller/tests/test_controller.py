@@ -2,19 +2,38 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 GITHUB_DIR = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
-from deployment_request import RequestProvenance, build_deployment_request
+import product_runtime_renderer as renderer
+from deployment_request import (
+    RequestProvenance,
+    build_deployment_request,
+    build_retry_deployment_request,
+)
 from deployment_state_machine import (
     ACCEPTED, QUARANTINED, RECOVERED, REFUSED, UNKNOWN,
     DeploymentState, TransitionError, deployment_projection, recover_unknown, reduce_state,
 )
+from evidence_store import EvidenceRecord, INTENT_HEADING, TERMINAL_HEADING
+from phone_runtime import PhoneRuntimeRefused
 from terminal_result import DeploymentTerminal, validate_terminal
+
+
+def _load_script(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def advance_to_dispatch() -> DeploymentState:
@@ -36,9 +55,179 @@ def test_duplicate_command_semantic_identity() -> None:
     first = build_deployment_request(target="phone-production", product_release_tag="v0.1.4", provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 100, "iamaman11"))
     duplicate_comment = build_deployment_request(target="phone-production", product_release_tag="v0.1.4", provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 999, "iamaman11"))
     other_release = build_deployment_request(target="phone-production", product_release_tag="v0.1.5", provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 101, "iamaman11"))
+    assert first.request_id == "req-sha256:3c1280e9aa922a8f77e003e73fcbdb92903d46ea68f1fa2d3bc7d9dbeb1c3173"
     assert first.request_id == duplicate_comment.request_id
     assert first.request_id != other_release.request_id
+    assert "retry_of_request_id" not in first.to_dict()
     assert "authority_cursor" not in first.to_dict()
+
+
+def test_explicit_refused_retry_request_identity_is_lineage_bound_not_comment_bound() -> None:
+    prior = "req-sha256:" + "4" * 64
+    first = build_retry_deployment_request(
+        target="phone-production", product_release_tag="v0.1.7", retry_of_request_id=prior,
+        provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 200, "iamaman11"),
+    )
+    duplicate_comment = build_retry_deployment_request(
+        target="phone-production", product_release_tag="v0.1.7", retry_of_request_id=prior,
+        provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 201, "iamaman11"),
+    )
+    other_prior = build_retry_deployment_request(
+        target="phone-production", product_release_tag="v0.1.7",
+        retry_of_request_id="req-sha256:" + "5" * 64,
+        provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 202, "iamaman11"),
+    )
+    ordinary = build_deployment_request(
+        target="phone-production", product_release_tag="v0.1.7",
+        provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 203, "iamaman11"),
+    )
+    assert first.request_id == duplicate_comment.request_id
+    assert first.request_id != other_prior.request_id
+    assert first.request_id != ordinary.request_id
+    assert first.retry_of_request_id == prior
+    assert first.to_dict()["retry_of_request_id"] == prior
+
+
+def test_retry_command_is_exactly_one_existing_destructive_route() -> None:
+    issue_router = _load_script("controller_test_issue_router", GITHUB_DIR / "scripts" / "issue_command_router.py")
+    command_router = _load_script("controller_test_deployment_command_router", GITHUB_DIR / "scripts" / "deployment_command_router.py")
+    sha = "a" * 40
+    prior = "req-sha256:" + "4" * 64
+    route = issue_router.classify(
+        repository="iamaman11/mobile-proxy-production", issue_number=1, author="iamaman11",
+        command=f"/retry-deploy phone-production v0.1.7 {prior}",
+        event_sha=sha, current_main_sha=sha, run_attempt=1,
+    )
+    assert route.route_id == "deploy-product-release"
+    assert route.operation == "deploy-product-release"
+    assert route.destructive is True and route.read_only is False
+    request = command_router.classify(
+        command_body=f"/retry-deploy phone-production v0.1.7 {prior}",
+        repository="iamaman11/mobile-proxy-production", issue_number=1, comment_id=300,
+        actor="iamaman11", owner="iamaman11",
+    )
+    assert request.retry_of_request_id == prior
+    invalid = (
+        "/retry-deploy phone-production v0.1.7",
+        f"/retry-deploy vm-production v0.1.7 {prior}",
+        f"/deploy phone-production v0.1.7 {prior}",
+        "/retry-deploy phone-production v0.1.7 req-sha256:bad",
+    )
+    for command in invalid:
+        try:
+            issue_router.classify(
+                repository="iamaman11/mobile-proxy-production", issue_number=1, author="iamaman11",
+                command=command, event_sha=sha, current_main_sha=sha, run_attempt=1,
+            )
+        except issue_router.RouteRefused:
+            continue
+        raise AssertionError(f"invalid retry command reached deployment route: {command}")
+
+
+def _refused_terminal(prior: str, *, target: str = "phone-production", release: str = "v0.1.7", mutation: bool = False, recovery: bool = False, state: str = REFUSED) -> dict[str, object]:
+    terminal = DeploymentTerminal(
+        operation="deploy-product-release", semantic_request_id=prior,
+        execution_id="gh-run:123:1", controller_revision="a" * 40, target=target,
+        product_release=release, release_id=1, release_source_sha="b" * 40,
+        artifact_digest="b3:" + "c" * 64, deployment_id=2, state=state, current_step="OBSERVE",
+        blocking_predicates=("bounded_test_refusal",), mutation_performed=mutation,
+        postcondition_verified=False, recovery_required=recovery,
+        next_allowed_operation="fix_blocking_predicates_then_reissue",
+    ).to_dict()
+    if state == REFUSED:
+        validate_terminal(terminal)
+    return terminal
+
+
+class _FakeEvidence:
+    def __init__(self, *, intents=(), terminals=()):
+        self.intents = list(intents)
+        self.terminals = list(terminals)
+
+    def list_records(self, heading: str):
+        if heading == INTENT_HEADING:
+            return list(self.intents)
+        if heading == TERMINAL_HEADING:
+            return list(self.terminals)
+        return []
+
+
+def test_refused_retry_lineage_admission_is_pre_release_and_fail_closed() -> None:
+    prepare = _load_script("controller_test_prepare_release", GITHUB_DIR / "scripts" / "prepare_release_deployment.py")
+    prior = "req-sha256:" + "4" * 64
+    request = build_retry_deployment_request(
+        target="phone-production", product_release_tag="v0.1.7", retry_of_request_id=prior,
+        provenance=RequestProvenance("iamaman11/mobile-proxy-production", 1, 400, "iamaman11"),
+    ).to_dict()
+    terminal = EvidenceRecord(10, TERMINAL_HEADING, _refused_terminal(prior))
+    admitted = prepare._retry_lineage_terminal(_FakeEvidence(terminals=[terminal]), request)
+    assert admitted.ref == "issue-comment:10"
+
+    bad_cases = (
+        _FakeEvidence(),
+        _FakeEvidence(terminals=[terminal, EvidenceRecord(11, TERMINAL_HEADING, _refused_terminal(prior))]),
+        _FakeEvidence(
+            intents=[EvidenceRecord(12, INTENT_HEADING, {"semantic_request_id": prior})],
+            terminals=[terminal],
+        ),
+        _FakeEvidence(terminals=[EvidenceRecord(13, TERMINAL_HEADING, _refused_terminal(prior, mutation=True))]),
+        _FakeEvidence(terminals=[EvidenceRecord(14, TERMINAL_HEADING, _refused_terminal(prior, recovery=True))]),
+        _FakeEvidence(terminals=[EvidenceRecord(15, TERMINAL_HEADING, _refused_terminal(prior, release="v0.1.6"))]),
+    )
+    for evidence in bad_cases:
+        try:
+            prepare._retry_lineage_terminal(evidence, request)
+        except Exception:
+            continue
+        raise AssertionError("ineligible prior request was admitted for destructive retry")
+
+    source = (GITHUB_DIR / "scripts" / "prepare_release_deployment.py").read_text(encoding="utf-8")
+    lineage = source.index("_retry_lineage_terminal(evidence, request)")
+    release = source.index("admitted = resolve_release(")
+    projection = source.index("projection = PublicDeploymentProjection(")
+    assert lineage < release < projection
+
+
+def test_product_subprocess_failure_classes_are_bounded_and_secret_free() -> None:
+    secret = "SHOULD_NEVER_APPEAR_IN_DURABLE_EVIDENCE"
+    original = renderer._run_checked
+
+    def leaking_failure(*args, **kwargs):
+        raise PhoneRuntimeRefused("raw stderr token=" + secret)
+
+    renderer._run_checked = leaking_failure
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifact = root / "runtime.tar.gz"
+            artifact.write_bytes(b"x")
+            try:
+                renderer._product_digest(product_root=root, asset_name="runtime.tar.gz", path=artifact)
+            except renderer.ProductReleaseComponentDigestRefused as exc:
+                assert str(exc) == "PRODUCT_RELEASE_COMPONENT_DIGEST_COMMAND_FAILED"
+                assert secret not in str(exc)
+            else:
+                raise AssertionError("digest subprocess failure was not classified")
+
+            materialized = SimpleNamespace(
+                source_root=root / "source",
+                release_root=root / "release",
+                required_live_release_paths=(),
+            )
+            materialized.source_root.mkdir()
+            materialized.release_root.mkdir()
+            try:
+                renderer.render_required_runtime_configs(
+                    materialized, product_root=root, manifest_json="{}",
+                    release_id="v0.1.7", environment={"SECRET": secret},
+                )
+            except renderer.ProductRuntimeRenderRefused as exc:
+                assert str(exc) == "PRODUCT_RUNTIME_RENDER_COMMAND_FAILED"
+                assert secret not in str(exc)
+            else:
+                raise AssertionError("runtime render subprocess failure was not classified")
+    finally:
+        renderer._run_checked = original
 
 
 def test_failure_before_dispatch() -> None:

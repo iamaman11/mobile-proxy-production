@@ -16,6 +16,16 @@ _TYPED_DIGEST = re.compile(r"b3:[0-9a-f]{64}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _NATIVE_COMPONENTS = frozenset({"runtime-supervisor", "host-daemon", "sing-box"})
 _TUNNEL_OWNER = "first_party_reverse_tunnel"
+_PRODUCT_RELEASE_COMPONENT_DIGEST_FAILURE = "PRODUCT_RELEASE_COMPONENT_DIGEST_COMMAND_FAILED"
+_PRODUCT_RUNTIME_RENDER_FAILURE = "PRODUCT_RUNTIME_RENDER_COMMAND_FAILED"
+
+
+class ProductReleaseComponentDigestRefused(PhoneRuntimeRefused):
+    pass
+
+
+class ProductRuntimeRenderRefused(PhoneRuntimeRefused):
+    pass
 
 
 def _safe_relative(raw: object, label: str) -> str:
@@ -62,15 +72,18 @@ def verify_product_source(*, product_root: Path, expected_source_sha: str) -> No
 
 
 def _product_digest(*, product_root: Path, asset_name: str, path: Path) -> str:
-    value = _run_checked(
-        [
-            "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
-            "--bin", "product-release-asset-digest", "--", asset_name, str(path.resolve()),
-        ],
-        cwd=product_root, timeout=600,
-    )
+    try:
+        value = _run_checked(
+            [
+                "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+                "--bin", "product-release-asset-digest", "--", asset_name, str(path.resolve()),
+            ],
+            cwd=product_root, timeout=600,
+        )
+    except PhoneRuntimeRefused:
+        raise ProductReleaseComponentDigestRefused(_PRODUCT_RELEASE_COMPONENT_DIGEST_FAILURE) from None
     if _TYPED_DIGEST.fullmatch(value) is None:
-        raise PhoneRuntimeRefused("PRODUCT digest command returned invalid identity")
+        raise ProductReleaseComponentDigestRefused(_PRODUCT_RELEASE_COMPONENT_DIGEST_FAILURE)
     return value
 
 
@@ -167,15 +180,18 @@ def render_required_runtime_configs(
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(manifest_path, 0o600)
     try:
-        _run_checked(
-            [
-                "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
-                "--bin", "operator-cli", "--", "package-device-release",
-                "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
-                "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
-            ],
-            cwd=product_root, timeout=600, environment=environment,
-        )
+        try:
+            _run_checked(
+                [
+                    "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+                    "--bin", "operator-cli", "--", "package-device-release",
+                    "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
+                    "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
+                ],
+                cwd=product_root, timeout=600, environment=environment,
+            )
+        except PhoneRuntimeRefused:
+            raise ProductRuntimeRenderRefused(_PRODUCT_RUNTIME_RENDER_FAILURE) from None
     finally:
         try:
             manifest_path.unlink()
