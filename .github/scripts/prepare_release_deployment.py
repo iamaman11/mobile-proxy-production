@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Mapping
 
 CONTROLLER = Path(__file__).resolve().parents[1] / "controller"
 sys.path.insert(0, str(CONTROLLER))
@@ -118,6 +119,79 @@ def _retry_lineage_terminal(evidence: IssueEvidenceStore, request: dict[str, obj
     return record
 
 
+def _terminal_matches_release(
+    payload: Mapping[str, object],
+    identity: object,
+    *,
+    target: str,
+) -> bool:
+    return (
+        payload.get("target") == target
+        and payload.get("product_release") == getattr(identity, "tag")
+        and payload.get("release_id") == getattr(identity, "release_id")
+        and payload.get("release_source_sha") == getattr(identity, "source_sha")
+        and payload.get("artifact_digest") == getattr(identity, "artifact_digest")
+    )
+
+
+def _retry_projection_deployment_id(
+    evidence: IssueEvidenceStore,
+    retry_terminal: object,
+    identity: object,
+    *,
+    target: str,
+) -> int | None:
+    if retry_terminal is None:
+        return None
+
+    immediate_payload = retry_terminal.payload
+    immediate_id = immediate_payload.get("deployment_id")
+    if immediate_id is not None and (not isinstance(immediate_id, int) or immediate_id <= 0):
+        raise EvidenceError("retry prior terminal public Deployment id is invalid")
+
+    terminals = evidence.list_records(TERMINAL_HEADING)
+    intents = evidence.list_records(INTENT_HEADING)
+    safe_candidates: set[int] = set()
+    for record in terminals:
+        payload = record.payload
+        if not _terminal_matches_release(payload, identity, target=target):
+            continue
+        deployment_id = payload.get("deployment_id")
+        if deployment_id is None:
+            continue
+        if not isinstance(deployment_id, int) or deployment_id <= 0:
+            raise EvidenceError("matching retry terminal public Deployment id is invalid")
+        if (
+            payload.get("state") == "REFUSED"
+            and payload.get("mutation_performed") is False
+            and payload.get("recovery_required") is False
+        ):
+            safe_candidates.add(deployment_id)
+
+    if immediate_id is not None:
+        safe_candidates.add(immediate_id)
+    if len(safe_candidates) > 1:
+        raise EvidenceError("retry release-target has ambiguous prior public Deployment lineage")
+    if not safe_candidates:
+        return None
+
+    candidate = next(iter(safe_candidates))
+    for record in intents:
+        if record.payload.get("deployment_id") == candidate:
+            raise EvidenceError("retry public Deployment lineage crossed durable mutation intent")
+    for record in terminals:
+        payload = record.payload
+        if payload.get("deployment_id") != candidate:
+            continue
+        if (
+            payload.get("state") != "REFUSED"
+            or payload.get("mutation_performed") is not False
+            or payload.get("recovery_required") is not False
+        ):
+            raise EvidenceError("retry public Deployment lineage contains mutation-bearing or ambiguous terminal")
+    return candidate
+
+
 def _admission_payload(
     *,
     request: dict[str, object],
@@ -227,6 +301,15 @@ def main() -> int:
     admitted_payload = admitted.to_dict()
     identity = admitted.identity
     target = str(request["target"])
+    try:
+        retry_expected_deployment_id = _retry_projection_deployment_id(
+            evidence,
+            retry_terminal,
+            identity,
+            target=target,
+        )
+    except EvidenceError as exc:
+        raise SystemExit("explicit REFUSED retry public Deployment lineage was not admitted") from exc
 
     if existing_intent is not None:
         if not payload_matches_release_identity(existing_intent.payload, identity, target=target):
@@ -266,6 +349,8 @@ def main() -> int:
             release_tag=identity.tag,
             release_id=identity.release_id,
             durable_deployment_id=durable_deployment_id,
+            retry_authorized=retry_terminal is not None,
+            retry_expected_deployment_id=retry_expected_deployment_id,
         )
         deployment_id = decision.deployment_id
     except (ProjectionError, ProjectionAdmissionError) as exc:
