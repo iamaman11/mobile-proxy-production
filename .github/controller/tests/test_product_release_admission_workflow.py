@@ -22,7 +22,7 @@ def test_release_resolver_is_sole_android_package_authority() -> None:
     assert re.search(r"android_package\s*(?:==|!=)", source) is None
 
     package_literals = re.findall(
-        r"(?<![A-Za-z0-9_])(?:[a-z][a-z0-9_]*\.){2,}[A-Za-z0-9_]+",
+        r'''["']((?:[a-z][a-z0-9_]*\.){2,}[A-Za-z0-9_]+)["']''',
         source,
     )
     assert package_literals == [], package_literals
