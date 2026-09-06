@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from github_projection import PublicDeploymentMatch
 
 _SAFE_REUSABLE_STATES = frozenset({"queued", "in_progress"})
-_RETRY_REOPENABLE_STATES = frozenset({"failure"})
+_RETRY_REOPENABLE_STATES = frozenset({"failure", "error"})
 
 
 class ProjectionAdmissionError(RuntimeError):
