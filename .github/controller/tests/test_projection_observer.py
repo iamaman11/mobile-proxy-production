@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import io
+import json
 import sys
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,7 +14,8 @@ SCRIPTS = ROOT / "scripts"
 WORKFLOWS = ROOT / "workflows"
 sys.path.insert(0, str(CONTROLLER))
 
-from github_projection import PublicDeploymentMatch  # noqa: E402
+import github_projection as projection_module  # noqa: E402
+from github_projection import ProjectionError, PublicDeploymentMatch, PublicDeploymentProjection  # noqa: E402
 
 
 def load_observer():
@@ -126,6 +130,105 @@ def test_observer_workflow_is_hosted_manual_read_only_only() -> None:
     )
     present = [token for token in forbidden if token in workflow]
     assert not present, present
+
+
+def test_projection_get_retries_transient_transport_with_fixed_bound() -> None:
+    projection = PublicDeploymentProjection("token")
+    calls = 0
+    responses: list[object] = [
+        urllib.error.URLError("temporary transport"),
+        urllib.error.HTTPError("https://api.github.com", 504, "gateway timeout", None, None),
+        io.BytesIO(json.dumps([]).encode("utf-8")),
+    ]
+    original = projection_module.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        value = responses.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    projection_module.urllib.request.urlopen = fake_urlopen
+    try:
+        assert projection._request("/deployments", method="GET") == []
+        assert calls == 3
+    finally:
+        projection_module.urllib.request.urlopen = original
+
+
+def test_projection_get_transport_exhaustion_is_exactly_three_attempts() -> None:
+    projection = PublicDeploymentProjection("token")
+    calls = 0
+    original = projection_module.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        raise urllib.error.URLError("temporary transport")
+
+    projection_module.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            projection._request("/deployments", method="GET")
+        except ProjectionError as exc:
+            assert str(exc) == "public GitHub Deployment projection failed"
+        else:
+            raise AssertionError("projection GET transport exhaustion unexpectedly succeeded")
+        assert calls == 3
+    finally:
+        projection_module.urllib.request.urlopen = original
+
+
+def test_projection_post_transport_failure_is_never_retried() -> None:
+    projection = PublicDeploymentProjection("token")
+    calls = 0
+    original = projection_module.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        raise urllib.error.URLError("ambiguous write transport")
+
+    projection_module.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            projection._request("/deployments", method="POST", payload={"ref": "a" * 40})
+        except ProjectionError:
+            pass
+        else:
+            raise AssertionError("projection POST transport failure unexpectedly succeeded")
+        assert calls == 1
+    finally:
+        projection_module.urllib.request.urlopen = original
+
+
+def test_projection_invalid_json_is_not_retried() -> None:
+    projection = PublicDeploymentProjection("token")
+    calls = 0
+    original = projection_module.urllib.request.urlopen
+
+    def fake_urlopen(_request, timeout=0):
+        nonlocal calls
+        assert timeout == 30
+        calls += 1
+        return io.BytesIO(b"not-json")
+
+    projection_module.urllib.request.urlopen = fake_urlopen
+    try:
+        try:
+            projection._request("/deployments", method="GET")
+        except ProjectionError:
+            pass
+        else:
+            raise AssertionError("invalid projection JSON unexpectedly succeeded")
+        assert calls == 1
+    finally:
+        projection_module.urllib.request.urlopen = original
 
 
 def main() -> int:
