@@ -49,6 +49,7 @@ class Route:
     read_only: bool
     destructive: bool
     concurrency_domain: str = ""
+    ref_policy: str = ""
     arguments_json: str = "{}"
     target: str = ""
     release_tag: str = ""
@@ -407,6 +408,7 @@ def classify(
         read_only=bool(raw["read_only"]),
         destructive=bool(raw["destructive"]),
         concurrency_domain=str(raw["concurrency_domain"]),
+        ref_policy=str(raw["ref_policy"]),
         arguments_json=json.dumps(groups, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
         target=target,
         release_tag=groups.get("release", ""),
