@@ -1,0 +1,99 @@
+name: Production phone transport preflight
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Prove bounded registered-phone transport readiness
+    if: >-
+      inputs.command == '/phone-transport-preflight' &&
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 2
+    concurrency:
+      group: production-phone-read-only-preflight
+      cancel-in-progress: false
+    environment: phone-production
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Check out exact Controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify immutable Issue 1 command provenance
+        shell: bash
+        env:
+          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$SOURCE_COMMENT_URL" = "https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-$SOURCE_COMMENT_ID"
+
+      - name: Run bounded read-only transport preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/phone_transport_preflight.py \
+            --controller-revision "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/phone-transport-preflight.json"
+
+      - name: Preserve mandatory bounded transport evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: phone-transport-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/phone-transport-preflight.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Classify bounded transport evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          value = json.loads((Path(os.environ['RUNNER_TEMP']) / 'phone-transport-preflight.json').read_text())
+          if value.get('schema') != 'phone-transport-preflight.v1':
+              raise SystemExit('phone transport preflight schema differs')
+          if value.get('classification') not in {'READY', 'NOT_READY'}:
+              raise SystemExit('phone transport preflight classification differs')
+          safety = value.get('safety')
+          if not isinstance(safety, dict):
+              raise SystemExit('phone transport preflight safety evidence is unavailable')
+          for field in ('phone_mutation_performed', 'provider_access_performed', 'provider_mutation_performed', 'deployment_created', 'deployment_intent_created', 'raw_device_identifier_recorded', 'secret_values_recorded'):
+              if safety.get(field) is not False:
+                  raise SystemExit(f'phone transport preflight safety differs: {field}')
+          print(f"PHONE_TRANSPORT_PREFLIGHT_CLASSIFIED classification={value['classification']}")
+          PY
