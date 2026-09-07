@@ -77,6 +77,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert {item["id"] for item in routes if item["enabled"]} == {
         "observe-public-deployment-projection",
         "verify-product-release",
+        "observe-phone-release",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
         "recover-quarantined-product-release",
@@ -86,6 +87,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert targets["phone-production"]["allowed_operations"] == [
         "deploy-product-release",
         "verify-product-release",
+        "observe-phone-release",
         "recover-quarantined-product-release",
     ]
     assert targets["vm-production"]["active"] is False
@@ -166,6 +168,60 @@ def test_release_verify_route_is_hosted_read_only_and_bounded() -> None:
         "finalize_deployment_projection",
         "release-deployment.yml",
         "api.github.com/repos/iamaman11/mobile-proxy-production/deployments",
+    ):
+        assert forbidden not in source
+
+
+def test_stage4_phone_observation_route_is_exact_read_only_and_bounded() -> None:
+    route = accepted("/observe-phone-release phone-production v0.1.7")
+    assert route.route_id == "observe-phone-release"
+    assert route.handler == "dispatch_workflow"
+    assert route.workflow == ".github/workflows/phone-release-observation.yml"
+    assert route.ref == "main"
+    assert route.operation == "observe-phone-release"
+    assert route.operation_class == "OBSERVE"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.read_only is True and route.destructive is False
+    assert route.concurrency_domain == "production-target-phone-production"
+    assert route.idempotency_policy == "single-run-attempt"
+    assert json.loads(route.arguments_json) == {
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused("/observe-phone-release phone-production v0.1.8")
+    refused("/observe-phone-release vm-production v0.1.7")
+    refused("/observe-phone-release phone-production v0.1.7 extra")
+    refused("/observe-phone-release phone-production v0.1.7;echo")
+    refused("/observe-phone-release phone-production v0.1.7\n/deploy phone-production v0.1.7")
+    refused("/observe-phone-release phone-production v0.1.7", run_attempt=2)
+
+    dispatcher = load_dispatcher()
+    workflow, ref, inputs = dispatcher.build_dispatch(
+        "observe-phone-release",
+        '{"release":"v0.1.7","target":"phone-production"}',
+    )
+    assert workflow == "phone-release-observation.yml"
+    assert ref == "main"
+    assert inputs == {"release_tag": "v0.1.7", "target": "phone-production"}
+
+    source = (WORKFLOWS / "phone-release-observation.yml").read_text(encoding="utf-8")
+    for required in (
+        "workflow_dispatch:",
+        "runs-on: [self-hosted, Linux, X64, android-production]",
+        "group: production-target-phone-production",
+        "cancel-in-progress: false",
+        "environment: phone-production",
+        ".github/scripts/observe_phone_release.py",
+        "STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT",
+    ):
+        assert required in source
+    for forbidden in (
+        "issue_comment:",
+        "dispatch_release_once",
+        "dispatch_install_once",
+        "/deploy ",
+        "/retry-deploy ",
     ):
         assert forbidden not in source
 
