@@ -33,6 +33,7 @@ jobs:
             .github/scripts/prepare_release_deployment.py \
             .github/scripts/finalize_deployment_projection.py \
             .github/scripts/run_phone_release_deployment.py \
+            .github/scripts/observe_phone_release.py \
             .github/scripts/prepare_quarantine_recovery.py \
             .github/scripts/run_quarantine_recovery.py
           python3 - <<'PY'
@@ -55,6 +56,7 @@ jobs:
           python3 .github/controller/tests/test_controller.py
           python3 .github/controller/tests/test_evidence_store.py
           python3 .github/controller/tests/test_issue_command_router.py
+          python3 .github/controller/tests/test_phone_release_observer.py
           python3 .github/controller/tests/test_product_release_admission_workflow.py
           python3 .github/controller/tests/test_projection_reconciler.py
           python3 .github/controller/tests/test_release_resolver.py
@@ -100,6 +102,7 @@ jobs:
           deployment = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
           quarantine_recovery = (workflows / 'quarantined-release-recovery.yml').read_text(encoding='utf-8')
           admission = (workflows / 'product-release-admission-proof.yml').read_text(encoding='utf-8')
+          phone_observation = (workflows / 'phone-release-observation.yml').read_text(encoding='utf-8')
           registry_path = Path('.github/production/command-control-registry.json')
           targets_path = Path('.github/production/targets.json')
 
@@ -119,10 +122,13 @@ jobs:
               "needs.route.outputs.handler == 'dispatch_workflow'",
               "needs.route.outputs.read_only == 'true'",
               "needs.route.outputs.destructive == 'false'",
+              "needs.route.outputs.handler == 'workflow_call'",
+              "needs.route.outputs.route_id == 'observe-phone-release'",
               "needs.route.outputs.route_id == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'recover-quarantined-product-release'",
               "needs.route.outputs.operation_class == 'RECOVER'",
               'name: Revalidate deployment request outputs against admitted route',
+              'uses: ./.github/workflows/phone-release-observation.yml',
               'uses: ./.github/workflows/release-deployment.yml',
               'uses: ./.github/workflows/quarantined-release-recovery.yml',
           )
@@ -173,6 +179,7 @@ jobs:
           if {item['id'] for item in active} != {
               'observe-public-deployment-projection',
               'verify-product-release',
+              'observe-phone-release',
               'deploy-product-release',
               'runner-android-build-tools-bootstrap',
               'recover-quarantined-product-release',
@@ -225,6 +232,28 @@ jobs:
           ):
               raise SystemExit('Product Release admission route safety contract differs')
 
+          observe = next((item for item in active if item.get('id') == 'observe-phone-release'), None)
+          if observe is None:
+              raise SystemExit('Stage 4 phone observation route is missing')
+          if (
+              observe.get('handler') != 'workflow_call'
+              or observe.get('operation') != 'observe-phone-release'
+              or observe.get('operation_class') != 'OBSERVE'
+              or observe.get('read_only') is not True
+              or observe.get('destructive') is not False
+              or observe.get('requires_phone') is not True
+              or observe.get('requires_vm') is not False
+              or observe.get('requires_release') is not True
+              or observe.get('allowed_targets') != ['phone-production']
+              or observe.get('physical_domains') != []
+              or observe.get('concurrency_domain') != 'production-target-phone-production'
+              or observe.get('authority_policy') != 'private-issue1-owner+controller-main-exact+stage4-v017-phone-observation'
+              or observe.get('workflow') != '.github/workflows/phone-release-observation.yml'
+              or observe.get('ref_policy') != 'controller-event-sha-exact'
+              or observe.get('pattern') != r'^/observe-phone-release (?P<target>phone-production) (?P<release>v0\.1\.7)$'
+          ):
+              raise SystemExit('Stage 4 phone observation route safety contract differs')
+
           if targets['phone-production'].get('active') is not True:
               raise SystemExit('phone target is not active')
           if targets['phone-production'].get('serialization_domain') != 'production-target-phone-production':
@@ -232,6 +261,7 @@ jobs:
           if targets['phone-production'].get('allowed_operations') != [
               'deploy-product-release',
               'verify-product-release',
+              'observe-phone-release',
               'recover-quarantined-product-release',
           ]:
               raise SystemExit('phone target operation allowlist differs')
@@ -270,6 +300,28 @@ jobs:
           present = [item for item in forbidden_admission if item in admission]
           if present:
               raise SystemExit('Product Release admission proof gained forbidden capability or duplicate package authority: ' + ', '.join(present))
+
+          for required in (
+              'workflow_call:',
+              "command != '/observe-phone-release phone-production v0.1.7'",
+              "SOURCE_ISSUE_NUMBER'] != '1'",
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              '.github/scripts/observe_phone_release.py',
+              'STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT',
+          ):
+              if required not in phone_observation:
+                  raise SystemExit('Stage 4 phone observation workflow invariant missing: ' + required)
+          for forbidden in (
+              'workflow_dispatch:',
+              'issue_comment:',
+              'dispatch_release_once',
+              'dispatch_install_once',
+          ):
+              if forbidden in phone_observation:
+                  raise SystemExit('Stage 4 phone observation workflow gained forbidden ingress/mutation surface: ' + forbidden)
 
           for required in (
               'runs-on: [self-hosted, Linux, X64, android-production]',
@@ -352,6 +404,7 @@ jobs:
 
           print('SOLE_COMMAND_CONTROL_INGRESS_OK')
           print('PRODUCT_RELEASE_ADMISSION_READ_ONLY_OK')
+          print('STAGE4_PHONE_OBSERVATION_BOUNDARY_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
           print('STAGE3_QUARANTINE_RECOVERY_BOUNDARY_OK')
           print('VM_TARGET_DEFERRED_OK')
