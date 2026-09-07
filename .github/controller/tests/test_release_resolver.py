@@ -331,6 +331,8 @@ def test_contract_download_recovers_from_transient_transport_with_fixed_bound() 
     ]
     calls = 0
     original = resolver.urllib.request.urlopen
+    original_sleep = resolver.time.sleep
+    sleeps: list[float] = []
 
     def fake_urlopen(_request, timeout=0):
         nonlocal calls
@@ -342,11 +344,14 @@ def test_contract_download_recovers_from_transient_transport_with_fixed_bound() 
         return value
 
     resolver.urllib.request.urlopen = fake_urlopen
+    resolver.time.sleep = sleeps.append
     try:
         assert resolver._download(item) == payload
         assert calls == 3
+        assert sleeps == [1.0, 3.0]
     finally:
         resolver.urllib.request.urlopen = original
+        resolver.time.sleep = original_sleep
 
 
 def test_contract_download_transport_exhaustion_is_exactly_three_attempts() -> None:
@@ -354,6 +359,8 @@ def test_contract_download_transport_exhaustion_is_exactly_three_attempts() -> N
     item = asset("release-manifest.json", 3, hashlib.sha256(payload).hexdigest())
     calls = 0
     original = resolver.urllib.request.urlopen
+    original_sleep = resolver.time.sleep
+    sleeps: list[float] = []
 
     def fake_urlopen(_request, timeout=0):
         nonlocal calls
@@ -362,6 +369,7 @@ def test_contract_download_transport_exhaustion_is_exactly_three_attempts() -> N
         raise urllib.error.URLError("temporary transport")
 
     resolver.urllib.request.urlopen = fake_urlopen
+    resolver.time.sleep = sleeps.append
     try:
         try:
             resolver._download(item)
@@ -370,8 +378,10 @@ def test_contract_download_transport_exhaustion_is_exactly_three_attempts() -> N
         else:
             raise AssertionError("contract download exhaustion unexpectedly succeeded")
         assert calls == 3
+        assert sleeps == [1.0, 3.0]
     finally:
         resolver.urllib.request.urlopen = original
+        resolver.time.sleep = original_sleep
 
 
 def test_contract_download_integrity_mismatch_is_not_retried() -> None:
@@ -407,6 +417,8 @@ def test_release_metadata_recovers_from_transient_server_failure() -> None:
     ]
     calls = 0
     original = resolver.urllib.request.urlopen
+    original_sleep = resolver.time.sleep
+    sleeps: list[float] = []
 
     def fake_urlopen(_request, timeout=0):
         nonlocal calls
@@ -418,11 +430,14 @@ def test_release_metadata_recovers_from_transient_server_failure() -> None:
         return value
 
     resolver.urllib.request.urlopen = fake_urlopen
+    resolver.time.sleep = sleeps.append
     try:
         assert resolver._request_json(url) == {"id": 1}
         assert calls == 3
+        assert sleeps == [1.0, 3.0]
     finally:
         resolver.urllib.request.urlopen = original
+        resolver.time.sleep = original_sleep
 
 
 def test_release_metadata_non_transient_http_failure_is_not_retried() -> None:

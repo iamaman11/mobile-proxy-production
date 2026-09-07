@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,7 @@ _PHONE_RUNTIME_ABI = {
 }
 _SING_BOX_ARCHIVE_DOMAIN = "mobile-proxy/upstream-sing-box-archive/v1"
 _READ_TRANSPORT_ATTEMPTS = 3
+_READ_TRANSPORT_RETRY_DELAYS_SECONDS = (1.0, 3.0)
 
 
 class ReleaseAdmissionError(RuntimeError):
@@ -64,6 +66,13 @@ def _transient_http_error(exc: urllib.error.HTTPError) -> bool:
     return exc.code == 429 or 500 <= exc.code < 600
 
 
+def _retry_read_transport(attempt: int) -> None:
+    """Apply the fixed, bounded delay before a safe public-read retry."""
+    if attempt < 0 or attempt >= len(_READ_TRANSPORT_RETRY_DELAYS_SECONDS):
+        raise AssertionError("invalid public Release transport retry attempt")
+    time.sleep(_READ_TRANSPORT_RETRY_DELAYS_SECONDS[attempt])
+
+
 def _request_json(url: str) -> Mapping[str, Any]:
     for attempt in range(_READ_TRANSPORT_ATTEMPTS):
         request = urllib.request.Request(
@@ -79,10 +88,12 @@ def _request_json(url: str) -> Mapping[str, Any]:
                 value = json.load(response)
         except urllib.error.HTTPError as exc:
             if _transient_http_error(exc) and attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                _retry_read_transport(attempt)
                 continue
             raise ReleaseAdmissionError("public Release metadata is unavailable") from exc
         except (OSError, urllib.error.URLError) as exc:
             if attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                _retry_read_transport(attempt)
                 continue
             raise ReleaseAdmissionError("public Release metadata is unavailable") from exc
         except json.JSONDecodeError as exc:
@@ -116,10 +127,12 @@ def _download(asset: Mapping[str, Any]) -> bytes:
                 data = response.read(2_000_001)
         except urllib.error.HTTPError as exc:
             if _transient_http_error(exc) and attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                _retry_read_transport(attempt)
                 continue
             raise ReleaseAdmissionError("release contract asset is unavailable") from exc
         except (OSError, urllib.error.URLError) as exc:
             if attempt + 1 < _READ_TRANSPORT_ATTEMPTS:
+                _retry_read_transport(attempt)
                 continue
             raise ReleaseAdmissionError("release contract asset is unavailable") from exc
         if len(data) > 2_000_000:
