@@ -135,10 +135,10 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
     cache_state = cache.get("state") if isinstance(cache, dict) else "unavailable"
     if cache_state not in {"disabled", "hit", "miss", "repaired"}:
         cache_state = "unavailable"
-    verifier = value.get("verifier_tool_cache")
-    verifier_state = verifier.get("state") if isinstance(verifier, dict) else "unavailable"
-    if verifier_state not in {"disabled", "hit", "miss", "repaired"}:
-        verifier_state = "unavailable"
+    tool_cache = value.get("product_tool_cache")
+    tool_cache_state = tool_cache.get("state") if isinstance(tool_cache, dict) else "unavailable"
+    if tool_cache_state not in {"disabled", "hit", "miss", "repaired"}:
+        tool_cache_state = "unavailable"
     return {
         "exact_release_runtime": value.get("exact_release_runtime") is True,
         "artifact_name": value.get("artifact_name"),
@@ -156,11 +156,14 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
             "persistent": cache.get("persistent") is True if isinstance(cache, dict) else False,
             "rendered_trees_retained": False,
         },
-        "verifier_tool_cache": {
-            "state": verifier_state,
-            "persistent": verifier.get("persistent") is True if isinstance(verifier, dict) else False,
-            "binary_identity_verified": verifier.get("binary_identity_verified") is True if isinstance(verifier, dict) else False,
+        "product_tool_cache": {
+            "state": tool_cache_state,
+            "persistent": tool_cache.get("persistent") is True if isinstance(tool_cache, dict) else False,
+            "binary_identity_verified": (
+                tool_cache.get("binary_identity_verified") is True if isinstance(tool_cache, dict) else False
+            ),
             "verification_results_cached": False,
+            "rendered_outputs_cached": False,
             "runtime_or_config_state_cached": False,
         },
         "phase_timing_ms": _bounded_phase_timing(value.get("phase_timing_ms")),
@@ -227,13 +230,7 @@ def _bounded_top_level_timings(raw: object) -> dict[str, int]:
 
 
 def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
-    """Project decision-grade evidence safe for public workflow logs.
-
-    The artifact remains richer, but the log summary deliberately omits target
-    binding identifiers, APK digests, materialization digests, raw paths, and all
-    secret-derived values so GitHub artifact transport is not a single point of
-    failure for Stage 4 classification.
-    """
+    """Return decision-grade public evidence without sensitive identifiers."""
     summary: dict[str, object] = {
         "schema": payload.get("schema"),
         "controller_revision": payload.get("controller_revision"),
@@ -248,12 +245,12 @@ def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
     if isinstance(materialization, dict):
         phase_timing = materialization.get("phase_timing_ms")
         cache = materialization.get("runtime_archive_cache")
-        verifier = materialization.get("verifier_tool_cache")
+        tool_cache = materialization.get("product_tool_cache")
         if (
             isinstance(phase_timing, dict)
             and phase_timing
             and isinstance(cache, dict)
-            and isinstance(verifier, dict)
+            and isinstance(tool_cache, dict)
         ):
             summary["runtime_preparation"] = {
                 "phase_timing_ms": phase_timing,
@@ -262,11 +259,12 @@ def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
                     "persistent": cache.get("persistent") is True,
                     "rendered_trees_retained": False,
                 },
-                "verifier_tool_cache": {
-                    "state": verifier.get("state"),
-                    "persistent": verifier.get("persistent") is True,
-                    "binary_identity_verified": verifier.get("binary_identity_verified") is True,
+                "product_tool_cache": {
+                    "state": tool_cache.get("state"),
+                    "persistent": tool_cache.get("persistent") is True,
+                    "binary_identity_verified": tool_cache.get("binary_identity_verified") is True,
                     "verification_results_cached": False,
+                    "rendered_outputs_cached": False,
                     "runtime_or_config_state_cached": False,
                 },
             }
@@ -390,7 +388,6 @@ def main(argv: list[str] | None = None) -> int:
                     rendered_paths=rendered_paths,
                 )
 
-        desired = snapshot.desired
         timings_ms["total"] = int((time.monotonic() - started_at) * 1000)
         payload = {
             **_base_payload(controller_revision=args.controller_revision, admitted=admitted),
@@ -399,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                 "apk": _bounded_apk(apk),
                 "runtime": _bounded_runtime(runtime),
                 "runtime_file_drift": runtime_file_drift,
-                "desired": desired,
+                "desired": snapshot.desired,
             },
             "expected_materialization": _bounded_materialization(facts.get("runtime_verification")),
             "timing_ms": timings_ms,
