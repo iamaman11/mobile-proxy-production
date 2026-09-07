@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   validate-stage3-quarantine-recovery:
-    name: Validate exact Stage 3 UNKNOWN read-only reconciliation
+    name: Validate final Stage 3 bounded recovery
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,7 +19,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prove exact UNKNOWN lineage and zero mutation capability
+      - name: Prove exact reconciled lineage and final mutation boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -34,9 +34,9 @@ jobs:
           targets = json.loads(Path('.github/production/targets.json').read_text(encoding='utf-8'))
           router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/quarantined-release-recovery.yml').read_text(encoding='utf-8')
-          prepare = Path('.github/scripts/prepare_quarantine_reconciliation.py').read_text(encoding='utf-8')
-          runner = Path('.github/scripts/run_quarantine_reconciliation.py').read_text(encoding='utf-8')
-          observer = Path('.github/controller/quarantine_phone_observer.py').read_text(encoding='utf-8')
+          prepare = Path('.github/scripts/prepare_quarantine_recovery.py').read_text(encoding='utf-8')
+          runner = Path('.github/scripts/run_quarantine_recovery.py').read_text(encoding='utf-8')
+          adapter = Path('.github/controller/phone_target.py').read_text(encoding='utf-8')
           ledger = Path('.github/controller/quarantine_recovery.py').read_text(encoding='utf-8')
 
           routes = [r for r in registry['routes'] if r['id'] == 'recover-quarantined-product-release']
@@ -44,50 +44,62 @@ jobs:
               raise SystemExit('exact Stage 3 recovery route is missing or duplicated')
           route = routes[0]
           if route['operation_class'] != 'RECOVER' or not route['destructive'] or route['read_only']:
-              raise SystemExit('existing recovery ingress classification drifted')
+              raise SystemExit('Stage 3 recovery ingress classification drifted')
           if route['concurrency_domain'] != 'target-global-mutation':
-              raise SystemExit('Stage 3 reconciliation lost target-global serialization')
+              raise SystemExit('Stage 3 recovery lost target-global serialization')
           if '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in route['pattern'] or 'v0\\.1\\.7' not in route['pattern']:
               raise SystemExit('Stage 3 route is not exact request/release bound')
           if 'recover-quarantined-product-release' not in targets['targets']['phone-production']['allowed_operations']:
-              raise SystemExit('phone target does not admit the existing Stage 3 recovery route')
+              raise SystemExit('phone target does not admit the Stage 3 recovery route')
           if 'recover-quarantined-v017' not in router or 'quarantined-release-recovery.yml' not in router:
               raise SystemExit('sole Issue #1 router does not own Stage 3 invocation')
 
           for required in (
               'production-target-phone-production',
-              'prepare_quarantine_reconciliation.py',
-              'run_quarantine_reconciliation.py',
-              "issue-comment:5562925687",
-              'STAGE3_UNKNOWN_RECONCILIATION_ACCEPTED',
+              'prepare_quarantine_recovery.py',
+              'run_quarantine_recovery.py',
+              'issue-comment:5563105912',
+              'STAGE3_FINAL_RECOVERY_ACCEPTED',
               'continue-on-error: true',
           ):
               if required not in workflow:
-                  raise SystemExit('UNKNOWN reconciliation workflow contract missing ' + required)
+                  raise SystemExit('final Stage 3 workflow contract missing ' + required)
 
           for required in (
-              'RECOVERY_UNKNOWN_INTENT_REF', 'RECOVERY_UNKNOWN_TERMINAL_REF',
-              'state'):
-              if required not in prepare + runner + ledger:
-                  raise SystemExit('UNKNOWN reconciliation lineage contract missing ' + required)
-          if 'UNKNOWN reconciliation is read-only and cannot create a recovery intent' not in ledger:
-              raise SystemExit('UNKNOWN parent is not structurally barred from mutation intent')
-          if 'UNKNOWN reconciliation terminal must be read-only with verified postcondition' not in ledger:
-              raise SystemExit('UNKNOWN reconciliation terminal is not structurally read-only')
+              'RECOVERY_UNKNOWN_TERMINAL_REF',
+              'RECOVERY_RECONCILED_REFUSED_TERMINAL_REF',
+              'read-only reconciliation is not the exact known safe Stage 3 state',
+              'STAGE3_FINAL_RECOVERY_ADMITTED',
+          ):
+              if required not in prepare + ledger:
+                  raise SystemExit('final Stage 3 lineage contract missing ' + required)
 
-          forbidden = (
-              '_activate(', 'dispatch_release_once(', 'dispatch_install_once(',
-              '_stage_runtime(', '_materialize_inactive(', 'RECOVERY_INTENT_SCHEMA',
-              'mkdir ', 'cp ', 'rm ', 'mv ', 'ln ', 'kill ', 'chmod ', 'pm install',
+          for required in (
+              'PhoneTargetMutationOutcomeUnknown',
+              'activation_state = "completed_failure"',
+              'parent_recovery_terminal_ref',
+              '_activate(',
+              'postcondition',
+          ):
+              if required not in runner:
+                  raise SystemExit('final recovery transaction contract missing ' + required)
+
+          forbidden_runner = (
+              'dispatch_install_once(', '_stage_runtime(', '_materialize_inactive(',
+              'pm install', 'adb install', 'rm -rf /data/adb/mobile-proxy-node/releases',
           )
-          for name, source in (('runner', runner), ('observer', observer)):
-              present = [item for item in forbidden if item in source]
-              if present:
-                  raise SystemExit(f'{name} exposes forbidden UNKNOWN reconciliation mutation capability: {present!r}')
+          present = [item for item in forbidden_runner if item in runner]
+          if present:
+              raise SystemExit(f'final recovery exposes forbidden materialization/install capability: {present!r}')
 
-          if 'observe_exact_inactive_runtime(' not in runner or '_run_root_script(' not in observer:
-              raise SystemExit('read-only rooted runtime observation is not wired')
-          if 'durable_mutation_intent_created' not in runner or 'mutation_performed' not in runner:
-              raise SystemExit('read-only evidence markers are incomplete')
-          print('STAGE3_UNKNOWN_RECONCILIATION_POLICY_OK')
+          if 'ln -sfn "$TARGET" "$ROOT/current"' not in adapter:
+              raise SystemExit('Android 11 compatible current cutover is missing')
+          if '[ "$(readlink "$ROOT/current")" = "$TARGET" ]' not in adapter:
+              raise SystemExit('current cutover lacks immediate readlink assertion')
+          if 'mv -Tf' in adapter or 'CURRENT_TMP' in adapter:
+              raise SystemExit('unsupported temporary mv cutover remains active')
+          if 'raise PhoneTargetMutationOutcomeUnknown' not in adapter:
+              raise SystemExit('transport ambiguity no longer has a distinct UNKNOWN class')
+
+          print('STAGE3_FINAL_RECOVERY_POLICY_OK')
           PY
