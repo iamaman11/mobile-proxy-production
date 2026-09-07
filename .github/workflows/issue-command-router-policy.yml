@@ -34,6 +34,7 @@ jobs:
             .github/scripts/finalize_deployment_projection.py \
             .github/scripts/run_phone_release_deployment.py \
             .github/scripts/observe_phone_release.py \
+            .github/scripts/reconcile_phone_release.py \
             .github/scripts/phone_transport_preflight.py \
             .github/scripts/prepare_quarantine_recovery.py \
             .github/scripts/run_quarantine_recovery.py
@@ -58,6 +59,8 @@ jobs:
           python3 .github/controller/tests/test_evidence_store.py
           python3 .github/controller/tests/test_issue_command_router.py
           python3 .github/controller/tests/test_phone_release_observer.py
+          python3 .github/controller/tests/test_phone_release_state.py
+          python3 .github/controller/tests/test_phone_release_reconcile.py
           python3 .github/controller/tests/test_product_release_admission_workflow.py
           python3 .github/controller/tests/test_projection_reconciler.py
           python3 .github/controller/tests/test_release_resolver.py
@@ -104,6 +107,7 @@ jobs:
           quarantine_recovery = (workflows / 'quarantined-release-recovery.yml').read_text(encoding='utf-8')
           admission = (workflows / 'product-release-admission-proof.yml').read_text(encoding='utf-8')
           phone_observation = (workflows / 'phone-release-observation.yml').read_text(encoding='utf-8')
+          phone_reconcile = (workflows / 'phone-release-reconcile.yml').read_text(encoding='utf-8')
           phone_transport_preflight = (workflows / 'phone-transport-preflight.yml').read_text(encoding='utf-8')
           registry_path = Path('.github/production/command-control-registry.json')
           targets_path = Path('.github/production/targets.json')
@@ -126,6 +130,8 @@ jobs:
               "needs.route.outputs.destructive == 'false'",
               "needs.route.outputs.handler == 'workflow_call'",
               "needs.route.outputs.route_id == 'observe-phone-release'",
+              "needs.route.outputs.route_id == 'reconcile-phone-release'",
+              "needs.route.outputs.operation_class == 'RECONCILE'",
               "needs.route.outputs.route_id == 'phone-transport-preflight'",
               'source_comment_created_at: ${{ github.event.comment.created_at }}',
               "needs.route.outputs.route_id == 'deploy-product-release'",
@@ -133,6 +139,7 @@ jobs:
               "needs.route.outputs.operation_class == 'RECOVER'",
               'name: Revalidate deployment request outputs against admitted route',
               'uses: ./.github/workflows/phone-release-observation.yml',
+              'uses: ./.github/workflows/phone-release-reconcile.yml',
               'uses: ./.github/workflows/phone-transport-preflight.yml',
               'uses: ./.github/workflows/release-deployment.yml',
               'uses: ./.github/workflows/quarantined-release-recovery.yml',
@@ -185,6 +192,7 @@ jobs:
               'observe-public-deployment-projection',
               'verify-product-release',
               'observe-phone-release',
+              'reconcile-phone-release',
               'phone-transport-preflight',
               'deploy-product-release',
               'runner-android-build-tools-bootstrap',
@@ -260,6 +268,30 @@ jobs:
           ):
               raise SystemExit('Stage 4 phone observation route safety contract differs')
 
+          reconcile = next((item for item in active if item.get('id') == 'reconcile-phone-release'), None)
+          if reconcile is None:
+              raise SystemExit('Stage 4 phone reconcile route is missing')
+          if (
+              reconcile.get('handler') != 'workflow_call'
+              or reconcile.get('operation') != 'reconcile-phone-release'
+              or reconcile.get('operation_class') != 'RECONCILE'
+              or reconcile.get('read_only') is not False
+              or reconcile.get('destructive') is not False
+              or reconcile.get('requires_phone') is not True
+              or reconcile.get('requires_vm') is not False
+              or reconcile.get('requires_release') is not True
+              or reconcile.get('allowed_targets') != ['phone-production']
+              or reconcile.get('physical_domains') != []
+              or reconcile.get('concurrency_domain') != 'production-target-phone-production'
+              or reconcile.get('authority_policy') != 'private-issue1-owner+controller-main-exact+stage4-v017-target-read-only-reconcile'
+              or reconcile.get('semantic_identity_policy') != 'command-arguments+existing-admitted-projection'
+              or reconcile.get('idempotency_policy') != 'projection-readback-noop'
+              or reconcile.get('workflow') != '.github/workflows/phone-release-reconcile.yml'
+              or reconcile.get('ref_policy') != 'controller-event-sha-exact'
+              or reconcile.get('pattern') != r'^/reconcile-phone-release (?P<target>phone-production) (?P<release>v0\.1\.7)$'
+          ):
+              raise SystemExit('Stage 4 phone reconcile route safety contract differs')
+
           transport_preflight = next((item for item in active if item.get('id') == 'phone-transport-preflight'), None)
           if transport_preflight is None:
               raise SystemExit('Stage 5 phone transport preflight route is missing')
@@ -290,6 +322,7 @@ jobs:
               'deploy-product-release',
               'verify-product-release',
               'observe-phone-release',
+              'reconcile-phone-release',
               'phone-transport-preflight',
               'recover-quarantined-product-release',
           ]:
@@ -353,15 +386,64 @@ jobs:
               if forbidden in phone_observation:
                   raise SystemExit('Stage 4 phone observation workflow gained forbidden ingress/mutation surface: ' + forbidden)
 
+          for required in (
+              'workflow_call:',
+              "command != '/reconcile-phone-release phone-production v0.1.7'",
+              "SOURCE_ISSUE_NUMBER'] != '1'",
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              '.github/scripts/reconcile_phone_release.py',
+              'STAGE4_PHONE_RELEASE_RECONCILE_ACCEPTED',
+              'Preserve mandatory bounded Stage 4 reconcile evidence',
+              'historical_terminal_rewritten=false',
+          ):
+              if required not in phone_reconcile:
+                  raise SystemExit('Stage 4 phone reconcile workflow invariant missing: ' + required)
+          for forbidden in (
+              'workflow_dispatch:',
+              'issue_comment:',
+              'dispatch_release_once',
+              'dispatch_install_once',
+              'adb install',
+              'adb push',
+              '/deploy ',
+              '/retry-deploy ',
+          ):
+              if forbidden in phone_reconcile:
+                  raise SystemExit('Stage 4 phone reconcile workflow gained forbidden ingress/phone mutation surface: ' + forbidden)
+
+          phone_state = Path('.github/controller/phone_release_state.py').read_text(encoding='utf-8')
           deployment_runtime = Path('.github/scripts/run_phone_release_deployment.py').read_text(encoding='utf-8')
+          observer_runtime = Path('.github/scripts/observe_phone_release.py').read_text(encoding='utf-8')
           for required in (
               'get_or_fetch_runtime_archive',
               'MOBILE_PROXY_RUNTIME_CACHE_DIR',
               'runtime archive cache is unavailable',
               'rendered_trees_retained',
+              'prepare_verified_release_runtime',
+              'observe_exact_phone_release',
+          ):
+              if required not in phone_state:
+                  raise SystemExit('shared exact phone state/cache invariant missing: ' + required)
+          for required in (
+              'from phone_release_state import',
+              'return prepare_verified_release_runtime(',
+              'observe_exact_phone_release(',
+              'require_observed_pair(',
           ):
               if required not in deployment_runtime:
-                  raise SystemExit('runtime cache contract invariant missing: ' + required)
+                  raise SystemExit('deployment shared phone state seam invariant missing: ' + required)
+          if 'run_phone_release_deployment as deployment_runner' in observer_runtime:
+              raise SystemExit('observer still imports deployment-private phone state helpers')
+          for required in (
+              'from phone_release_state import',
+              'prepare_verified_release_runtime(',
+              'observe_exact_phone_release(',
+          ):
+              if required not in observer_runtime:
+                  raise SystemExit('observer shared phone state seam invariant missing: ' + required)
 
           for required in (
               'workflow_call:',
@@ -478,6 +560,7 @@ jobs:
           print('SOLE_COMMAND_CONTROL_INGRESS_OK')
           print('PRODUCT_RELEASE_ADMISSION_READ_ONLY_OK')
           print('STAGE4_PHONE_OBSERVATION_BOUNDARY_OK')
+          print('STAGE4_PHONE_RECONCILE_BOUNDARY_OK')
           print('STAGE5_PHONE_TRANSPORT_PREFLIGHT_BOUNDARY_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
           print('STAGE3_QUARANTINE_RECOVERY_BOUNDARY_OK')
