@@ -17,6 +17,9 @@ _SAFE_REMOTE = re.compile(r"[A-Za-z0-9_./-]+")
 _ROOT_CAPABILITY_UNAVAILABLE = "rooted runtime capability unavailable"
 _ROOT_LAYOUT_OBSERVATION_FAILED = "rooted runtime layout observation failed"
 _ROOT_LAYOUT_OBSERVATION_MALFORMED = "rooted runtime state observation is malformed"
+_ROOT_FILE_OBSERVATION_FAILED = "rooted runtime required-file observation failed"
+_ROOT_FILE_OBSERVATION_MALFORMED = "rooted runtime required-file observation is malformed"
+_REQUIRED_FILE_STATUSES = frozenset({"exact", "digest_mismatch", "missing", "wrong_type", "unreadable"})
 _MAX_ROOT_SCRIPT_BYTES = 16 * 1024
 _MAX_ROOT_OUTPUT_BYTES = 4 * 1024
 _ROOT_DRAIN_CHUNK_BYTES = 8 * 1024
@@ -217,6 +220,7 @@ def _probe_root_capability(serial: str) -> None:
             b"if [ 1 -eq 1 ]; then printf 'grammar=ok\\n'; fi\n"
             b"command -v readlink >/dev/null\n"
             b"command -v test >/dev/null\n"
+            b"command -v sha256sum >/dev/null\n"
             b"printf 'tools=ok\\n'\n"
         ),
     )
@@ -307,6 +311,53 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
         exact_files_verified=exact, required_file_count=len(files), desired=desired,
         admissible_for_new_dispatch=(desired or (not exists and current_is_managed)),
     )
+
+
+def observe_runtime_required_file_statuses(
+    *, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Observe every required runtime file without returning paths or digests."""
+    release_id = _safe_release_id(release_id)
+    files = _files(release_root, required_paths)
+    target = f"{_ROOT}/releases/{release_id}"
+    _probe_root_capability(serial)
+    lines = [
+        "set -eu",
+        f"TARGET='{target}'",
+        "check_file() {",
+        '  index="$1"',
+        '  expected="$2"',
+        '  relative="$3"',
+        '  path="$TARGET/$relative"',
+        '  if [ ! -e "$path" ] && [ ! -L "$path" ]; then printf "%s=missing\\n" "$index"; return 0; fi',
+        '  if [ -L "$path" ] || [ ! -f "$path" ]; then printf "%s=wrong_type\\n" "$index"; return 0; fi',
+        '  line="$(sha256sum "$path" 2>/dev/null || true)"',
+        '  set -- $line',
+        '  if [ "$#" -lt 1 ]; then printf "%s=unreadable\\n" "$index"; return 0; fi',
+        '  if [ "$1" = "$expected" ]; then printf "%s=exact\\n" "$index"; else printf "%s=digest_mismatch\\n" "$index"; fi',
+        "}",
+    ]
+    for index, (relative, _local, expected) in enumerate(files):
+        lines.append(f"check_file {index} {expected} '{relative}'")
+    result = _run_root_script(serial, ("\n".join(lines) + "\n").encode(), timeout=60)
+    if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
+        raise PhoneTargetUnavailable(_ROOT_FILE_OBSERVATION_FAILED)
+    try:
+        output = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PhoneTargetUnavailable(_ROOT_FILE_OBSERVATION_MALFORMED) from exc
+    statuses: dict[int, str] = {}
+    for line in output.splitlines():
+        raw_index, sep, status = line.strip().partition("=")
+        if not sep or not raw_index.isdigit():
+            raise PhoneTargetUnavailable(_ROOT_FILE_OBSERVATION_MALFORMED)
+        index = int(raw_index)
+        if index < 0 or index >= len(files) or index in statuses or status not in _REQUIRED_FILE_STATUSES:
+            raise PhoneTargetUnavailable(_ROOT_FILE_OBSERVATION_MALFORMED)
+        statuses[index] = status
+    if set(statuses) != set(range(len(files))):
+        raise PhoneTargetUnavailable(_ROOT_FILE_OBSERVATION_MALFORMED)
+    return tuple(statuses[index] for index in range(len(files)))
 
 
 def _stage_runtime(*, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]) -> tuple[str, tuple[tuple[str, Path, str], ...]]:
