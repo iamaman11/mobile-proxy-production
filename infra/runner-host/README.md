@@ -41,8 +41,9 @@ sudo ./infra/runner-host/wsl/install-runner-transport-health.sh
 ```
 
 The Windows installer updates only the named `MobileProxyUsbBridge` task and
-its versioned script. The Linux installer adds only a separate health timer and
-state directory; it does not modify `mobile-proxy-phone-runner.service`.
+its versioned script, preserving its existing owner-interactive principal. The
+Linux installer adds only a separate health timer and state directory; it does
+not modify `mobile-proxy-phone-runner.service`.
 
 Use GitHub's canonical read-only phone observation command to prove the full
 path. These host facilities never replace Controller release, intent, lock,

@@ -22,7 +22,7 @@ if ($PSCmdlet.ShouldProcess($Destination, 'Install versioned USB bridge script')
     Copy-Item -LiteralPath $source -Destination $Destination -Force
 }
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $Destination
+    '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $Destination
 )
 if ($PSCmdlet.ShouldProcess($TaskName, 'Update only the task action')) {
     Set-ScheduledTask -TaskName $TaskName -Action $action | Out-Null
