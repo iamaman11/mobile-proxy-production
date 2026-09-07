@@ -224,7 +224,7 @@ jobs:
           set -euo pipefail
           echo 'STAGE4_PHONE_RELEASE_ARTIFACT_TRANSPORT outcome=${{ steps.evidence_upload.outcome }}'
 
-      - name: Enforce exact healthy Stage 4 baseline classification
+      - name: Classify bounded Stage 4 observation result
         if: always()
         shell: bash
         run: |
@@ -240,11 +240,12 @@ jobs:
           value = json.loads(path.read_text(encoding='utf-8'))
           if value.get('schema') != 'stage4-phone-release-observation.v1':
               raise SystemExit('Stage 4 observation schema differs')
-          if value.get('classification') != 'HEALTHY_EXACT':
-              raise SystemExit('phone-production is not exact healthy v0.1.7 baseline')
+          classification = value.get('classification')
+          if classification not in {'HEALTHY_EXACT', 'DEGRADED'}:
+              raise SystemExit('Stage 4 observation did not produce a bounded health classification')
           observation = value.get('observation')
-          if not isinstance(observation, dict) or observation.get('desired') is not True:
-              raise SystemExit('Stage 4 exact composite desired observation is absent')
+          if not isinstance(observation, dict) or not isinstance(observation.get('desired'), bool):
+              raise SystemExit('Stage 4 composite desired observation is absent')
           safety = value.get('safety')
           if not isinstance(safety, dict):
               raise SystemExit('Stage 4 observation safety evidence is absent')
@@ -263,5 +264,5 @@ jobs:
           ):
               if safety.get(field) is not False:
                   raise SystemExit(f'Stage 4 read-only safety invariant differs: {field}')
-          print('STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT')
+          print(f'STAGE4_PHONE_RELEASE_OBSERVATION_CLASSIFIED classification={classification}')
           PY

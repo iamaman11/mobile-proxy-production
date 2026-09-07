@@ -220,7 +220,7 @@ def test_stage4_phone_observation_route_is_exact_read_only_and_bounded() -> None
         "cancel-in-progress: false",
         "environment: phone-production",
         ".github/scripts/observe_phone_release.py",
-        "STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT",
+        "STAGE4_PHONE_RELEASE_OBSERVATION_CLASSIFIED",
     ):
         assert required in source
     for forbidden in (

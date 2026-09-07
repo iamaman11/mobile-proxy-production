@@ -310,7 +310,7 @@ jobs:
               'cancel-in-progress: false',
               'environment: phone-production',
               '.github/scripts/observe_phone_release.py',
-              'STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT',
+              'STAGE4_PHONE_RELEASE_OBSERVATION_CLASSIFIED',
           ):
               if required not in phone_observation:
                   raise SystemExit('Stage 4 phone observation workflow invariant missing: ' + required)

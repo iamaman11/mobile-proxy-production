@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -248,8 +249,12 @@ def main(argv: list[str] | None = None) -> int:
 
     phone_access_started = False
     admitted = None
+    started_at = time.monotonic()
+    timings_ms: dict[str, int] = {}
     try:
+        phase_started = time.monotonic()
         admitted = resolve_release(tag=args.release_tag, target=args.target)
+        timings_ms["release_admission"] = int((time.monotonic() - phase_started) * 1000)
         serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
         binding_key = os.environ.get("ANDROID_TARGET_BINDING_KEY", "")
         if not serial or len(binding_key) < 32:
@@ -259,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="stage4-phone-observe-") as raw:
             root = Path(raw)
             facts: dict[str, object] = {}
+            phase_started = time.monotonic()
             materialized = deployment_runner._materialize_verified_release_runtime(
                 admitted,
                 archive=root / "phone-runtime.tar.gz",
@@ -268,24 +274,29 @@ def main(argv: list[str] | None = None) -> int:
                 binding_key=binding_key,
                 facts=facts,
             )
+            timings_ms["runtime_materialization"] = int((time.monotonic() - phase_started) * 1000)
             phone_access_started = True
+            phase_started = time.monotonic()
             apk, runtime = deployment_runner._observe_composite(
                 serial=serial,
                 binding_key=binding_key,
                 admitted=admitted,
                 materialized=materialized,
             )
+            timings_ms["phone_observation"] = int((time.monotonic() - phase_started) * 1000)
             if (
                 runtime.target_release_exists
                 and runtime.current_target == runtime.target_release
                 and not runtime.exact_files_verified
             ):
-                statuses = observe_runtime_required_file_statuses(
-                    serial=serial,
-                    release_root=materialized.release_root,
-                    release_id=admitted.identity.tag,
-                    required_paths=materialized.required_live_release_paths,
-                )
+                statuses = tuple(getattr(runtime, "required_file_statuses", ()))
+                if len(statuses) != len(materialized.required_live_release_paths):
+                    statuses = observe_runtime_required_file_statuses(
+                        serial=serial,
+                        release_root=materialized.release_root,
+                        release_id=admitted.identity.tag,
+                        required_paths=materialized.required_live_release_paths,
+                    )
                 verification = facts.get("runtime_verification")
                 rendered_paths = verification.get("derived_files_rendered") if isinstance(verification, dict) else None
                 runtime_file_drift = _bounded_runtime_file_drift(
@@ -295,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
         desired = bool(apk.desired and runtime.desired)
+        timings_ms["total"] = int((time.monotonic() - started_at) * 1000)
         payload = {
             **_base_payload(controller_revision=args.controller_revision, admitted=admitted),
             "classification": "HEALTHY_EXACT" if desired else "DEGRADED",
@@ -305,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
                 "desired": desired,
             },
             "expected_materialization": _bounded_materialization(facts.get("runtime_verification")),
+            "timing_ms": timings_ms,
             "safety": _safety(phone_access_started=phone_access_started),
         }
         _write_evidence(args.output, payload)
@@ -319,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         PhoneRuntimeRefused,
         PhoneTargetUnavailable,
     ) as exc:
+        timings_ms["total"] = int((time.monotonic() - started_at) * 1000)
         identity = admitted.identity if admitted is not None else SimpleNamespace(
             tag=args.release_tag,
             release_id=None,
@@ -335,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
             "classification": "UNKNOWN",
             "failure_class": exc.__class__.__name__,
             "failure_reason": _failure_reason(exc),
+            "timing_ms": timings_ms,
             "safety": _safety(phone_access_started=phone_access_started),
         }
         if isinstance(exc, AndroidTargetStateUnavailable):
