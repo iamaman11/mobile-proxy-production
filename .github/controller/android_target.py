@@ -16,10 +16,21 @@ _VERSION_NAME = re.compile(r"versionName=([^\s]+)")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 ANDROID_BUILD_TOOLS_VERSION = "36.0.0"
 _ANDROID_SDK_USER_RELATIVE_ROOT = Path(".local/share/mobile-proxy/android-sdk")
+_TARGET_STATE_CATEGORIES = frozenset(
+    {"offline", "unauthorized", "absent_from_adb_inventory", "no_permissions", "other"}
+)
 
 
 class AndroidObservationUnavailable(RuntimeError):
     pass
+
+
+class AndroidTargetStateUnavailable(AndroidObservationUnavailable):
+    def __init__(self, state: str) -> None:
+        if state not in _TARGET_STATE_CATEGORIES:
+            raise ValueError("unsupported bounded Android target state")
+        self.state = state
+        super().__init__(f"registered Android target state is {state}")
 
 
 class AndroidArtifactRefused(RuntimeError):
@@ -147,12 +158,47 @@ def _ensure_adb_server(adb: str) -> None:
         raise AndroidObservationUnavailable("ADB server is unavailable")
 
 
+def _registered_target_state(adb: str, serial: str) -> str:
+    """Return only a bounded state for the registered target, never raw inventory."""
+    inventory = _run([adb, "devices"], timeout=15)
+    if inventory.returncode != 0:
+        raise AndroidObservationUnavailable("ADB device inventory is unavailable")
+
+    matches: list[str] = []
+    for raw_line in inventory.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line == "List of devices attached":
+            continue
+        parts = line.split()
+        if not parts or parts[0] != serial:
+            continue
+        remainder = line[len(parts[0]) :].strip()
+        if not remainder:
+            matches.append("other")
+        elif remainder.startswith("device"):
+            matches.append("device")
+        elif remainder.startswith("offline"):
+            matches.append("offline")
+        elif remainder.startswith("unauthorized"):
+            matches.append("unauthorized")
+        elif remainder.startswith("no permissions"):
+            matches.append("no_permissions")
+        else:
+            matches.append("other")
+
+    if not matches:
+        return "absent_from_adb_inventory"
+    if len(matches) != 1:
+        raise AndroidObservationUnavailable("registered Android target state is ambiguous")
+    return matches[0]
+
+
 def _adb_read(serial: str, arguments: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     adb = _adb()
     _ensure_adb_server(adb)
-    state = _run([adb, "-s", serial, "get-state"], timeout=15)
-    if state.returncode != 0 or state.stdout.strip() != "device":
-        raise AndroidObservationUnavailable("registered Android target is not in device state")
+    state = _registered_target_state(adb, serial)
+    if state != "device":
+        raise AndroidTargetStateUnavailable(state)
     return _run([adb, "-s", serial, *arguments], timeout=timeout)
 
 
