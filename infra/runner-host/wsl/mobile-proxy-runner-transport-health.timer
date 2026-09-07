@@ -1,0 +1,12 @@
+[Unit]
+Description=Run bounded Mobile Proxy runner transport health observation every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=mobile-proxy-runner-transport-health.service
+
+[Install]
+WantedBy=timers.target
