@@ -1,16 +1,46 @@
 name: Stage 4 exact phone Product Release observation
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      command:
+        required: true
+        type: string
       target:
-        description: Exact registered Controller target
         required: true
         type: string
       release_tag:
-        description: Exact immutable Product Release under Stage 4 validation
         required: true
         type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      ANDROID_TARGET_BINDING_KEY:
+        required: true
+      MOBILE_PROXY_ADMIN_TOKEN:
+        required: true
+      MOBILE_PROXY_DEVICE_TOKEN:
+        required: true
+      MOBILE_PROXY_UI_TOKEN:
+        required: true
+      MOBILE_PROXY_RELAY_USER:
+        required: true
+      MOBILE_PROXY_RELAY_PASSWORD:
+        required: true
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64:
+        required: true
 
 permissions:
   contents: read
@@ -20,24 +50,29 @@ env:
 
 jobs:
   admit:
-    name: Admit exact Stage 4 Product Release without phone access
-    if: inputs.target == 'phone-production' && inputs.release_tag == 'v0.1.7'
+    name: Admit exact Issue 1 Stage 4 observation without phone access
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       source_sha: ${{ steps.release.outputs.source_sha }}
     steps:
-      - name: Check out exact Controller revision selected by dispatch
+      - name: Check out exact Controller comment-event revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Resolve exact immutable Stage 4 Release read-only
+      - name: Validate sole-ingress provenance and immutable Stage 4 Release
         id: release
         env:
+          COMMAND: ${{ inputs.command }}
           TARGET: ${{ inputs.target }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_ISSUE_NUMBER: ${{ inputs.source_issue_number }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          SOURCE_ACTOR: ${{ inputs.source_actor }}
+          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
+          EXPECTED_OWNER: ${{ github.repository_owner }}
         shell: bash
         run: |
           set -euo pipefail
@@ -45,16 +80,37 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 - <<'PY'
           import os
+          import re
           import sys
           from pathlib import Path
+
+          command = os.environ['COMMAND']
+          target = os.environ['TARGET']
+          release_tag = os.environ['RELEASE_TAG']
+          if command != '/observe-phone-release phone-production v0.1.7':
+              raise SystemExit('Stage 4 observation command differs from exact Issue #1 contract')
+          if target != 'phone-production' or release_tag != 'v0.1.7':
+              raise SystemExit('Stage 4 observer admission differs from phone-production@v0.1.7')
+          if os.environ['SOURCE_ISSUE_NUMBER'] != '1':
+              raise SystemExit('Stage 4 observer source Issue differs')
+          if os.environ['SOURCE_ACTOR'] != os.environ['EXPECTED_OWNER']:
+              raise SystemExit('Stage 4 observer source actor is not repository owner')
+          try:
+              comment_id = int(os.environ['SOURCE_COMMENT_ID'])
+          except ValueError as exc:
+              raise SystemExit('Stage 4 observer source comment id is invalid') from exc
+          if comment_id <= 0:
+              raise SystemExit('Stage 4 observer source comment id is invalid')
+          expected_url = (
+              'https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-'
+              + str(comment_id)
+          )
+          if os.environ['SOURCE_COMMENT_URL'] != expected_url:
+              raise SystemExit('Stage 4 observer source comment URL differs')
 
           sys.path.insert(0, str(Path('.github/controller').resolve()))
           from release_resolver import resolve_release
 
-          target = os.environ['TARGET']
-          release_tag = os.environ['RELEASE_TAG']
-          if target != 'phone-production' or release_tag != 'v0.1.7':
-              raise SystemExit('Stage 4 observer admission differs from phone-production@v0.1.7')
           admitted = resolve_release(tag=release_tag, target=target)
           if admitted.identity.tag != release_tag or admitted.identity.immutable is not True:
               raise SystemExit('Stage 4 Product Release admission differs')
@@ -62,7 +118,8 @@ jobs:
               handle.write(f"source_sha={admitted.identity.source_sha}\n")
           print(
               'STAGE4_PHONE_RELEASE_ADMISSION_ACCEPTED '
-              f"release={release_tag} source_sha={admitted.identity.source_sha} phone_access=false"
+              f"release={release_tag} source_sha={admitted.identity.source_sha} "
+              f"source_comment_id={comment_id} phone_access=false"
           )
           PY
 
@@ -85,7 +142,7 @@ jobs:
       MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
       MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
     steps:
-      - name: Check out exact Controller revision selected by dispatch
+      - name: Check out exact Controller comment-event revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
