@@ -26,6 +26,10 @@ class PhoneTargetUnavailable(RuntimeError):
     pass
 
 
+class PhoneTargetMutationOutcomeUnknown(PhoneTargetUnavailable):
+    pass
+
+
 @dataclass(frozen=True)
 class RootScriptResult:
     status: str
@@ -355,9 +359,10 @@ set -eu
 umask 077
 ROOT='{_ROOT}'
 TARGET='{target}'
-CURRENT_TMP="$ROOT/.current-{release_id}"
 BOOT='{_BOOT_HOOK}'
 [ -d "$TARGET" ]
+command -v ln >/dev/null
+command -v readlink >/dev/null
 if [ -f "$ROOT/logs/runtime-watchdog.pid" ]; then
   pid="$(cat "$ROOT/logs/runtime-watchdog.pid" 2>/dev/null || true)"
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
@@ -373,9 +378,8 @@ for proc in /proc/[0-9]*; do
     ;;
   esac
 done
-rm -f "$CURRENT_TMP"
-ln -s "$TARGET" "$CURRENT_TMP"
-mv -Tf "$CURRENT_TMP" "$ROOT/current"
+ln -sfn "$TARGET" "$ROOT/current"
+[ "$(readlink "$ROOT/current")" = "$TARGET" ]
 cat > "$BOOT" <<'MOBILE_PROXY_BOOT'
 #!/system/bin/sh
 set -eu
@@ -396,8 +400,11 @@ chmod 0700 "$BOOT"
 sh "$ROOT/current/service.sh"
 """.encode()
     result = _run_root_script(serial, script, timeout=150)
-    if result.status != "completed" or result.returncode != 0:
-        raise PhoneTargetUnavailable("rooted runtime atomic activation/start failed")
+    if result.status == "completed":
+        if result.returncode != 0:
+            raise PhoneTargetUnavailable("rooted runtime activation/start command failed")
+        return
+    raise PhoneTargetMutationOutcomeUnknown("rooted runtime activation/start outcome is unknown")
 
 
 def dispatch_release_once(

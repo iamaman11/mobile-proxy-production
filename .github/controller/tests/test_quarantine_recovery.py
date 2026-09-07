@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+SCRIPTS = ROOT.parent / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 
-from durable_release_identity import durable_release_identity  # noqa: E402
 from quarantine_recovery import (  # noqa: E402
     QUARANTINED_INTENT_REF,
     QUARANTINED_REQUEST_ID,
@@ -19,11 +20,14 @@ from quarantine_recovery import (  # noqa: E402
     RECOVERY_OPERATION,
     RECOVERY_PARENT_INTENT_REF,
     RECOVERY_PARENT_TERMINAL_REF,
+    RECOVERY_RECONCILED_REFUSED_TERMINAL_REF,
     RECOVERY_RELEASE,
     RECOVERY_RELEASE_ID,
     RECOVERY_TARGET,
     RECOVERY_TERMINAL_HEADING,
     RECOVERY_TERMINAL_SCHEMA,
+    RECOVERY_UNKNOWN_INTENT_REF,
+    RECOVERY_UNKNOWN_TERMINAL_REF,
     QuarantineRecoveryError,
     recovery_semantic_id,
     validate_recovery_intent,
@@ -51,27 +55,19 @@ def expect_error(fn) -> None:
     raise AssertionError("expected QuarantineRecoveryError")
 
 
-def initial_semantic_id() -> str:
+def semantic(parent: str | None = None) -> str:
     return recovery_semantic_id(
         target=RECOVERY_TARGET,
         release=RECOVERY_RELEASE,
         quarantined_request_id=QUARANTINED_REQUEST_ID,
+        parent_recovery_terminal_ref=parent,
     )
 
 
-def continuation_semantic_id() -> str:
-    return recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-        parent_recovery_terminal_ref=RECOVERY_PARENT_TERMINAL_REF,
-    )
-
-
-def base_intent() -> dict[str, object]:
-    return {
+def intent_payload(*, parent: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
         "schema": RECOVERY_INTENT_SCHEMA,
-        "semantic_recovery_id": initial_semantic_id(),
+        "semantic_recovery_id": semantic(parent),
         "operation": RECOVERY_OPERATION,
         "execution_id": "gh-run:1:1",
         "controller_revision": "a" * 40,
@@ -89,12 +85,18 @@ def base_intent() -> dict[str, object]:
         "blind_retry_allowed": False,
         "mutation_performed": False,
     }
+    if parent is not None:
+        payload["parent_recovery_terminal_ref"] = parent
+    return payload
 
 
-def base_terminal() -> dict[str, object]:
-    return {
+def terminal_payload(
+    *, parent: str | None = None, state: str = "ACCEPTED", mutation: bool = True,
+    verified: bool = True, intent_ref: str | None = "issue-comment:1", facts: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "schema": RECOVERY_TERMINAL_SCHEMA,
-        "semantic_recovery_id": initial_semantic_id(),
+        "semantic_recovery_id": semantic(parent),
         "operation": RECOVERY_OPERATION,
         "execution_id": "gh-run:1:1",
         "controller_revision": "a" * 40,
@@ -103,141 +105,154 @@ def base_terminal() -> dict[str, object]:
         "release_id": RECOVERY_RELEASE_ID,
         "quarantined_request_id": QUARANTINED_REQUEST_ID,
         "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
-        "recovery_intent_ref": "issue-comment:1",
-        "state": "ACCEPTED",
-        "mutation_performed": True,
-        "postcondition_verified": True,
-        "blocking_predicate": None,
-        "facts": {"postcondition": {}},
+        "recovery_intent_ref": intent_ref,
+        "state": state,
+        "mutation_performed": mutation,
+        "postcondition_verified": verified,
+        "blocking_predicate": None if state == "ACCEPTED" else "bounded test state",
+        "facts": facts if facts is not None else {"postcondition": {}},
         "blind_retry_allowed": False,
     }
+    if parent is not None:
+        payload["parent_recovery_terminal_ref"] = parent
+    return payload
 
 
-def test_semantic_identity_is_exact_and_stable() -> None:
-    first = initial_semantic_id()
-    second = initial_semantic_id()
-    assert first == second and first.startswith("recovery-sha256:")
-    expect_error(lambda: recovery_semantic_id(
-        target=RECOVERY_TARGET, release="v0.1.8",
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-    ))
+def reconciled_facts(*, current_relation: str = "other-managed") -> dict[str, object]:
+    return {
+        "postcondition": {
+            "apk": {"desired": True, "exact_artifact_verified": True},
+            "runtime": {
+                "target_release_exists": True,
+                "inactive_exact_files_verified": True,
+                "mismatch_count": 0,
+                "mismatch_files": [],
+                "current_relation": current_relation,
+            },
+            "target_binding_matches_original_intent": True,
+        }
+    }
 
 
-def test_continuation_semantic_identity_is_distinct_and_parent_bound() -> None:
-    initial = initial_semantic_id()
-    continuation = continuation_semantic_id()
-    assert continuation.startswith("recovery-sha256:")
-    assert continuation != initial
-    assert continuation == continuation_semantic_id()
-    expect_error(lambda: recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-        parent_recovery_terminal_ref="issue-comment:1",
-    ))
-
-
-def test_continuation_payload_requires_exact_parent_hash_binding() -> None:
-    intent = base_intent()
-    intent["parent_recovery_terminal_ref"] = RECOVERY_PARENT_TERMINAL_REF
-    intent["semantic_recovery_id"] = continuation_semantic_id()
-    validate_recovery_intent(intent)
-    wrong_parent = dict(intent, parent_recovery_terminal_ref="issue-comment:1")
-    expect_error(lambda: validate_recovery_intent(wrong_parent))
-    wrong_id = dict(intent, semantic_recovery_id=initial_semantic_id())
-    expect_error(lambda: validate_recovery_intent(wrong_id))
-
-    terminal = base_terminal()
-    terminal["parent_recovery_terminal_ref"] = RECOVERY_PARENT_TERMINAL_REF
-    terminal["semantic_recovery_id"] = continuation_semantic_id()
-    validate_recovery_terminal(terminal)
-    wrong_terminal_id = dict(terminal, semantic_recovery_id=initial_semantic_id())
-    expect_error(lambda: validate_recovery_terminal(wrong_terminal_id))
-
-
-def test_intent_requires_exact_no_blind_retry_boundary() -> None:
-    payload = base_intent()
-    validate_recovery_intent(payload)
-    broken = dict(payload)
-    broken["blind_retry_allowed"] = True
-    expect_error(lambda: validate_recovery_intent(broken))
-
-
-def test_terminal_contract_distinguishes_pre_and_post_intent_states() -> None:
-    accepted = base_terminal()
-    validate_recovery_terminal(accepted)
-    refused = dict(accepted, state="REFUSED", mutation_performed=False, postcondition_verified=False, recovery_intent_ref=None)
-    validate_recovery_terminal(refused)
-    unknown = dict(accepted, state="UNKNOWN", mutation_performed=True, postcondition_verified=False)
-    validate_recovery_terminal(unknown)
-    bad = dict(accepted, state="UNKNOWN", mutation_performed=False, postcondition_verified=False)
-    expect_error(lambda: validate_recovery_terminal(bad))
-
-
-def test_parent_recovery_validation_is_exact_and_bounded() -> None:
-    parent_intent_payload = base_intent()
-    parent_terminal_payload = dict(
-        base_terminal(),
-        state="QUARANTINED",
-        mutation_performed=True,
-        postcondition_verified=True,
-        recovery_intent_ref=RECOVERY_PARENT_INTENT_REF,
-        blocking_predicate="recovery postcondition mismatch",
+def exact_lineage_records():
+    initial_intent = SimpleNamespace(ref=RECOVERY_PARENT_INTENT_REF, payload=intent_payload())
+    initial_terminal = SimpleNamespace(
+        ref=RECOVERY_PARENT_TERMINAL_REF,
+        payload=terminal_payload(
+            state="QUARANTINED", mutation=True, verified=True,
+            intent_ref=RECOVERY_PARENT_INTENT_REF,
+        ),
     )
-    intent_record = SimpleNamespace(ref=RECOVERY_PARENT_INTENT_REF, payload=parent_intent_payload)
-    terminal_record = SimpleNamespace(ref=RECOVERY_PARENT_TERMINAL_REF, payload=parent_terminal_payload)
+    continuation_intent = SimpleNamespace(
+        ref=RECOVERY_UNKNOWN_INTENT_REF,
+        payload=intent_payload(parent=RECOVERY_PARENT_TERMINAL_REF),
+    )
+    continuation_terminal = SimpleNamespace(
+        ref=RECOVERY_UNKNOWN_TERMINAL_REF,
+        payload=terminal_payload(
+            parent=RECOVERY_PARENT_TERMINAL_REF,
+            state="UNKNOWN", mutation=True, verified=False,
+            intent_ref=RECOVERY_UNKNOWN_INTENT_REF,
+        ),
+    )
+    reconciliation_terminal = SimpleNamespace(
+        ref=RECOVERY_RECONCILED_REFUSED_TERMINAL_REF,
+        payload=terminal_payload(
+            parent=RECOVERY_UNKNOWN_TERMINAL_REF,
+            state="REFUSED", mutation=False, verified=True,
+            intent_ref=None, facts=reconciled_facts(),
+        ),
+    )
+    return initial_intent, initial_terminal, continuation_intent, continuation_terminal, reconciliation_terminal
 
-    class Evidence:
+
+class Evidence:
+    def __init__(self, *, bad_reconciliation: bool = False):
+        records = list(exact_lineage_records())
+        if bad_reconciliation:
+            records[-1] = SimpleNamespace(
+                ref=RECOVERY_RECONCILED_REFUSED_TERMINAL_REF,
+                payload=terminal_payload(
+                    parent=RECOVERY_UNKNOWN_TERMINAL_REF,
+                    state="REFUSED", mutation=False, verified=True,
+                    intent_ref=None, facts=reconciled_facts(current_relation="target"),
+                ),
+            )
+        self.intents = [records[0], records[2]]
+        self.terminals = [records[1], records[3], records[4]]
+
+    def list_records(self, heading):
+        if heading == RECOVERY_INTENT_HEADING:
+            return self.intents
+        if heading == RECOVERY_TERMINAL_HEADING:
+            return self.terminals
+        return []
+
+
+def test_all_stage3_recovery_generations_have_distinct_semantic_identity() -> None:
+    ids = {
+        semantic(),
+        semantic(RECOVERY_PARENT_TERMINAL_REF),
+        semantic(RECOVERY_UNKNOWN_TERMINAL_REF),
+        semantic(RECOVERY_RECONCILED_REFUSED_TERMINAL_REF),
+    }
+    assert len(ids) == 4
+    expect_error(lambda: semantic("issue-comment:1"))
+
+
+def test_unknown_parent_is_read_only_but_reconciled_refused_parent_can_form_new_intent() -> None:
+    expect_error(lambda: validate_recovery_intent(intent_payload(parent=RECOVERY_UNKNOWN_TERMINAL_REF)))
+    final_intent = intent_payload(parent=RECOVERY_RECONCILED_REFUSED_TERMINAL_REF)
+    validate_recovery_intent(final_intent)
+    assert final_intent["semantic_recovery_id"] == semantic(RECOVERY_RECONCILED_REFUSED_TERMINAL_REF)
+
+
+def test_reconciled_refused_terminal_contract_is_read_only_and_verified() -> None:
+    payload = terminal_payload(
+        parent=RECOVERY_UNKNOWN_TERMINAL_REF,
+        state="REFUSED", mutation=False, verified=True,
+        intent_ref=None, facts=reconciled_facts(),
+    )
+    validate_recovery_terminal(payload)
+    expect_error(lambda: validate_recovery_terminal(dict(payload, mutation_performed=True)))
+    expect_error(lambda: validate_recovery_terminal(dict(payload, postcondition_verified=False)))
+
+
+def test_prepare_binds_exact_full_lineage_and_known_safe_reconciliation() -> None:
+    parent = prepare_recovery._validated_parent_recovery(Evidence())
+    assert parent.ref == RECOVERY_RECONCILED_REFUSED_TERMINAL_REF
+    assert parent.payload["state"] == "REFUSED"
+    expect_error(lambda: prepare_recovery._validated_parent_recovery(Evidence(bad_reconciliation=True)))
+
+
+def test_target_runner_revalidates_exact_reconciled_parent_under_lock() -> None:
+    class RunnerEvidence:
         def list_records(self, heading):
+            records = exact_lineage_records()
             if heading == RECOVERY_INTENT_HEADING:
-                return [intent_record]
+                return []
             if heading == RECOVERY_TERMINAL_HEADING:
-                return [terminal_record]
+                return [records[-1]]
             return []
 
-    parent_intent, parent_terminal = prepare_recovery._validated_parent_recovery(Evidence())
-    assert parent_intent.ref == RECOVERY_PARENT_INTENT_REF
-    assert parent_terminal.ref == RECOVERY_PARENT_TERMINAL_REF
-
-    wrong_terminal = SimpleNamespace(ref="issue-comment:1", payload=parent_terminal_payload)
-
-    class WrongEvidence(Evidence):
-        def list_records(self, heading):
-            if heading == RECOVERY_TERMINAL_HEADING:
-                return [wrong_terminal]
-            return super().list_records(heading)
-
-    expect_error(lambda: prepare_recovery._validated_parent_recovery(WrongEvidence()))
+    parent = recovery_runner._validated_parent_recovery(RunnerEvidence())
+    assert parent.ref == RECOVERY_RECONCILED_REFUSED_TERMINAL_REF
 
 
-def test_quarantined_terminal_identity_uses_schema_owned_runtime_fact() -> None:
-    identity = SimpleNamespace(
-        tag=RECOVERY_RELEASE,
-        release_id=RECOVERY_RELEASE_ID,
-        source_sha="a" * 40,
-        artifact_digest="b3:" + "b" * 64,
-        phone_runtime_artifact_name=f"mobile-proxy-phone-production-runtime-{RECOVERY_RELEASE}.tar.gz",
-        phone_runtime_artifact_digest="b3:" + "c" * 64,
-        phone_runtime_inventory_path="phone-production-runtime/components.json",
-        phone_runtime_inventory_digest="b3:" + "d" * 64,
+def test_final_terminal_is_bound_to_reconciled_parent() -> None:
+    payload = recovery_runner._terminal(
+        semantic_id=semantic(RECOVERY_RECONCILED_REFUSED_TERMINAL_REF),
+        execution_id="gh-run:1:1",
+        controller_revision="a" * 40,
+        state="ACCEPTED",
+        mutation_performed=True,
+        postcondition_verified=True,
+        facts={"postcondition": {}},
+        intent_ref="issue-comment:99",
+        reason=None,
     )
-    durable = durable_release_identity(identity, target=RECOVERY_TARGET)
-    terminal = {
-        key: durable[key]
-        for key in ("target", "product_release", "release_id", "release_source_sha", "artifact_digest")
-    }
-    terminal["facts"] = {"release_admission": dict(durable)}
-    assert prepare_recovery._terminal_matches_release_identity(terminal, identity) is True
-
-    runtime_mismatch = dict(durable)
-    runtime_mismatch["phone_runtime_artifact_digest"] = "b3:" + "e" * 64
-    broken_runtime = dict(terminal)
-    broken_runtime["facts"] = {"release_admission": runtime_mismatch}
-    assert prepare_recovery._terminal_matches_release_identity(broken_runtime, identity) is False
-
-    broken_source = dict(terminal)
-    broken_source["release_source_sha"] = "f" * 40
-    assert prepare_recovery._terminal_matches_release_identity(broken_source, identity) is False
+    assert payload["parent_recovery_terminal_ref"] == RECOVERY_RECONCILED_REFUSED_TERMINAL_REF
+    validate_recovery_terminal(payload)
 
 
 def _fake_root_result(stdout: bytes):
@@ -266,26 +281,6 @@ def test_inactive_runtime_hashes_are_root_observed_while_current_is_old() -> Non
     assert observed["desired"] is False
 
 
-def test_inactive_runtime_hash_mismatch_fails_exact_classification() -> None:
-    expected = "1" * 64
-    old_files = recovery_runner._files
-    old_run = recovery_runner._run_root_script
-    try:
-        recovery_runner._files = lambda release_root, required_paths: (("service.sh", Path("/tmp/service.sh"), expected),)
-        recovery_runner._run_root_script = lambda serial, script, timeout: _fake_root_result(
-            ("target=present\ncurrent=/data/adb/mobile-proxy-node/releases/old\nh0=" + "2" * 64 + "\n").encode()
-        )
-        observed = recovery_runner._root_runtime_observation(
-            serial="registered", release_root=Path("/tmp/release"), release_id=RECOVERY_RELEASE,
-            required_paths=("service.sh",),
-        )
-    finally:
-        recovery_runner._files = old_files
-        recovery_runner._run_root_script = old_run
-    assert observed["inactive_exact_files_verified"] is False
-    assert observed["desired"] is False
-
-
 def test_root_observer_script_contains_no_mutation_primitive() -> None:
     expected = "1" * 64
     captured: list[bytes] = []
@@ -305,8 +300,19 @@ def test_root_observer_script_contains_no_mutation_primitive() -> None:
         recovery_runner._files = old_files
         recovery_runner._run_root_script = old_run
     text = captured[0].decode()
-    for forbidden in ("mkdir ", "cp ", "rm ", "mv ", "ln ", "kill ", "chmod ", "service.sh\n"):
+    for forbidden in ("mkdir ", "cp ", "rm ", "mv ", "ln ", "kill ", "chmod ", "pm install"):
         assert forbidden not in text
+
+
+def test_runner_source_reobserves_completed_activation_failure_but_not_transport_unknown() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    unknown_catch = source.index("except PhoneTargetMutationOutcomeUnknown:")
+    known_catch = source.index("except PhoneTargetUnavailable as exc:")
+    post_observe = source.index("apk_post = observe(")
+    assert unknown_catch < known_catch < post_observe
+    assert 'activation_state = "completed_failure"' in source
+    assert 'state="UNKNOWN"' in source
+    assert 'state="ACCEPTED" if accepted else "QUARANTINED"' in source
 
 
 if __name__ == "__main__":

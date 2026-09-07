@@ -29,18 +29,22 @@ sys.modules[spec.name] = phone_target
 spec.loader.exec_module(phone_target)
 
 
-def test_activation_treats_existing_current_symlink_as_file_destination() -> None:
+def _result(*, status: str = "completed", returncode: int | None = 0):
+    return phone_target.RootScriptResult(
+        status=status,
+        returncode=returncode,
+        stdout=b"",
+        stderr=b"",
+    )
+
+
+def _call_with(result):
     calls: list[tuple[bytes, int]] = []
 
     def fake_root_script(serial: str, script: bytes, timeout: int = 30):
         assert serial == "registered-serial"
         calls.append((script, timeout))
-        return phone_target.RootScriptResult(
-            status="completed",
-            returncode=0,
-            stdout=b"",
-            stderr=b"",
-        )
+        return result
 
     original = phone_target._run_root_script
     phone_target._run_root_script = fake_root_script
@@ -52,17 +56,61 @@ def test_activation_treats_existing_current_symlink_as_file_destination() -> Non
         )
     finally:
         phone_target._run_root_script = original
+    return calls
 
+
+def test_activation_uses_android11_compatible_symlink_cutover_and_asserts_it() -> None:
+    calls = _call_with(_result())
     assert len(calls) == 1
     script, timeout = calls[0]
     assert timeout == 150
-    safe_switch = b'mv -Tf "$CURRENT_TMP" "$ROOT/current"'
-    unsafe_switch = b'mv -f "$CURRENT_TMP" "$ROOT/current"'
-    assert safe_switch in script
-    assert unsafe_switch not in script
-    assert script.index(b'ln -s "$TARGET" "$CURRENT_TMP"') < script.index(safe_switch)
-    assert script.index(safe_switch) < script.index(b'cat > "$BOOT"')
-    assert script.index(safe_switch) < script.rindex(b'sh "$ROOT/current/service.sh"')
+    switch = b'ln -sfn "$TARGET" "$ROOT/current"'
+    verify = b'[ "$(readlink "$ROOT/current")" = "$TARGET" ]'
+    assert switch in script
+    assert verify in script
+    assert b"mv -T" not in script
+    assert b"CURRENT_TMP" not in script
+    assert script.index(switch) < script.index(verify)
+    assert script.index(verify) < script.index(b'cat > "$BOOT"')
+    assert script.index(verify) < script.rindex(b'sh "$ROOT/current/service.sh"')
+
+
+def test_completed_nonzero_is_known_activation_failure_not_transport_unknown() -> None:
+    original = phone_target._run_root_script
+    phone_target._run_root_script = lambda *args, **kwargs: _result(returncode=17)
+    try:
+        try:
+            phone_target._activate(
+                serial="registered-serial",
+                release_id="v0.1.7",
+                target="/data/adb/mobile-proxy-node/releases/v0.1.7",
+            )
+        except phone_target.PhoneTargetMutationOutcomeUnknown as exc:
+            raise AssertionError("completed nonzero must not be mutation-outcome UNKNOWN") from exc
+        except phone_target.PhoneTargetUnavailable:
+            pass
+        else:
+            raise AssertionError("completed nonzero activation must fail")
+    finally:
+        phone_target._run_root_script = original
+
+
+def test_transport_timeout_remains_mutation_outcome_unknown() -> None:
+    original = phone_target._run_root_script
+    phone_target._run_root_script = lambda *args, **kwargs: _result(status="timeout", returncode=None)
+    try:
+        try:
+            phone_target._activate(
+                serial="registered-serial",
+                release_id="v0.1.7",
+                target="/data/adb/mobile-proxy-node/releases/v0.1.7",
+            )
+        except phone_target.PhoneTargetMutationOutcomeUnknown:
+            pass
+        else:
+            raise AssertionError("transport timeout must remain mutation-outcome UNKNOWN")
+    finally:
+        phone_target._run_root_script = original
 
 
 def main() -> None:
