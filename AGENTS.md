@@ -1,68 +1,68 @@
 # Deployment Controller agent contract
 
-Before any repository or production-state change, read the newest authoritative checkpoint in `iamaman11/mobile-proxy` Issue #179 and revalidate PRODUCT/Controller mains plus relevant protected checks. PRODUCT #179 is the only dynamic development/operations stage cursor; this repository's issues are subordinate unless #179 explicitly says otherwise.
+Before any repository or production-state change, read the newest authoritative checkpoint in `iamaman11/mobile-proxy` Issue #179 and revalidate relevant PRODUCT/Controller mains, protected checks and immutable Product Release identity. PRODUCT #179 is the only dynamic development/operations cursor.
 
-The canonical project workflow is `iamaman11/mobile-proxy/STAGE_WORKFLOW.md`. If any local text conflicts with the newest #179 checkpoint, #179 wins.
+Canonical working method: `iamaman11/mobile-proxy/STAGE_WORKFLOW.md`.
 
-## Context recovery
+## Context recovery and budget
 
-After context loss use exactly:
+Use exactly:
 
-`PRODUCT AGENTS.md -> PRODUCT STAGE_WORKFLOW.md -> newest PRODUCT #179 checkpoint -> current subordinate Stage Issue -> only stage-relevant permanent standards/contracts`.
+`PRODUCT AGENTS.md -> PRODUCT STAGE_WORKFLOW.md -> newest PRODUCT #179 checkpoint -> current subordinate Stage Issue -> only stage-relevant permanent references`.
 
-Do not reconstruct current work from old Issue bodies, historical Item15-23/Item19-20 or A-H plans, chat memory, GitHub Deployment projection, stale SHAs or hand-written `CURRENT` markers in static docs.
+Do not reconstruct current work from historical Issues/plans, chat memory, stale SHAs, hand-written `CURRENT` markers or GitHub Deployment projection.
+
+Do not load long Issue histories by default:
+
+- PRODUCT #179: metadata/body + **last owner-authored authoritative checkpoint comment only**; walk backward minimally only if needed;
+- current Stage Issue: body + only newest stage-relevant comments needed to resume;
+- Controller #1: exact causal command/intent/terminal comment IDs only; never full ledger for general context;
+- Controller #97: optional reusable rooted-phone observation/transport diagnostic reference only when the current stage/probe needs it.
 
 ## Stage workflow
 
-**Analyze only enough to act. Save every meaningful result durably. One stage has one subordinate Stage Issue in its owning repository; implementation progress lives in the stage branch/PR, working decisions/evidence live in the Stage Issue, and #179 carries only authority/stage boundaries. A checkpoint that opens a stage authorizes the whole stage within its scope and hard boundaries: continue until its real exit criteria are satisfied.**
+One stage has one subordinate Stage Issue in its owning repository. Implementation progress lives in the stage branch/PR; significant non-code decisions/evidence live in the Stage Issue; #179 carries only authority/stage boundaries.
 
-For a Controller-owned stage:
+A checkpoint opening a stage authorizes the whole stage within its mission/scope/hard boundaries/exit criteria. `NEXT ALLOWED ITEM` is a starting action, not a stop point.
 
-1. Create exactly one subordinate Stage Issue here with mission, scope, hard boundaries, exit criteria and PR links. It is not authority.
-2. After the first completed code/docs slice, create the stage branch and open the stage PR. Keep later slices and bounded CI fixes in that PR.
-3. Finished functional slice + direct tests -> commit immediately.
-4. Important decision/finding/blocker/evidence with no ready code -> comment in the Stage Issue with enough detail to resume without repeating analysis.
-5. Routine implementation/CI fixes -> commit, not Issue commentary. Comment only for architecture/scope/authority changes or significant non-code evidence.
-6. PR-ready, individual commits, red/green CI, deterministic known-state repair, read-only observations, ordinary evidence collection, protected merge/post-merge checks and local-agent evidence requests/results are not stop points when they remain inside the current stage. Continue through stage exit.
-7. At stage exit: final Stage Issue summary -> close Stage Issue -> one PRODUCT #179 checkpoint opening the next stage.
+Routine commits, PR/CI repair, deterministic in-stage fixes, read-only observations, bounded evidence collection, local-agent requests/results, protected merge and post-merge checks are not checkpoint reasons. Continue until real stage exit.
 
-`NEXT ALLOWED ITEM` identifies the next starting action, not a one-step permission token. Do not manufacture intermediate #179 cursors merely to restate routine progress. A concrete defect discovered inside the current stage should be repaired and verified inside the same stage when no authority/stage boundary is crossed.
+Finished functional slice + direct tests -> commit. Significant non-code finding/blocker/evidence -> Stage Issue. At exit: final Stage Issue summary -> close completed -> one PRODUCT #179 checkpoint opening the next stage.
 
-No more than one completed meaningful slice may remain only local/chat. Before switching context or ending a work session, commit finished code/docs or record the significant non-code result in the Stage Issue.
+## Phone facts and local-agent evidence
 
-## Phone interaction and local-agent assistance
+Physical phone state must be observed, never guessed.
 
-Physical phone state must be observed, never guessed from chat history, workflow color, elapsed time, timeout wording or expected architecture.
+Prefer Controller observer/target-adapter paths. If an exact fact cannot be obtained reliably, or validation inherently requires device UI/local-workstation/physical interaction, ask the local agent for the narrow exact observation/interaction and specify evidence to return. Never ask the agent to improvise or “try things”.
 
-1. Prefer Controller observer/target-adapter paths for phone observation and mutation.
-2. If the exact phone fact needed to continue cannot be obtained reliably through available Controller observation, or validation inherently requires physical device UI/local-workstation interaction, explicitly ask the local agent for the narrow exact observation or interaction needed and specify the evidence to return.
-3. A local-agent request/result is operational assistance, not a new checkpoint or stage stop. Record significant returned evidence in the current Stage Issue and continue the same stage.
-4. Do not ask the local agent to improvise or “try things”.
-5. The local agent is not deployment authority. It must not bypass immutable Release identity, durable mutation intent, target-global serialization, exactly-once destructive dispatch, postcondition or UNKNOWN reconciliation. Raw/manual destructive ADB remains forbidden as a Controller shortcut unless a newer owner checkpoint explicitly defines another physical-test boundary.
-6. If a phone-dependent conclusion cannot be proven, classify it unknown/unproven and request the missing evidence rather than substitute a hypothesis.
+Classify every local-agent result exactly once as:
 
-### Mandatory capability-gap classification
+- `controller_capability_gap` — repeatable/decision-critical observation Controller should reasonably expose;
+- `human_only_physical_observation` — inherently device-UI/physical/modem/operator interaction;
+- `one_off_observation` — bounded evidence without demonstrated reusable Controller need.
 
-Every local-agent result is classified as exactly one:
+For a capability gap, record the exact missing fact, why Controller could not provide it, which decision/exit criterion depends on it and whether recurrence/ambiguity justifies automation. Implement only the smallest current-stage observation capability when demonstrated, stage-relevant, materially reduces guessing/UNKNOWN/manual dependence and is simpler than repeated local assistance.
 
-- `controller_capability_gap` — repeatable or decision-critical observation needed by deployment, recovery or operational validation that should reasonably be available through Controller `observe`/target-adapter semantics;
-- `human_only_physical_observation` — inherently device-UI, physical, modem or operator interaction that should remain outside normal Controller automation;
-- `one_off_observation` — bounded evidence with no demonstrated reusable Controller requirement.
+Evidence routing:
 
-For `controller_capability_gap`, record the exact missing fact, why Controller could not provide it, which decision/exit criterion depends on it, and whether recurrence/ambiguity justifies automation.
+- stage-level conclusion/classification/blocker -> current Stage Issue;
+- reusable long-form rooted-phone probe/transport diagnostic -> optional Controller #97, linked by exact comment from the Stage Issue;
+- one-off stage evidence -> Stage Issue only;
+- machine command/intent/terminal -> Controller #1 only;
+- authority/stage boundary -> PRODUCT #179 only.
 
-A capability gap does **not** automatically authorize code. Apply the project's complexity/necessity gate. Implement the smallest Controller observation capability inside the current stage when the gap is demonstrated, stage-relevant, reduces guessing/UNKNOWN/manual dependence and is simpler than repeated local assistance. Otherwise record/defer it to the earliest stage it actually blocks.
+If a Controller-owned decision/postcondition/recovery repeatedly depends on a safely machine-observable local-agent fact, treat it as a Controller design smell and close the smallest necessary observation gap before the earliest dependent stage exits.
 
-If a Controller-owned authoritative decision, postcondition or recovery classification repeatedly needs a safely machine-observable local-agent fact, accepting the relevant stage while preserving that dependency requires explicit justification; the default is to close the observation gap first.
+Local-agent assistance is never deployment mutation authority. It must not bypass immutable Release identity, durable intent, target-global serialization, exactly-once destructive dispatch, postcondition or UNKNOWN reconciliation. Raw/manual destructive ADB remains forbidden as a Controller shortcut unless a newer owner checkpoint explicitly defines another physical-test boundary.
 
-## Controller boundary
+## Controller boundary and kernel
 
-This repository owns deployment ingress, admission, durable mutation intent, target serialization/adapters, exactly-once destructive dispatch, postconditions, recovery/quarantine and canonical deployment evidence. It must not become PRODUCT source/build/tag/Release authority.
+This repository owns deployment ingress, admission, target serialization/observation/adapters, durable mutation intent, exactly-once destructive dispatch, postconditions, recovery/quarantine and canonical runtime execution evidence. It must not become PRODUCT source/build/tag/Release authority.
 
-Controller normal flow remains understandable as:
+Normal flow:
 
 ```text
-exact Product Release
+exact immutable Product Release
   -> semantic request
   -> admission
   -> target lock
@@ -73,7 +73,7 @@ exact Product Release
   -> canonical terminal
 ```
 
-`UNKNOWN` permits read-only reconciliation, never blind destructive retry.
+`UNKNOWN` permits read-only reconciliation, never blind destructive retry. GitHub Deployment status is projection only.
 
 ## Architecture discipline
 
