@@ -17,7 +17,10 @@ sys.path.insert(0, str(CONTROLLER))
 
 from android_target import AndroidObservationUnavailable  # noqa: E402
 from phone_runtime import PhoneRuntimeRefused  # noqa: E402
-from phone_target import PhoneTargetUnavailable  # noqa: E402
+from phone_target import (  # noqa: E402
+    PhoneTargetUnavailable,
+    observe_runtime_required_file_statuses,
+)
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
 
 import run_phone_release_deployment as deployment_runner  # noqa: E402
@@ -26,6 +29,7 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _STAGE4_RELEASE = "v0.1.7"
 _MANAGED_RELEASE_PREFIX = "/data/adb/mobile-proxy-node/releases/"
 _MAX_REASON_CHARS = 240
+_FILE_STATUSES = frozenset({"exact", "digest_mismatch", "missing", "wrong_type", "unreadable"})
 
 
 def _bounded_apk(apk: object) -> dict[str, object]:
@@ -67,6 +71,37 @@ def _bounded_runtime(runtime: object) -> dict[str, object]:
         "mode": str(getattr(runtime, "mode")),
         "raw_current_target_path_recorded": False,
         "raw_config_recorded": False,
+    }
+
+
+def _bounded_runtime_file_drift(
+    statuses: tuple[str, ...], *, required_paths: tuple[str, ...], rendered_paths: object
+) -> dict[str, object]:
+    if len(statuses) != len(required_paths) or any(status not in _FILE_STATUSES for status in statuses):
+        raise PhoneTargetUnavailable("bounded runtime required-file evidence differs")
+    if not isinstance(rendered_paths, list) or any(not isinstance(item, str) for item in rendered_paths):
+        raise PhoneTargetUnavailable("bounded runtime rendered-file classification is unavailable")
+    rendered = set(rendered_paths)
+    required = set(required_paths)
+    if not rendered.issubset(required):
+        raise PhoneTargetUnavailable("bounded runtime rendered-file classification differs")
+    files = [
+        {
+            "required_file_index": index,
+            "source_class": "sensitive_derived" if path in rendered else "static_release",
+            "status": status,
+        }
+        for index, (path, status) in enumerate(zip(required_paths, statuses, strict=True))
+    ]
+    return {
+        "required_file_count": len(files),
+        "exact_file_count": sum(item["status"] == "exact" for item in files),
+        "drift_file_count": sum(item["status"] != "exact" for item in files),
+        "files": files,
+        "raw_release_paths_recorded": False,
+        "expected_file_digests_recorded": False,
+        "observed_file_digests_recorded": False,
+        "secret_derived_identifiers_recorded": False,
     }
 
 
@@ -114,7 +149,11 @@ def _safety(*, phone_access_started: bool) -> dict[str, object]:
         "provider_mutation_performed": False,
         "raw_device_identifier_recorded": False,
         "raw_current_target_path_recorded": False,
+        "raw_runtime_release_paths_recorded": False,
         "raw_config_recorded": False,
+        "expected_file_digests_recorded": False,
+        "observed_file_digests_recorded": False,
+        "credential_derived_identifiers_recorded": False,
         "secret_values_recorded": False,
     }
 
@@ -156,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         if not serial or len(binding_key) < 32:
             raise AndroidObservationUnavailable("registered production phone binding is unavailable")
 
+        runtime_file_drift = None
         with tempfile.TemporaryDirectory(prefix="stage4-phone-observe-") as raw:
             root = Path(raw)
             facts: dict[str, object] = {}
@@ -175,6 +215,24 @@ def main(argv: list[str] | None = None) -> int:
                 admitted=admitted,
                 materialized=materialized,
             )
+            if (
+                runtime.target_release_exists
+                and runtime.current_target == runtime.target_release
+                and not runtime.exact_files_verified
+            ):
+                statuses = observe_runtime_required_file_statuses(
+                    serial=serial,
+                    release_root=materialized.release_root,
+                    release_id=admitted.identity.tag,
+                    required_paths=materialized.required_live_release_paths,
+                )
+                verification = facts.get("runtime_verification")
+                rendered_paths = verification.get("derived_files_rendered") if isinstance(verification, dict) else None
+                runtime_file_drift = _bounded_runtime_file_drift(
+                    statuses,
+                    required_paths=materialized.required_live_release_paths,
+                    rendered_paths=rendered_paths,
+                )
 
         desired = bool(apk.desired and runtime.desired)
         payload = {
@@ -183,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             "observation": {
                 "apk": _bounded_apk(apk),
                 "runtime": _bounded_runtime(runtime),
+                "runtime_file_drift": runtime_file_drift,
                 "desired": desired,
             },
             "expected_materialization": _bounded_materialization(facts.get("runtime_verification")),
