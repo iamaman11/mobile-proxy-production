@@ -3,10 +3,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -221,6 +224,131 @@ def test_expected_materialization_suppresses_secret_binding_ids_and_rendered_pat
     assert "host-daemon.json" not in repr(value)
 
 
+def test_registered_target_state_is_categorical_without_serial_disclosure() -> None:
+    load_observer()
+    android_target = sys.modules["android_target"]
+    serial = "secret-registered-serial"
+    cases = (
+        ("List of devices attached\nsecret-registered-serial\tdevice\n", "device"),
+        ("List of devices attached\nsecret-registered-serial\toffline\n", "offline"),
+        ("List of devices attached\nsecret-registered-serial\tunauthorized\n", "unauthorized"),
+        ("List of devices attached\nsecret-registered-serial\tno permissions (user in plugdev group)\n", "no_permissions"),
+        ("List of devices attached\nother-device\tdevice\n", "absent_from_adb_inventory"),
+        ("List of devices attached\nsecret-registered-serial\trecovery\n", "other"),
+    )
+    for output, expected in cases:
+        result = subprocess.CompletedProcess([], 0, output, "")
+        with mock.patch.object(android_target, "_run", return_value=result):
+            observed = android_target._registered_target_state("/usr/bin/adb", serial)
+        assert observed == expected
+        assert serial not in observed
+
+
+def test_non_device_target_state_raises_bounded_structured_error() -> None:
+    load_observer()
+    android_target = sys.modules["android_target"]
+    serial = "secret-registered-serial"
+    with mock.patch.object(android_target, "_adb", return_value="/usr/bin/adb"), mock.patch.object(
+        android_target, "_ensure_adb_server", return_value=None
+    ), mock.patch.object(android_target, "_registered_target_state", return_value="unauthorized"):
+        try:
+            android_target._adb_read(serial, ["shell", "echo", "ok"])
+        except android_target.AndroidTargetStateUnavailable as error:
+            assert error.state == "unauthorized"
+            assert str(error) == "registered Android target state is unauthorized"
+            assert serial not in str(error)
+        else:
+            raise AssertionError("non-device target state was unexpectedly accepted")
+
+
+def test_bounded_log_summary_preserves_decision_evidence_without_sensitive_identifiers() -> None:
+    module = load_observer()
+    payload = {
+        "schema": "stage4-phone-release-observation.v1",
+        "controller_revision": "a" * 40,
+        "target": "phone-production",
+        "product_release": "v0.1.7",
+        "classification": "DEGRADED",
+        "mode": "read_only",
+        "observation": {
+            "apk": {
+                "target_binding_id": "tb-hmac-sha256:" + "b" * 64,
+                "package_name": "com.example.mobileproxy",
+                "installed": True,
+                "version_name": "0.1.7",
+                "version_code": 1007,
+                "artifact_sha256": "c" * 64,
+                "exact_artifact_verified": True,
+                "desired": True,
+                "mode": "read_only",
+            },
+            "runtime": {
+                "target_release_exists": True,
+                "current_state": "expected_release",
+                "current_matches_expected_release": True,
+                "exact_files_verified": False,
+                "required_file_count": 2,
+                "desired": False,
+                "admissible_for_new_dispatch": True,
+                "mode": "read_only",
+                "raw_current_target_path_recorded": False,
+                "raw_config_recorded": False,
+            },
+            "runtime_file_drift": {
+                "required_file_count": 2,
+                "exact_file_count": 1,
+                "drift_file_count": 1,
+                "files": [
+                    {"required_file_index": 0, "source_class": "static_release", "status": "exact"},
+                    {"required_file_index": 1, "source_class": "sensitive_derived", "status": "digest_mismatch"},
+                ],
+                "raw_release_paths_recorded": False,
+                "expected_file_digests_recorded": False,
+                "observed_file_digests_recorded": False,
+                "secret_derived_identifiers_recorded": False,
+            },
+            "desired": False,
+        },
+        "expected_materialization": {
+            "transport_sha256": "d" * 64,
+            "product_content_digest": "b3:" + "e" * 64,
+        },
+        "safety": {
+            "phone_access_performed": True,
+            "phone_mutation_performed": False,
+            "raw_device_identifier_recorded": False,
+            "secret_values_recorded": False,
+        },
+    }
+    summary = module._bounded_log_summary(payload)
+    rendered = json.dumps(summary, sort_keys=True)
+    assert summary["classification"] == "DEGRADED"
+    assert summary["observation"]["runtime_file_drift"]["drift_file_count"] == 1
+    assert "target_binding_id" not in rendered
+    assert "artifact_sha256" not in rendered
+    assert "expected_materialization" not in rendered
+    for sensitive in ("b" * 64, "c" * 64, "d" * 64, "e" * 64):
+        assert sensitive not in rendered
+
+    unknown = module._bounded_log_summary(
+        {
+            "schema": "stage4-phone-release-observation.v1",
+            "controller_revision": "a" * 40,
+            "target": "phone-production",
+            "product_release": "v0.1.7",
+            "classification": "UNKNOWN",
+            "mode": "read_only",
+            "failure_class": "AndroidTargetStateUnavailable",
+            "failure_code": "ANDROID_TARGET_STATE_NOT_DEVICE",
+            "failure_reason": "registered Android target state is unauthorized",
+            "target_state": "unauthorized",
+            "safety": {"phone_access_performed": True, "phone_mutation_performed": False},
+        }
+    )
+    assert unknown["target_state"] == "unauthorized"
+    assert unknown["failure_code"] == "ANDROID_TARGET_STATE_NOT_DEVICE"
+
+
 def test_observer_has_no_destructive_callsite() -> None:
     source = (SCRIPTS / "observe_phone_release.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -248,6 +376,8 @@ def test_observer_has_no_destructive_callsite() -> None:
         '"credential_derived_identifiers_recorded": False',
         '"raw_config_recorded": False',
         '"secret_values_recorded": False',
+        "STAGE4_PHONE_RELEASE_EVIDENCE",
+        "ANDROID_TARGET_STATE_NOT_DEVICE",
     ):
         assert token in source
 
@@ -274,6 +404,9 @@ def test_workflow_is_exact_issue1_read_only_observation_under_target_lock() -> N
         "rust_toolchain=1.95.0",
         "user_local_tooling=true",
         "system_path_mutation=false",
+        "id: evidence_upload",
+        "continue-on-error: true",
+        "STAGE4_PHONE_RELEASE_ARTIFACT_TRANSPORT outcome=",
     )
     missing = [token for token in required if token not in source]
     assert not missing, missing
