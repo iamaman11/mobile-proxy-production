@@ -133,7 +133,6 @@ jobs:
       cancel-in-progress: false
     environment: phone-production
     env:
-      MOBILE_PROXY_RUNTIME_CACHE_DIR: ${{ runner.tool_cache }}/mobile-proxy-runtime-cache
       ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
       ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
       MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
@@ -199,6 +198,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
+          test -n "${RUNNER_TOOL_CACHE:-}"
+          export MOBILE_PROXY_RUNTIME_CACHE_DIR="$RUNNER_TOOL_CACHE/mobile-proxy-runtime-cache"
           python3 .github/scripts/observe_phone_release.py \
             --target "$TARGET" \
             --release-tag "$RELEASE_TAG" \
