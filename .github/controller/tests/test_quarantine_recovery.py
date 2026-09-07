@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+SCRIPTS = ROOT.parent / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 
 from quarantine_recovery import (  # noqa: E402
     QUARANTINED_INTENT_REF,
