@@ -17,8 +17,12 @@ $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -eq $task) { throw "Existing task '$TaskName' was not found; refusing to create an unreviewed task." }
 
 $usbipd = Join-Path $env:ProgramFiles 'usbipd-win\usbipd.exe'
-& $usbipd bind --busid 3-2 2>$null
-if ($LASTEXITCODE -ne 0) { throw 'Initial allowlisted USBIPD bind failed.' }
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $usbipd bind --busid 3-2 *> $null
+$bindExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorAction
+if ($bindExitCode -ne 0) { throw 'Initial allowlisted USBIPD bind failed.' }
 
 $destinationDirectory = Split-Path -Parent $Destination
 if ($PSCmdlet.ShouldProcess($Destination, 'Install versioned USB bridge script')) {
