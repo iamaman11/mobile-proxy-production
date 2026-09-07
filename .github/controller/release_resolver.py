@@ -31,8 +31,8 @@ _PHONE_RUNTIME_ABI = {
     "elf_machine": 40,
 }
 _SING_BOX_ARCHIVE_DOMAIN = "mobile-proxy/upstream-sing-box-archive/v1"
-_READ_TRANSPORT_ATTEMPTS = 3
-_READ_TRANSPORT_RETRY_DELAYS_SECONDS = (1.0, 3.0)
+_READ_TRANSPORT_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
+_READ_TRANSPORT_ATTEMPTS = len(_READ_TRANSPORT_RETRY_DELAYS_SECONDS) + 1
 
 
 class ReleaseAdmissionError(RuntimeError):

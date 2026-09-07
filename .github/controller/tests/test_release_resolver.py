@@ -327,6 +327,7 @@ def test_contract_download_recovers_from_transient_transport_with_fixed_bound() 
     responses: list[object] = [
         urllib.error.URLError("temporary transport"),
         urllib.error.HTTPError(item["browser_download_url"], 504, "gateway timeout", None, None),
+        urllib.error.URLError("temporary transport"),
         io.BytesIO(payload),
     ]
     calls = 0
@@ -347,8 +348,8 @@ def test_contract_download_recovers_from_transient_transport_with_fixed_bound() 
     resolver.time.sleep = sleeps.append
     try:
         assert resolver._download(item) == payload
-        assert calls == 3
-        assert sleeps == [1.0, 3.0]
+        assert calls == 4
+        assert sleeps == [2.0, 5.0, 10.0]
     finally:
         resolver.urllib.request.urlopen = original
         resolver.time.sleep = original_sleep
@@ -377,8 +378,8 @@ def test_contract_download_transport_exhaustion_is_exactly_three_attempts() -> N
             assert str(exc) == "release contract asset is unavailable"
         else:
             raise AssertionError("contract download exhaustion unexpectedly succeeded")
-        assert calls == 3
-        assert sleeps == [1.0, 3.0]
+        assert calls == 4
+        assert sleeps == [2.0, 5.0, 10.0]
     finally:
         resolver.urllib.request.urlopen = original
         resolver.time.sleep = original_sleep
@@ -413,6 +414,7 @@ def test_release_metadata_recovers_from_transient_server_failure() -> None:
     responses: list[object] = [
         urllib.error.HTTPError(url, 504, "gateway timeout", None, None),
         urllib.error.URLError("temporary transport"),
+        urllib.error.HTTPError(url, 503, "service unavailable", None, None),
         io.BytesIO(json.dumps({"id": 1}).encode("utf-8")),
     ]
     calls = 0
@@ -433,8 +435,8 @@ def test_release_metadata_recovers_from_transient_server_failure() -> None:
     resolver.time.sleep = sleeps.append
     try:
         assert resolver._request_json(url) == {"id": 1}
-        assert calls == 3
-        assert sleeps == [1.0, 3.0]
+        assert calls == 4
+        assert sleeps == [2.0, 5.0, 10.0]
     finally:
         resolver.urllib.request.urlopen = original
         resolver.time.sleep = original_sleep
