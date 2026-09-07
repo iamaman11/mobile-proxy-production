@@ -14,7 +14,8 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "validatepattern('^\\d+-\\d+$')" in script
     assert "validatepattern('^[0-9a-fa-f]{4}:[0-9a-fa-f]{4}$')" in script
     assert "usbipd.exe bind --busid $busid" in script
-    assert "usbipd.exe attach --wsl --distribution $distro --busid $busid --auto-attach --unplugged" in script
+    assert "usbipd.exe attach --wsl $distro --busid $busid --auto-attach --unplugged" in script
+    assert "attach --wsl --distribution" not in script
     for forbidden in ("adb get-state", "adb kill-server", "adb.exe", "udevadm", "usbipd.exe detach"):
         assert forbidden not in script
 

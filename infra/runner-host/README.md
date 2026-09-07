@@ -18,6 +18,11 @@ There are two small supervisors.
 Windows owns USB. WSL owns the outbound GitHub runner session. A normal GitHub
 job owns the per-job ADB server and all device observation or mutation.
 
+The bridge uses the current usbipd-win 5.x command contract: the distribution
+is the optional value of `--wsl`, not a `--distribution` flag. The policy test
+locks that argv shape so an upgrade cannot silently leave the task alive while
+the device is absent from WSL.
+
 ## Bootstrap after merge
 
 Run these versioned installers from a trusted local administrator session:

@@ -39,7 +39,12 @@ while ($true) {
         & usbipd.exe bind --busid $BusId 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
         Write-BridgeEvent 'starting_auto_attach_session'
-        & usbipd.exe attach --wsl --distribution $Distro --busid $BusId --auto-attach --unplugged
+        # usbipd-win 5.x accepts the WSL distribution as the optional value of
+        # --wsl; it is not a separate --distribution option.  Keeping this
+        # argv shape versioned prevents a silent auto-attach loop after an
+        # usbipd upgrade.
+        & usbipd.exe attach --wsl $Distro --busid $BusId --auto-attach --unplugged
+        if ($LASTEXITCODE -ne 0) { throw 'usbipd auto-attach failed' }
         Write-BridgeEvent 'auto_attach_session_ended; retrying'
     }
     catch {
