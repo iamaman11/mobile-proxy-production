@@ -26,10 +26,19 @@ function Test-ApprovedUsbDevicePresent {
     })
 }
 
-# First attach the currently-present device, then keep usbipd --auto-attach
-# alive for later WSL/USB detach events. usbipd's auto-attach loop is event
-# driven and is not a substitute for the initial attach. This script never
-# owns the ADB server.
+function Test-ApprovedUsbDeviceAttached {
+    $rawState = & usbipd.exe state 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'usbipd state unavailable' }
+    $device = (($rawState | ConvertFrom-Json).Devices | Where-Object {
+        $_.BusId -eq $BusId
+    } | Select-Object -First 1)
+    return $null -ne $device -and -not [string]::IsNullOrWhiteSpace([string]$device.ClientIPAddress)
+}
+
+# usbipd auto-attach is not reliable across a full WSL shutdown: its Windows
+# process can remain alive while the old client disappears. Poll only this
+# allowlisted device's local USBIPD state and attach only when it is absent.
+# This script never owns the ADB server or a device detach operation.
 while ($true) {
     try {
         if (-not (Test-ApprovedUsbDevicePresent)) {
@@ -37,22 +46,13 @@ while ($true) {
             Start-Sleep -Seconds 15
             continue
         }
-        & usbipd.exe bind --busid $BusId 2>$null
-        if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
-        & usbipd.exe attach --wsl $Distro --busid $BusId 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            # An already attached device can legitimately make the immediate
-            # request non-zero. Keep the event-driven lease alive either way.
-            Write-BridgeEvent 'initial_attach_nonzero; continuing_to_auto_attach'
+        if (-not (Test-ApprovedUsbDeviceAttached)) {
+            & usbipd.exe bind --busid $BusId 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
+            & usbipd.exe attach --wsl $Distro --busid $BusId 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'usbipd attach failed' }
+            Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
         }
-        Write-BridgeEvent 'starting_auto_attach_session'
-        # usbipd-win 5.x accepts the WSL distribution as the optional value of
-        # --wsl; it is not a separate --distribution option.  Keeping this
-        # argv shape versioned prevents a silent auto-attach loop after an
-        # usbipd upgrade.
-        & usbipd.exe attach --wsl $Distro --busid $BusId --auto-attach --unplugged
-        if ($LASTEXITCODE -ne 0) { throw 'usbipd auto-attach failed' }
-        Write-BridgeEvent 'auto_attach_session_ended; retrying'
     }
     catch {
         # Device-specific details are deliberately not printed.

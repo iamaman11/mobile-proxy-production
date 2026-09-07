@@ -19,11 +19,12 @@ Windows owns USB. WSL owns the outbound GitHub runner session. A normal GitHub
 job owns the per-job ADB server and all device observation or mutation.
 
 The bridge uses the current usbipd-win 5.x command contract: the distribution
-is the optional value of `--wsl`, not a `--distribution` flag. On each task
-start it first attaches a device that is already present, then keeps the
-event-driven auto-attach lease for future detach events. The policy test locks
-this argv shape so an upgrade cannot silently leave the task alive while the
-device is absent from WSL.
+is the optional value of `--wsl`, not a `--distribution` flag. Every 15 seconds
+the task reads local USBIPD state and attaches only the allowlisted device if
+its WSL client is absent. This is deliberately used instead of usbipd's
+event-driven auto-attach loop, which can survive a full WSL shutdown without
+noticing that its prior client disappeared. The policy test locks this argv
+shape and ownership boundary.
 
 ## Bootstrap after merge
 
