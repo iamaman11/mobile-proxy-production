@@ -5,7 +5,8 @@ param(
     [ValidatePattern('^[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}$')]
     [string]$HardwareId = '04e8:6860',
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
-    [string]$Distro = 'Ubuntu'
+    [string]$Distro = 'Ubuntu',
+    [string]$LogPath = 'C:\ProgramData\MobileProxy\usb-bridge\mobile-proxy-usb-bridge.log'
 )
 
 Set-StrictMode -Version Latest
@@ -13,7 +14,19 @@ $ErrorActionPreference = 'Stop'
 
 function Write-BridgeEvent {
     param([Parameter(Mandatory = $true)][string]$Message)
-    Write-Output ("{0:u} mobile-proxy-usb-bridge {1}" -f (Get-Date).ToUniversalTime(), $Message)
+    $line = "{0:u} mobile-proxy-usb-bridge {1}" -f (Get-Date).ToUniversalTime(), $Message
+    # Keep only bounded, generic events. Device inventory, command output,
+    # identifiers, and exception text are deliberately never persisted.
+    try {
+        $directory = Split-Path -Parent $LogPath
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+        if ((Get-Item -LiteralPath $LogPath).Length -gt 65536) {
+            Get-Content -LiteralPath $LogPath -Tail 200 | Set-Content -LiteralPath $LogPath -Encoding utf8
+        }
+    }
+    catch { }
+    Write-Output $line
 }
 
 function Get-BridgeFailureCategory {

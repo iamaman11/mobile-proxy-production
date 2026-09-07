@@ -20,6 +20,9 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "usbipd.exe attach --wsl $distro --busid $busid 2>$null" in script
     assert "--auto-attach" not in script
     assert "if (-not (test-approvedusbdeviceattached))" in script
+    assert "mobile-proxy-usb-bridge.log" in script
+    assert "65536" in script
+    assert "exception text are deliberately never persisted" in script
     for category in ("inventory_unavailable", "state_unavailable", "bind_failed", "attach_failed", "unexpected_local_error"):
         assert category in script
     assert "attach --wsl --distribution" not in script
