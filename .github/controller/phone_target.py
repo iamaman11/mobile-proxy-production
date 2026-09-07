@@ -52,6 +52,7 @@ class RuntimeObservation:
     required_file_count: int
     desired: bool
     admissible_for_new_dispatch: bool
+    required_file_statuses: tuple[str, ...] = ()
     mode: str = "read_only"
 
     def to_dict(self) -> dict[str, object]:
@@ -295,32 +296,29 @@ def observe_runtime(*, serial: str, release_root: Path, release_id: str, require
         raise PhoneTargetUnavailable(_ROOT_LAYOUT_OBSERVATION_MALFORMED)
     exists = values["target"] == "present"
     current = None if values["current"] == "absent" else values["current"]
+    statuses: tuple[str, ...] = ()
     exact = False
     if exists and current == target:
-        exact = True
-        for relative, _local, expected in files:
-            result = _read(serial, ["shell", "sha256sum", f"{target}/{relative}"])
-            actual = result.stdout.split()[0] if result.returncode == 0 and result.stdout.split() else ""
-            if actual != expected:
-                exact = False
-                break
+        # Files under /data/adb are intentionally not readable by the ordinary
+        # adb-shell user. The rooted batch probe is the sole authority for this
+        # protected runtime, avoiding both a false-negative and per-file ADB
+        # round trips.
+        statuses = _observe_runtime_file_statuses(serial=serial, target=target, files=files)
+        exact = all(status == "exact" for status in statuses)
     desired = exists and current == target and exact
     current_is_managed = current is None or current.startswith(f"{_ROOT}/releases/")
     return RuntimeObservation(
         target_release=target, target_release_exists=exists, current_target=current,
         exact_files_verified=exact, required_file_count=len(files), desired=desired,
         admissible_for_new_dispatch=(desired or (not exists and current_is_managed)),
+        required_file_statuses=statuses,
     )
 
 
-def observe_runtime_required_file_statuses(
-    *, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]
+def _observe_runtime_file_statuses(
+    *, serial: str, target: str, files: tuple[tuple[str, Path, str], ...]
 ) -> tuple[str, ...]:
-    """Observe every required runtime file without returning paths or digests."""
-    release_id = _safe_release_id(release_id)
-    files = _files(release_root, required_paths)
-    target = f"{_ROOT}/releases/{release_id}"
-    _probe_root_capability(serial)
+    """Root-only, bounded protected-runtime file classification."""
     lines = [
         "set -eu",
         f"TARGET='{target}'",
@@ -358,6 +356,17 @@ def observe_runtime_required_file_statuses(
     if set(statuses) != set(range(len(files))):
         raise PhoneTargetUnavailable(_ROOT_FILE_OBSERVATION_MALFORMED)
     return tuple(statuses[index] for index in range(len(files)))
+
+
+def observe_runtime_required_file_statuses(
+    *, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Observe every required runtime file without returning paths or digests."""
+    release_id = _safe_release_id(release_id)
+    files = _files(release_root, required_paths)
+    target = f"{_ROOT}/releases/{release_id}"
+    _probe_root_capability(serial)
+    return _observe_runtime_file_statuses(serial=serial, target=target, files=files)
 
 
 def _stage_runtime(*, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]) -> tuple[str, tuple[tuple[str, Path, str], ...]]:

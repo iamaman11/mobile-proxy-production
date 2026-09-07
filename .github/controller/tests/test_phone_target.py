@@ -330,18 +330,18 @@ def test_observe_runtime_requires_exact_current_and_all_bytes() -> None:
     with tempfile.TemporaryDirectory() as raw:
         release, required = runtime_release(Path(raw))
         target = "/data/adb/mobile-proxy-node/releases/v0.1.6"
+        calls: list[bytes] = []
 
-        def fake_read(serial, args, timeout=30, input_text=None):
-            relative = args[-1].split(target + "/", 1)[1]
-            digest = hashlib.sha256((release / relative).read_bytes()).hexdigest()
-            return SimpleNamespace(returncode=0, stdout=f"{digest}  file\n")
+        def fake_root_script(serial, script, timeout=30):
+            calls.append(script)
+            if len(calls) == 1:
+                return root_result(stdout=f"target=present\ncurrent={target}\n".encode())
+            return root_result(stdout=b"0=exact\n1=exact\n2=exact\n3=exact\n")
 
         originals = (phone_target._probe_root_capability, phone_target._run_root_script, phone_target._read)
         phone_target._probe_root_capability = lambda serial: None
-        phone_target._run_root_script = lambda *args, **kwargs: root_result(
-            stdout=f"target=present\ncurrent={target}\n".encode()
-        )
-        phone_target._read = fake_read
+        phone_target._run_root_script = fake_root_script
+        phone_target._read = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("protected runtime used unprivileged adb"))
         try:
             observed = phone_target.observe_runtime(
                 serial="serial", release_root=release, release_id="v0.1.6", required_paths=required
@@ -351,6 +351,9 @@ def test_observe_runtime_requires_exact_current_and_all_bytes() -> None:
         assert observed.desired is True
         assert observed.exact_files_verified is True
         assert observed.admissible_for_new_dispatch is True
+        assert observed.required_file_statuses == ("exact", "exact", "exact", "exact")
+        assert len(calls) == 2
+        assert b"check_file" in calls[1]
 
 
 def test_observe_runtime_rejects_existing_noncurrent_target_for_new_dispatch() -> None:
