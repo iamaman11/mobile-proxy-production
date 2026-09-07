@@ -207,13 +207,22 @@ jobs:
             --output "$RUNNER_TEMP/stage4-phone-release-observation.json"
 
       - name: Preserve bounded Stage 4 observation evidence
+        id: evidence_upload
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: stage4-phone-release-observation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/stage4-phone-release-observation.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Record bounded Stage 4 artifact transport outcome
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'STAGE4_PHONE_RELEASE_ARTIFACT_TRANSPORT outcome=${{ steps.evidence_upload.outcome }}'
 
       - name: Enforce exact healthy Stage 4 baseline classification
         if: always()
