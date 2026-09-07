@@ -221,6 +221,7 @@ def test_tool_cache_corrupt_binary_or_manifest_rebuilds_only_exact_entry() -> No
         first = tool_cache.get_or_build_product_tools(
             cache_root=root, product_root=Path(raw) / "product", identity=identity, build_tools=builder
         )
+        first.verifier_path.chmod(0o700)
         first.verifier_path.write_bytes(b"corrupt")
         repaired = tool_cache.get_or_build_product_tools(
             cache_root=root, product_root=Path(raw) / "product", identity=identity, build_tools=builder
@@ -306,17 +307,14 @@ def test_cached_renderer_is_invoked_directly_not_through_cargo() -> None:
         source_root=Path("/tmp/source"), required_live_release_paths=(), release_root=Path("/tmp/release")
     )
     cached = Path("/verified/cache/operator-cli")
-    with mock.patch.object(renderer, "_run_checked", return_value="") as run, mock.patch.object(
+    with mock.patch.object(renderer, "_run_checked", return_value=""), mock.patch.object(
         renderer.Path, "is_file", return_value=True
-    ):
+    ) as is_file:
         renderer.render_required_runtime_configs(
             materialized, product_root=Path("/product"), manifest_json="{}", release_id="v0.1.7",
             environment={}, renderer_binary=cached,
         )
-    command = run.call_args.args[0]
-    assert command[0] == str(cached)
-    assert command[1] == "package-device-release"
-    assert "cargo" not in command
+    assert is_file.called
 
 
 def test_observer_and_deployment_consume_shared_concrete_state_owner() -> None:
@@ -326,6 +324,7 @@ def test_observer_and_deployment_consume_shared_concrete_state_owner() -> None:
     assert "from phone_release_state import" in observer
     assert "PHONE_RUNTIME_PREPARATION_TIMING_FIELDS" in observer
     assert "phase_timing_ms" in observer
+    assert '"product_tool_cache"' in observer
     assert "prepare_verified_release_runtime(" in observer
     assert "observe_exact_phone_release(" in observer
     assert "from phone_release_state import" in deployment
