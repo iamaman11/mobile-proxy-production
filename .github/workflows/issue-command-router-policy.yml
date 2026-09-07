@@ -133,7 +133,7 @@ jobs:
               "needs.route.outputs.route_id == 'reconcile-phone-release'",
               "needs.route.outputs.operation_class == 'RECONCILE'",
               "needs.route.outputs.route_id == 'phone-transport-preflight'",
-              'source_comment_created_at: ${{ github.event.comment.created_at }}',
+              'source_comment_created_at: $' + '{{ github.event.comment.created_at }}',
               "needs.route.outputs.route_id == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'recover-quarantined-product-release'",
               "needs.route.outputs.operation_class == 'RECOVER'",
