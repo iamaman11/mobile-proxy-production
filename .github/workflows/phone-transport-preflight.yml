@@ -72,12 +72,26 @@ jobs:
             --output "$RUNNER_TEMP/phone-transport-preflight.json"
 
       - name: Preserve mandatory bounded transport evidence
+        id: transport-artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: phone-transport-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/phone-transport-preflight.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Record bounded transport artifact outcome
+        if: always()
+        shell: bash
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.transport-artifact.outcome }}
+        run: |
+          set -euo pipefail
+          case "$ARTIFACT_OUTCOME" in
+            success|failure|cancelled|skipped) ;;
+            *) exit 1 ;;
+          esac
+          echo "PHONE_TRANSPORT_ARTIFACT outcome=$ARTIFACT_OUTCOME"
 
       - name: Classify bounded transport evidence
         shell: bash
@@ -89,21 +103,66 @@ jobs:
           from pathlib import Path
 
           value = json.loads((Path(os.environ['RUNNER_TEMP']) / 'phone-transport-preflight.json').read_text())
-          if value.get('schema') != 'phone-transport-preflight.v1':
+          if value.get('schema') != 'phone-transport-preflight.v2':
               raise SystemExit('phone transport preflight schema differs')
-          if value.get('classification') not in {'READY', 'NOT_READY'}:
-            raise SystemExit('phone transport preflight classification differs')
+          classification = value.get('classification')
+          if classification not in {'READY', 'NOT_READY', 'TRANSPORT_DEGRADED'}:
+              raise SystemExit('phone transport preflight classification differs')
           transport = value.get('transport')
           if not isinstance(transport, dict) or transport.get('artifact_upload_required') is not True:
               raise SystemExit('phone transport preflight evidence/upload contract differs')
           latency = transport.get('runner_assignment_latency_ms')
           if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
               raise SystemExit('phone transport preflight assignment latency is unavailable')
+          if transport.get('assignment_normal_slo_ms') != 20000 or transport.get('assignment_bounded_slo_ms') != 60000:
+              raise SystemExit('phone transport preflight assignment SLO differs')
+          for field in ('diagnostic_evidence_available', 'diagnostics_truncated', 'assignment_slo_exceeded', 'repeated_transport_error', 'transport_degraded'):
+              if not isinstance(transport.get(field), bool):
+                  raise SystemExit('phone transport preflight boolean telemetry differs: ' + field)
+          for field in ('listener_files_scanned', 'worker_files_scanned'):
+              item = transport.get(field)
+              if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+                  raise SystemExit('phone transport preflight diagnostic source count differs: ' + field)
+          counters = transport.get('error_counters')
+          required_counters = {
+              'broker_reconnect', 'runserver_reconnect', 'tls_error', 'eof_error',
+              'connection_reset', 'action_download_error', 'artifact_transport_error',
+              'transport_error_lines',
+          }
+          if not isinstance(counters, dict) or set(counters) != required_counters:
+              raise SystemExit('phone transport preflight error counter contract differs')
+          if any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in counters.values()):
+              raise SystemExit('phone transport preflight error counter value differs')
+          allowed_classes = {
+              'BROKER_RECONNECT', 'RUNSERVER_RECONNECT', 'TLS_ERROR', 'EOF_ERROR',
+              'CONNECTION_RESET', 'ACTION_DOWNLOAD_TRANSPORT', 'ARTIFACT_TRANSPORT',
+              'DIAGNOSTIC_EVIDENCE_UNAVAILABLE', 'DIAGNOSTIC_WINDOW_TRUNCATED',
+              'RUNNER_VERSION_UNAVAILABLE', 'SESSION_ESTABLISHMENT_UNOBSERVED',
+          }
+          failure_classes = transport.get('failure_classes')
+          if not isinstance(failure_classes, list) or any(item not in allowed_classes for item in failure_classes):
+              raise SystemExit('phone transport preflight failure classes differ')
+          if classification == 'READY' and transport.get('transport_degraded') is not False:
+              raise SystemExit('READY transport is marked degraded')
+          if classification == 'TRANSPORT_DEGRADED' and transport.get('transport_degraded') is not True:
+              raise SystemExit('TRANSPORT_DEGRADED lacks degraded evidence')
+          if transport.get('diagnostic_evidence_available') is True:
+              version = transport.get('runner_version')
+              if version is not None and (not isinstance(version, str) or len(version) > 32):
+                  raise SystemExit('runner version evidence differs')
+              for field in ('listener_session_started_at_utc', 'last_successful_session_establishment_at_utc'):
+                  item = transport.get(field)
+                  if item is not None and (not isinstance(item, str) or len(item) > 64):
+                      raise SystemExit('runner session timestamp evidence differs: ' + field)
           safety = value.get('safety')
           if not isinstance(safety, dict):
               raise SystemExit('phone transport preflight safety evidence is unavailable')
-          for field in ('phone_mutation_performed', 'provider_access_performed', 'provider_mutation_performed', 'deployment_created', 'deployment_intent_created', 'raw_device_identifier_recorded', 'secret_values_recorded'):
+          for field in (
+              'phone_mutation_performed', 'provider_access_performed', 'provider_mutation_performed',
+              'deployment_created', 'deployment_intent_created', 'raw_device_identifier_recorded',
+              'secret_values_recorded', 'raw_runner_log_recorded', 'raw_transport_url_recorded',
+          ):
               if safety.get(field) is not False:
                   raise SystemExit(f'phone transport preflight safety differs: {field}')
-          print(f"PHONE_TRANSPORT_PREFLIGHT_CLASSIFIED classification={value['classification']}")
+          print(f"PHONE_TRANSPORT_PREFLIGHT_CLASSIFIED classification={classification}")
           PY
