@@ -76,6 +76,21 @@ def _first_timestamp(path: Path) -> datetime | None:
     return None
 
 
+def _safe_recent_paths(diag: Path, pattern: str) -> list[Path]:
+    entries: list[tuple[int, Path]] = []
+    try:
+        candidates = list(diag.glob(pattern))
+    except OSError:
+        return []
+    for path in candidates:
+        try:
+            entries.append((path.stat().st_mtime_ns, path))
+        except OSError:
+            continue
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in entries]
+
+
 def _line_flags(line: str) -> set[str]:
     lower = line.lower()
     flags: set[str] = set()
@@ -105,7 +120,9 @@ def _line_flags(line: str) -> set[str]:
         flags.add("connection_reset")
     if "failed to resolve action download info" in lower or ("action download" in lower and "error" in lower):
         flags.add("action_download_error")
-    if "failed to createartifact" in lower or ("artifact" in lower and any(item in lower for item in ("econnreset", "connection reset", "unable to make request"))):
+    if "failed to createartifact" in lower or (
+        "artifact" in lower and any(item in lower for item in ("econnreset", "connection reset", "unable to make request"))
+    ):
         flags.add("artifact_transport_error")
 
     if flags:
@@ -191,7 +208,7 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
         evidence["transport_degraded"] = True
         return evidence
 
-    listeners = sorted(diag.glob("Runner_*.log"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    listeners = _safe_recent_paths(diag, "Runner_*.log")
     if not listeners:
         evidence["failure_classes"] = ["DIAGNOSTIC_EVIDENCE_UNAVAILABLE"]
         evidence["transport_degraded"] = True
@@ -215,7 +232,7 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
     evidence["diagnostics_truncated"] = truncated
 
     workers: list[Path] = []
-    for candidate in sorted(diag.glob("Worker_*.log"), key=lambda path: path.stat().st_mtime_ns, reverse=True):
+    for candidate in _safe_recent_paths(diag, "Worker_*.log"):
         if len(workers) >= MAX_WORKER_LOGS:
             evidence["diagnostics_truncated"] = True
             break
