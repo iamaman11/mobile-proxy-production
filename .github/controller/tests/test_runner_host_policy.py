@@ -16,7 +16,7 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "$usbipdexecutable = join-path $env:programfiles 'usbipd-win\\usbipd.exe'" in script
     assert "$wslexecutable = join-path $env:systemroot 'system32\\wsl.exe'" in script
     assert "& $wslexecutable --distribution $distro --exec /bin/true" in script
-    assert "& $usbipdexecutable bind --busid $busid" in script
+    assert "& $usbipdexecutable bind --busid $busid" not in script
     assert "& $usbipdexecutable attach --wsl $distro --busid $busid 2>$null" in script
     assert "--auto-attach" not in script
     assert "convertfrom-json" not in script
@@ -40,6 +40,8 @@ def test_windows_installer_updates_only_existing_named_task() -> None:
     assert "New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME" in script
     assert "Set-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Trigger $trigger" in script
     assert "-NonInteractive" not in script
+    assert "usbipd-win\\usbipd.exe" in script
+    assert "Initial allowlisted USBIPD bind failed." in script
 
 def test_watchdog_is_bounded_and_never_reconfigures_runner_or_phone() -> None:
     script = WATCHDOG.read_text(encoding="utf-8")

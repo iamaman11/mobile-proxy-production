@@ -70,8 +70,6 @@ while ($true) {
             Start-Sleep -Seconds 15
             continue
         }
-        & $UsbipdExecutable bind --busid $BusId 2>$null
-        if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
         & $UsbipdExecutable attach --wsl $Distro --busid $BusId 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'usbipd attach failed' }
         Write-BridgeEvent 'allowlisted_usb_attach_lease_refreshed'
