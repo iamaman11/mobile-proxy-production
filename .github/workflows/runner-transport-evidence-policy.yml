@@ -1,0 +1,116 @@
+name: Runner transport evidence policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-runner-transport-evidence:
+    name: Validate bounded runner transport degradation evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out Controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Compile and test bounded transport evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/controller/runner_transport_evidence.py \
+            .github/scripts/phone_transport_preflight.py \
+            .github/controller/tests/test_runner_transport_evidence.py
+          python3 .github/controller/tests/test_runner_transport_evidence.py
+
+      - name: Prove transport evidence and no-remediation boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          owner = Path('.github/controller/runner_transport_evidence.py').read_text(encoding='utf-8')
+          adapter = Path('.github/scripts/phone_transport_preflight.py').read_text(encoding='utf-8')
+          workflow = Path('.github/workflows/phone-transport-preflight.yml').read_text(encoding='utf-8')
+
+          for required in (
+              'ASSIGNMENT_NORMAL_SLO_MS = 20_000',
+              'ASSIGNMENT_BOUNDED_SLO_MS = 60_000',
+              'REPEATED_ERROR_THRESHOLD = 2',
+              'current_listener_session',
+              'broker_reconnect',
+              'runserver_reconnect',
+              'tls_error',
+              'eof_error',
+              'connection_reset',
+              'action_download_error',
+              'artifact_transport_error',
+              'DIAGNOSTIC_EVIDENCE_UNAVAILABLE',
+              'DIAGNOSTIC_WINDOW_TRUNCATED',
+              'TRANSPORT_DEGRADED',
+              'MAX_DIAGNOSTIC_BYTES',
+              '_safe_recent_paths',
+          ):
+              if required not in owner:
+                  raise SystemExit('runner transport evidence owner invariant missing: ' + required)
+
+          for required in (
+              'phone-transport-preflight.v2',
+              'collect_runner_transport_evidence',
+              'classify_preflight',
+              'raw_runner_log_recorded',
+              'raw_transport_url_recorded',
+          ):
+              if required not in adapter:
+                  raise SystemExit('phone transport adapter invariant missing: ' + required)
+
+          for required in (
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'timeout-minutes: 2',
+              'group: production-phone-read-only-preflight',
+              'cancel-in-progress: false',
+              'Preserve mandatory bounded transport evidence',
+              'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+              'if-no-files-found: error',
+              'Record bounded transport artifact outcome',
+              'if: always()',
+              'PHONE_TRANSPORT_ARTIFACT outcome=',
+              "{'READY', 'NOT_READY', 'TRANSPORT_DEGRADED'}",
+              "transport.get('assignment_normal_slo_ms') != 20000",
+              "transport.get('assignment_bounded_slo_ms') != 60000",
+              'artifact_transport_error',
+              'raw_runner_log_recorded',
+              'raw_transport_url_recorded',
+          ):
+              if required not in workflow:
+                  raise SystemExit('phone transport workflow invariant missing: ' + required)
+
+          combined = '\n'.join((owner, adapter, workflow)).lower()
+          forbidden = (
+              'systemctl restart',
+              'service restart',
+              'runner.listener restart',
+              './svc.sh restart',
+              './config.sh remove',
+              'remove-token',
+              'registration-token',
+              'continue-on-error:',
+              'adb install',
+              'adb push',
+          )
+          present = [item for item in forbidden if item in combined]
+          if present:
+              raise SystemExit('transport evidence gained forbidden remediation/mutation surface: ' + ', '.join(present))
+
+          if 'raw_line' in owner or 'log_lines' in owner or 'transport_url' in owner:
+              raise SystemExit('runner transport owner exposes raw diagnostic payload surface')
+
+          print('RUNNER_TRANSPORT_EVIDENCE_POLICY_OK')
+          PY

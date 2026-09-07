@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "controller"))
 
 from phone_target import PhoneTargetUnavailable, _probe_root_capability, _require_device
+from runner_transport_evidence import classify_preflight, collect_runner_transport_evidence
 
 
 def _parse_created_at(value: str) -> datetime:
@@ -29,6 +30,21 @@ def _write(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _base_safety() -> dict[str, bool]:
+    return {
+        "phone_access_performed": False,
+        "phone_mutation_performed": False,
+        "provider_access_performed": False,
+        "provider_mutation_performed": False,
+        "deployment_created": False,
+        "deployment_intent_created": False,
+        "raw_device_identifier_recorded": False,
+        "secret_values_recorded": False,
+        "raw_runner_log_recorded": False,
+        "raw_transport_url_recorded": False,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -39,26 +55,27 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     started = time.monotonic()
     timings: dict[str, int] = {}
-    safety = {
-        "phone_access_performed": False,
-        "phone_mutation_performed": False,
-        "provider_access_performed": False,
-        "provider_mutation_performed": False,
-        "deployment_created": False,
-        "deployment_intent_created": False,
-        "raw_device_identifier_recorded": False,
-        "secret_values_recorded": False,
-    }
+    safety = _base_safety()
     transport: dict[str, object] = {
         "artifact_upload_required": True,
         "runner_assignment_latency_ms": None,
     }
+
     try:
         created_at = _parse_created_at(args.source_comment_created_at)
         assignment_latency_ms = int((datetime.now(timezone.utc) - created_at).total_seconds() * 1000)
         if assignment_latency_ms < 0:
             raise PhoneTargetUnavailable("command provenance clock differs")
         transport["runner_assignment_latency_ms"] = assignment_latency_ms
+
+        runner_temp = os.environ.get("RUNNER_TEMP", "")
+        transport.update(
+            collect_runner_transport_evidence(
+                runner_temp=Path(runner_temp) if runner_temp else Path("."),
+                assignment_latency_ms=assignment_latency_ms,
+            )
+        )
+
         serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
         if not serial:
             raise PhoneTargetUnavailable("registered production phone binding is unavailable")
@@ -70,27 +87,35 @@ def main(argv: list[str] | None = None) -> int:
         _probe_root_capability(serial)
         timings["root_capability"] = int((time.monotonic() - phase) * 1000)
         timings["total"] = int((time.monotonic() - started) * 1000)
-        _write(args.output, {
-            "schema": "phone-transport-preflight.v1",
-            "controller_revision": args.controller_revision,
-            "classification": "READY",
-            "timing_ms": timings,
-            "transport": transport,
-            "safety": safety,
-        })
-        print("PHONE_TRANSPORT_PREFLIGHT classification=READY")
+
+        classification = classify_preflight(phone_ready=True, transport=transport)
+        _write(
+            args.output,
+            {
+                "schema": "phone-transport-preflight.v2",
+                "controller_revision": args.controller_revision,
+                "classification": classification,
+                "timing_ms": timings,
+                "transport": transport,
+                "safety": safety,
+            },
+        )
+        print(f"PHONE_TRANSPORT_PREFLIGHT classification={classification}")
         return 0
     except PhoneTargetUnavailable as exc:
         timings["total"] = int((time.monotonic() - started) * 1000)
-        _write(args.output, {
-            "schema": "phone-transport-preflight.v1",
-            "controller_revision": args.controller_revision,
-            "classification": "NOT_READY",
-            "failure_class": exc.__class__.__name__,
-            "timing_ms": timings,
-            "transport": transport,
-            "safety": safety,
-        })
+        _write(
+            args.output,
+            {
+                "schema": "phone-transport-preflight.v2",
+                "controller_revision": args.controller_revision,
+                "classification": "NOT_READY",
+                "failure_class": exc.__class__.__name__,
+                "timing_ms": timings,
+                "transport": transport,
+                "safety": safety,
+            },
+        )
         print("PHONE_TRANSPORT_PREFLIGHT classification=NOT_READY")
         return 0
 
