@@ -77,6 +77,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert {item["id"] for item in routes if item["enabled"]} == {
         "observe-public-deployment-projection",
         "verify-product-release",
+        "observe-phone-release",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
         "recover-quarantined-product-release",
@@ -86,6 +87,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
     assert targets["phone-production"]["allowed_operations"] == [
         "deploy-product-release",
         "verify-product-release",
+        "observe-phone-release",
         "recover-quarantined-product-release",
     ]
     assert targets["vm-production"]["active"] is False
@@ -170,6 +172,68 @@ def test_release_verify_route_is_hosted_read_only_and_bounded() -> None:
         assert forbidden not in source
 
 
+def test_stage4_phone_observation_route_is_exact_read_only_and_bounded() -> None:
+    route = accepted("/observe-phone-release phone-production v0.1.7")
+    assert route.route_id == "observe-phone-release"
+    assert route.handler == "workflow_call"
+    assert route.workflow == ".github/workflows/phone-release-observation.yml"
+    assert route.ref == "main"
+    assert route.operation == "observe-phone-release"
+    assert route.operation_class == "OBSERVE"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.read_only is True and route.destructive is False
+    assert route.concurrency_domain == "production-target-phone-production"
+    assert route.idempotency_policy == "single-run-attempt"
+    assert route.ref_policy == "controller-event-sha-exact"
+    assert json.loads(route.arguments_json) == {
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused("/observe-phone-release phone-production v0.1.8")
+    refused("/observe-phone-release vm-production v0.1.7")
+    refused("/observe-phone-release phone-production v0.1.7 extra")
+    refused("/observe-phone-release phone-production v0.1.7;echo")
+    refused("/observe-phone-release phone-production v0.1.7\n/deploy phone-production v0.1.7")
+    refused("/observe-phone-release phone-production v0.1.7", run_attempt=2)
+
+    dispatcher = load_dispatcher()
+    try:
+        dispatcher.build_dispatch(
+            "observe-phone-release",
+            '{"release":"v0.1.7","target":"phone-production"}',
+        )
+    except dispatcher.DispatchRefused:
+        pass
+    else:
+        raise AssertionError("generic hosted dispatcher accepted phone-access workflow_call route")
+
+    source = (WORKFLOWS / "phone-release-observation.yml").read_text(encoding="utf-8")
+    for required in (
+        "workflow_call:",
+        "source_issue_number:",
+        "source_comment_id:",
+        "source_actor:",
+        "source_comment_url:",
+        "runs-on: [self-hosted, Linux, X64, android-production]",
+        "group: production-target-phone-production",
+        "cancel-in-progress: false",
+        "environment: phone-production",
+        ".github/scripts/observe_phone_release.py",
+        "STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT",
+    ):
+        assert required in source
+    for forbidden in (
+        "workflow_dispatch:",
+        "issue_comment:",
+        "dispatch_release_once",
+        "dispatch_install_once",
+        "/deploy ",
+        "/retry-deploy ",
+    ):
+        assert forbidden not in source
+
+
 def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
     dispatcher = load_dispatcher()
     workflow, ref, inputs = dispatcher.build_dispatch("observe-public-deployment-projection", "{}")
@@ -177,6 +241,7 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
     assert ref == "main"
     assert inputs == {}
     for route_id, arguments in (
+        ("observe-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
         ("deploy-product-release", '{"release":"v0.1.4","target":"phone-production"}'),
         ("recover-quarantined-product-release", '{"quarantined_request_id":"req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7","release":"v0.1.7","target":"phone-production"}'),
     ):
@@ -185,7 +250,7 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
         except dispatcher.DispatchRefused:
             pass
         else:
-            raise AssertionError("generic dispatcher accepted destructive route")
+            raise AssertionError("generic dispatcher accepted non-generic route")
     try:
         dispatcher.build_dispatch("observe-public-deployment-projection", '{"extra":"x"}')
     except dispatcher.DispatchRefused:
@@ -378,6 +443,9 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "needs.route.outputs.handler == 'dispatch_workflow'",
         "needs.route.outputs.read_only == 'true'",
         "needs.route.outputs.destructive == 'false'",
+        "needs.route.outputs.handler == 'workflow_call'",
+        "needs.route.outputs.route_id == 'observe-phone-release'",
+        "./.github/workflows/phone-release-observation.yml",
         "./.github/workflows/release-deployment.yml",
         "./.github/workflows/production-runner-android-build-tools-bootstrap.yml",
         "./.github/workflows/quarantined-release-recovery.yml",

@@ -1,0 +1,258 @@
+name: Stage 4 exact phone Product Release observation
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      ANDROID_TARGET_BINDING_KEY:
+        required: true
+      MOBILE_PROXY_ADMIN_TOKEN:
+        required: true
+      MOBILE_PROXY_DEVICE_TOKEN:
+        required: true
+      MOBILE_PROXY_UI_TOKEN:
+        required: true
+      MOBILE_PROXY_RELAY_USER:
+        required: true
+      MOBILE_PROXY_RELAY_PASSWORD:
+        required: true
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  admit:
+    name: Admit exact Issue 1 Stage 4 observation without phone access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    steps:
+      - name: Check out exact Controller comment-event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate sole-ingress provenance and immutable Stage 4 Release
+        id: release
+        env:
+          COMMAND: ${{ inputs.command }}
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_ISSUE_NUMBER: ${{ inputs.source_issue_number }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          SOURCE_ACTOR: ${{ inputs.source_actor }}
+          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
+          EXPECTED_OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          command = os.environ['COMMAND']
+          target = os.environ['TARGET']
+          release_tag = os.environ['RELEASE_TAG']
+          if command != '/observe-phone-release phone-production v0.1.7':
+              raise SystemExit('Stage 4 observation command differs from exact Issue #1 contract')
+          if target != 'phone-production' or release_tag != 'v0.1.7':
+              raise SystemExit('Stage 4 observer admission differs from phone-production@v0.1.7')
+          if os.environ['SOURCE_ISSUE_NUMBER'] != '1':
+              raise SystemExit('Stage 4 observer source Issue differs')
+          if os.environ['SOURCE_ACTOR'] != os.environ['EXPECTED_OWNER']:
+              raise SystemExit('Stage 4 observer source actor is not repository owner')
+          try:
+              comment_id = int(os.environ['SOURCE_COMMENT_ID'])
+          except ValueError as exc:
+              raise SystemExit('Stage 4 observer source comment id is invalid') from exc
+          if comment_id <= 0:
+              raise SystemExit('Stage 4 observer source comment id is invalid')
+          expected_url = (
+              'https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-'
+              + str(comment_id)
+          )
+          if os.environ['SOURCE_COMMENT_URL'] != expected_url:
+              raise SystemExit('Stage 4 observer source comment URL differs')
+
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag=release_tag, target=target)
+          if admitted.identity.tag != release_tag or admitted.identity.immutable is not True:
+              raise SystemExit('Stage 4 Product Release admission differs')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f"source_sha={admitted.identity.source_sha}\n")
+          print(
+              'STAGE4_PHONE_RELEASE_ADMISSION_ACCEPTED '
+              f"release={release_tag} source_sha={admitted.identity.source_sha} "
+              f"source_comment_id={comment_id} phone_access=false"
+          )
+          PY
+
+  observe-phone:
+    name: Observe exact APK and rooted runtime read-only
+    needs: admit
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 20
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    env:
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+      MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+      MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+      MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+      MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+      MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
+    steps:
+      - name: Check out exact Controller comment-event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact admitted PRODUCT source for digest and render verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ needs.admit.outputs.source_sha }}
+          path: product-source
+          persist-credentials: false
+
+      - name: Require exact user-local Rust toolchain before Product digest/render
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${HOME}/.cargo"
+          RUSTUP_HOME="${HOME}/.rustup"
+          PATH="${CARGO_HOME}/bin:${PATH}"
+          export CARGO_HOME RUSTUP_HOME PATH
+          test "$CARGO_HOME" = "${HOME}/.cargo"
+          test "$RUSTUP_HOME" = "${HOME}/.rustup"
+          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
+          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          (
+            cd product-source
+            "$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps >/dev/null
+            git diff --check
+            test -z "$(git status --porcelain --untracked-files=no)"
+          )
+          {
+            printf 'CARGO_HOME=%s\n' "$CARGO_HOME"
+            printf 'RUSTUP_HOME=%s\n' "$RUSTUP_HOME"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo 'stage4_observer_rust_prerequisite=true'
+          echo 'rust_toolchain=1.95.0'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+
+      - name: Observe exact admitted phone Product Release
+        id: observation
+        continue-on-error: true
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/observe_phone_release.py \
+            --target "$TARGET" \
+            --release-tag "$RELEASE_TAG" \
+            --controller-revision "$GITHUB_SHA" \
+            --product-root "$GITHUB_WORKSPACE/product-source" \
+            --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
+            --output "$RUNNER_TEMP/stage4-phone-release-observation.json"
+
+      - name: Preserve bounded Stage 4 observation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stage4-phone-release-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage4-phone-release-observation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce exact healthy Stage 4 baseline classification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'stage4-phone-release-observation.json'
+          if not path.is_file():
+              raise SystemExit('Stage 4 observation evidence is unavailable')
+          value = json.loads(path.read_text(encoding='utf-8'))
+          if value.get('schema') != 'stage4-phone-release-observation.v1':
+              raise SystemExit('Stage 4 observation schema differs')
+          if value.get('classification') != 'HEALTHY_EXACT':
+              raise SystemExit('phone-production is not exact healthy v0.1.7 baseline')
+          observation = value.get('observation')
+          if not isinstance(observation, dict) or observation.get('desired') is not True:
+              raise SystemExit('Stage 4 exact composite desired observation is absent')
+          safety = value.get('safety')
+          if not isinstance(safety, dict):
+              raise SystemExit('Stage 4 observation safety evidence is absent')
+          if safety.get('phone_access_performed') is not True:
+              raise SystemExit('Stage 4 baseline lacks direct phone observation')
+          for field in (
+              'phone_mutation_performed',
+              'deployment_created',
+              'deployment_intent_created',
+              'provider_access_performed',
+              'provider_mutation_performed',
+              'raw_device_identifier_recorded',
+              'raw_current_target_path_recorded',
+              'raw_config_recorded',
+              'secret_values_recorded',
+          ):
+              if safety.get(field) is not False:
+                  raise SystemExit(f'Stage 4 read-only safety invariant differs: {field}')
+          print('STAGE4_PHONE_RELEASE_BASELINE_HEALTHY_EXACT')
+          PY

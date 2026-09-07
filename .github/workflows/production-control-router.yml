@@ -171,6 +171,29 @@ jobs:
             --arguments-json "$ROUTE_ARGUMENTS_JSON" \
             --expected-controller-sha "$GITHUB_SHA"
 
+  observe-phone-release:
+    name: Route exact Stage 4 phone Product Release observation
+    needs: route
+    if: >-
+      needs.route.outputs.handler == 'workflow_call' &&
+      needs.route.outputs.route_id == 'observe-phone-release' &&
+      needs.route.outputs.operation == 'observe-phone-release' &&
+      needs.route.outputs.operation_class == 'OBSERVE' &&
+      needs.route.outputs.read_only == 'true' &&
+      needs.route.outputs.destructive == 'false'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/phone-release-observation.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      target: ${{ needs.route.outputs.target }}
+      release_tag: ${{ needs.route.outputs.release_tag }}
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+    secrets: inherit
+
   android-build-tools-bootstrap:
     name: Route exact bounded Android Build Tools bootstrap contract
     needs: route
