@@ -11,6 +11,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$UsbipdExecutable = Join-Path $env:ProgramFiles 'usbipd-win\usbipd.exe'
+$WslExecutable = Join-Path $env:SystemRoot 'System32\wsl.exe'
 
 function Write-BridgeEvent {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -42,7 +44,7 @@ function Get-BridgeFailureCategory {
 }
 
 function Test-ApprovedUsbDevicePresent {
-    $inventory = & usbipd.exe list 2>$null
+    $inventory = & $UsbipdExecutable list 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'usbipd inventory unavailable' }
     $escapedBusId = [regex]::Escape($BusId)
     $escapedHardwareId = [regex]::Escape($HardwareId)
@@ -52,7 +54,7 @@ function Test-ApprovedUsbDevicePresent {
 }
 
 function Ensure-WslDistroRunning {
-    & wsl.exe --distribution $Distro --exec /bin/true 2>$null
+    & $WslExecutable --distribution $Distro --exec /bin/true 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'wsl distro unavailable' }
 }
 
@@ -68,9 +70,9 @@ while ($true) {
             Start-Sleep -Seconds 15
             continue
         }
-        & usbipd.exe bind --busid $BusId 2>$null
+        & $UsbipdExecutable bind --busid $BusId 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
-        & usbipd.exe attach --wsl $Distro --busid $BusId 2>$null
+        & $UsbipdExecutable attach --wsl $Distro --busid $BusId 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'usbipd attach failed' }
         Write-BridgeEvent 'allowlisted_usb_attach_lease_refreshed'
     }
