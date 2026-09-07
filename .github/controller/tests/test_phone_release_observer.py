@@ -406,11 +406,12 @@ def test_workflow_is_exact_issue1_read_only_observation_under_target_lock() -> N
         "user_local_tooling=true",
         "system_path_mutation=false",
         "id: evidence_upload",
-        "continue-on-error: true",
         "STAGE4_PHONE_RELEASE_ARTIFACT_TRANSPORT outcome=",
     )
     missing = [token for token in required if token not in source]
     assert not missing, missing
+    evidence = source[source.index("- name: Preserve bounded Stage 4 observation evidence"):source.index("- name: Record bounded Stage 4 artifact transport outcome")]
+    assert "continue-on-error" not in evidence
     forbidden = (
         "workflow_dispatch:",
         "issue_comment:",
