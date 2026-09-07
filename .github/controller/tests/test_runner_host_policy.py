@@ -17,10 +17,12 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "$wslexecutable = join-path $env:systemroot 'system32\\wsl.exe'" in script
     assert "& $wslexecutable --distribution $distro --exec /bin/true" in script
     assert "& $usbipdexecutable bind --busid $busid" not in script
+    assert "& $usbipdexecutable state 2>&1" in script
+    assert "convertfrom-json -erroraction stop" in script
+    assert "if (-not (test-approvedusbdeviceattached))" in script
     assert "& $usbipdexecutable attach --wsl $distro --busid $busid *> $null" in script
     assert "$attachexitcode = $lastexitcode" in script
     assert "--auto-attach" not in script
-    assert "convertfrom-json" not in script
     assert "mobile-proxy-usb-bridge.log" in script
     assert "65536" in script
     assert "exception text are deliberately never persisted" in script
