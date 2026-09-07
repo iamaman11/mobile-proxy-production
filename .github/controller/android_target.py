@@ -134,8 +134,22 @@ def _run(command: list[str], *, timeout: int, check: bool = False) -> subprocess
         raise AndroidObservationUnavailable("Android read-only observation transport failed") from exc
 
 
+def _ensure_adb_server(adb: str) -> None:
+    """Start only the local ADB transport daemon before any target-state claim.
+
+    GitHub runner orphan cleanup may terminate this host-side daemon after a job.
+    Observation must therefore establish the daemon explicitly instead of
+    collapsing local transport absence into a physical phone-state conclusion.
+    This operation does not dispatch any command to the phone.
+    """
+    started = _run([adb, "start-server"], timeout=20)
+    if started.returncode != 0:
+        raise AndroidObservationUnavailable("ADB server is unavailable")
+
+
 def _adb_read(serial: str, arguments: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     adb = _adb()
+    _ensure_adb_server(adb)
     state = _run([adb, "-s", serial, "get-state"], timeout=15)
     if state.returncode != 0 or state.stdout.strip() != "device":
         raise AndroidObservationUnavailable("registered Android target is not in device state")

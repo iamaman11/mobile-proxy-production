@@ -260,6 +260,56 @@ def test_pre_dispatch_artifact_refusal_is_terminal_without_dispatch() -> None:
     assert state.recovery_required is False
 
 
+def test_adb_read_starts_local_server_before_target_state() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], *, timeout: int, check: bool = False):
+        del timeout, check
+        argv = tuple(command)
+        calls.append(argv)
+        if argv == ("/usr/bin/adb", "start-server"):
+            return _completed()
+        if argv == ("/usr/bin/adb", "-s", SERIAL, "get-state"):
+            return _completed("device\n")
+        if argv == ("/usr/bin/adb", "-s", SERIAL, "shell", "echo", "ok"):
+            return _completed("ok\n")
+        raise AssertionError(f"unexpected adb command: {argv!r}")
+
+    with mock.patch.object(TARGET, "_adb", return_value="/usr/bin/adb"), mock.patch.object(
+        TARGET, "_run", side_effect=fake_run
+    ):
+        result = TARGET._adb_read(SERIAL, ["shell", "echo", "ok"])
+
+    assert result.stdout == "ok\n"
+    assert calls == [
+        ("/usr/bin/adb", "start-server"),
+        ("/usr/bin/adb", "-s", SERIAL, "get-state"),
+        ("/usr/bin/adb", "-s", SERIAL, "shell", "echo", "ok"),
+    ]
+
+
+def test_adb_server_failure_is_not_misclassified_as_phone_state() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], *, timeout: int, check: bool = False):
+        del timeout, check
+        argv = tuple(command)
+        calls.append(argv)
+        return _completed(returncode=1)
+
+    with mock.patch.object(TARGET, "_adb", return_value="/usr/bin/adb"), mock.patch.object(
+        TARGET, "_run", side_effect=fake_run
+    ):
+        try:
+            TARGET._adb_read(SERIAL, ["shell", "echo", "ok"])
+        except AndroidObservationUnavailable as exc:
+            assert str(exc) == "ADB server is unavailable"
+        else:
+            raise AssertionError("ADB server failure was unexpectedly accepted")
+
+    assert calls == [("/usr/bin/adb", "start-server")]
+
+
 def main() -> int:
     tests = [value for name, value in globals().items() if name.startswith("test_") and callable(value)]
     for test in sorted(tests, key=lambda fn: fn.__name__):
