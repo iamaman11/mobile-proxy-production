@@ -175,8 +175,11 @@ def _runtime_cache_root() -> Path | None:
 
 
 def _verifier_tool_cache_root() -> Path | None:
-    raw = os.environ.get("MOBILE_PROXY_VERIFIER_TOOL_CACHE_DIR", "").strip()
-    return Path(raw) if raw else None
+    explicit = os.environ.get("MOBILE_PROXY_VERIFIER_TOOL_CACHE_DIR", "").strip()
+    if explicit:
+        return Path(explicit)
+    runner_tool_cache = os.environ.get("RUNNER_TOOL_CACHE", "").strip()
+    return Path(runner_tool_cache) / "mobile-proxy-verifier-tool-cache" if runner_tool_cache else None
 
 
 def prepare_verified_release_runtime(
