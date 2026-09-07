@@ -10,7 +10,9 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-CONTROLLER = Path(__file__).resolve().parents[1] / "controller"
+SCRIPTS = Path(__file__).resolve().parent
+CONTROLLER = SCRIPTS.parent / "controller"
+sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(CONTROLLER))
 
 from android_target import AndroidObservationUnavailable  # noqa: E402
