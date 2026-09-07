@@ -26,9 +26,10 @@ function Test-ApprovedUsbDevicePresent {
     })
 }
 
-# usbipd --auto-attach is the only long-lived operation. If WSL restarts or
-# USBIPD ends the session, retry only the same allowlisted device. This script
-# never owns the ADB server.
+# First attach the currently-present device, then keep usbipd --auto-attach
+# alive for later WSL/USB detach events. usbipd's auto-attach loop is event
+# driven and is not a substitute for the initial attach. This script never
+# owns the ADB server.
 while ($true) {
     try {
         if (-not (Test-ApprovedUsbDevicePresent)) {
@@ -38,6 +39,12 @@ while ($true) {
         }
         & usbipd.exe bind --busid $BusId 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
+        & usbipd.exe attach --wsl $Distro --busid $BusId 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            # An already attached device can legitimately make the immediate
+            # request non-zero. Keep the event-driven lease alive either way.
+            Write-BridgeEvent 'initial_attach_nonzero; continuing_to_auto_attach'
+        }
         Write-BridgeEvent 'starting_auto_attach_session'
         # usbipd-win 5.x accepts the WSL distribution as the optional value of
         # --wsl; it is not a separate --distribution option.  Keeping this
