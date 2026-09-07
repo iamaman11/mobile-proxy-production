@@ -114,6 +114,8 @@ def _bounded_runtime_file_drift(
 
 
 def _bounded_phase_timing(raw: object) -> dict[str, int]:
+    if raw is None:
+        return {}
     if not isinstance(raw, dict) or set(raw) != set(PHONE_RUNTIME_PREPARATION_TIMING_FIELDS):
         raise PhoneTargetUnavailable("runtime preparation timing evidence differs")
     result: dict[str, int] = {}
@@ -235,7 +237,7 @@ def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
     if isinstance(materialization, dict):
         phase_timing = materialization.get("phase_timing_ms")
         cache = materialization.get("runtime_archive_cache")
-        if isinstance(phase_timing, dict) and isinstance(cache, dict):
+        if isinstance(phase_timing, dict) and phase_timing and isinstance(cache, dict):
             summary["runtime_preparation"] = {
                 "phase_timing_ms": phase_timing,
                 "runtime_archive_cache": {
