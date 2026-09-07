@@ -42,6 +42,8 @@ def test_windows_installer_updates_only_existing_named_task() -> None:
     assert "-NonInteractive" not in script
     assert "usbipd-win\\usbipd.exe" in script
     assert "Initial allowlisted USBIPD bind failed." in script
+    assert "$ErrorActionPreference = 'Continue'" in script
+    assert "$bindExitCode = $LASTEXITCODE" in script
 
 def test_watchdog_is_bounded_and_never_reconfigures_runner_or_phone() -> None:
     script = WATCHDOG.read_text(encoding="utf-8")
