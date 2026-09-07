@@ -36,6 +36,7 @@ function Get-BridgeFailureCategory {
         '^usbipd state unavailable$' { return 'state_unavailable' }
         '^usbipd bind failed$' { return 'bind_failed' }
         '^usbipd attach failed$' { return 'attach_failed' }
+        '^wsl distro unavailable$' { return 'wsl_unavailable' }
         default { return 'unexpected_local_error' }
     }
 }
@@ -48,6 +49,11 @@ function Test-ApprovedUsbDevicePresent {
     return [bool]($inventory | Where-Object {
         $_ -match "^\s*$escapedBusId\s+.*$escapedHardwareId"
     })
+}
+
+function Ensure-WslDistroRunning {
+    & wsl.exe --distribution $Distro --exec /bin/true 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'wsl distro unavailable' }
 }
 
 function Test-ApprovedUsbDeviceAttached {
@@ -65,6 +71,7 @@ function Test-ApprovedUsbDeviceAttached {
 # This script never owns the ADB server or a device detach operation.
 while ($true) {
     try {
+        Ensure-WslDistroRunning
         if (-not (Test-ApprovedUsbDevicePresent)) {
             Write-BridgeEvent 'approved_usb_device_not_present; retrying'
             Start-Sleep -Seconds 15
