@@ -78,6 +78,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "observe-public-deployment-projection",
         "verify-product-release",
         "observe-phone-release",
+        "phone-transport-preflight",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
         "recover-quarantined-product-release",
@@ -88,6 +89,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "deploy-product-release",
         "verify-product-release",
         "observe-phone-release",
+        "phone-transport-preflight",
         "recover-quarantined-product-release",
     ]
     assert targets["vm-production"]["active"] is False
@@ -207,6 +209,20 @@ def test_stage4_phone_observation_route_is_exact_read_only_and_bounded() -> None
         pass
     else:
         raise AssertionError("generic hosted dispatcher accepted phone-access workflow_call route")
+
+
+def test_phone_transport_preflight_route_is_exact_read_only_and_bounded() -> None:
+    route = accepted("/phone-transport-preflight")
+    assert route.route_id == "phone-transport-preflight"
+    assert route.handler == "workflow_call"
+    assert route.workflow == ".github/workflows/phone-transport-preflight.yml"
+    assert route.operation_class == "DIAGNOSTIC"
+    assert route.read_only is True and route.destructive is False
+    assert route.concurrency_domain == "production-phone-read-only-preflight"
+    assert route.arguments_json == "{}"
+    refused("/phone-transport-preflight extra")
+    refused("/phone-transport-preflight\n/deploy phone-production v0.1.7")
+    refused("/phone-transport-preflight", run_attempt=2)
 
     source = (WORKFLOWS / "phone-release-observation.yml").read_text(encoding="utf-8")
     for required in (
