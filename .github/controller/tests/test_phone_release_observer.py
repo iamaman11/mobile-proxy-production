@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +50,146 @@ def test_bounded_runtime_summary_never_records_current_path() -> None:
     assert value["current_state"] == "other_managed_release"
     assert value["current_matches_expected_release"] is False
     assert "v0.1.6" not in repr(value)
+
+
+def test_bounded_runtime_file_drift_records_only_index_class_and_status() -> None:
+    module = load_observer()
+    required = (
+        "bin/host-daemon",
+        "bin/runtime-supervisor",
+        "bin/sing-box",
+        "config/host-daemon.json",
+        "config/sing-box.json",
+        "module.prop",
+        "service.sh",
+    )
+    statuses = (
+        "exact",
+        "digest_mismatch",
+        "missing",
+        "wrong_type",
+        "unreadable",
+        "exact",
+        "exact",
+    )
+    value = module._bounded_runtime_file_drift(
+        statuses,
+        required_paths=required,
+        rendered_paths=["config/host-daemon.json", "config/sing-box.json"],
+    )
+    assert value["required_file_count"] == 7
+    assert value["exact_file_count"] == 3
+    assert value["drift_file_count"] == 4
+    assert value["files"] == [
+        {"required_file_index": 0, "source_class": "static_release", "status": "exact"},
+        {"required_file_index": 1, "source_class": "static_release", "status": "digest_mismatch"},
+        {"required_file_index": 2, "source_class": "static_release", "status": "missing"},
+        {"required_file_index": 3, "source_class": "sensitive_derived", "status": "wrong_type"},
+        {"required_file_index": 4, "source_class": "sensitive_derived", "status": "unreadable"},
+        {"required_file_index": 5, "source_class": "static_release", "status": "exact"},
+        {"required_file_index": 6, "source_class": "static_release", "status": "exact"},
+    ]
+    assert value["raw_release_paths_recorded"] is False
+    assert value["expected_file_digests_recorded"] is False
+    assert value["observed_file_digests_recorded"] is False
+    assert value["secret_derived_identifiers_recorded"] is False
+    rendered = repr(value)
+    for path in required:
+        assert path not in rendered
+    assert not any(len(token) == 64 for token in rendered.replace("'", " ").replace('"', " ").split())
+
+
+def test_runtime_required_file_probe_is_complete_bounded_and_read_only() -> None:
+    module = load_observer()
+    phone_target = sys.modules["phone_target"]
+    with tempfile.TemporaryDirectory() as raw:
+        release = Path(raw) / "release"
+        bodies = {
+            "bin/a": b"a\n",
+            "config/b": b"b\n",
+            "service.sh": b"service\n",
+        }
+        for relative, body in bodies.items():
+            target = release / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+        required = tuple(bodies)
+        captured: list[bytes] = []
+
+        def fake_root_script(serial, script, timeout=30):
+            captured.append(script)
+            return phone_target.RootScriptResult(
+                status="completed",
+                returncode=0,
+                stdout=b"0=exact\n1=digest_mismatch\n2=missing\n",
+                stderr=b"",
+            )
+
+        originals = (phone_target._probe_root_capability, phone_target._run_root_script)
+        phone_target._probe_root_capability = lambda serial: None
+        phone_target._run_root_script = fake_root_script
+        try:
+            observed = module.observe_runtime_required_file_statuses(
+                serial="serial",
+                release_root=release,
+                release_id="v0.1.7",
+                required_paths=required,
+            )
+        finally:
+            phone_target._probe_root_capability, phone_target._run_root_script = originals
+
+    assert observed == ("exact", "digest_mismatch", "missing")
+    assert len(captured) == 1
+    script = captured[0]
+    for index, relative in enumerate(required):
+        expected = hashlib.sha256(bodies[relative]).hexdigest().encode()
+        assert f"check_file {index} ".encode() in script
+        assert relative.encode() in script
+        assert expected in script
+    for forbidden in (
+        b"rm -rf",
+        b"adb push",
+        b"ln -s",
+        b"ln -sfn",
+        b"chmod",
+        b"kill -TERM",
+        b"service.sh\"",
+    ):
+        assert forbidden not in script
+
+
+def test_runtime_required_file_probe_rejects_malformed_output_without_leaking_it() -> None:
+    module = load_observer()
+    phone_target = sys.modules["phone_target"]
+    with tempfile.TemporaryDirectory() as raw:
+        release = Path(raw) / "release"
+        target = release / "service.sh"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"service\n")
+        originals = (phone_target._probe_root_capability, phone_target._run_root_script)
+        phone_target._probe_root_capability = lambda serial: None
+        phone_target._run_root_script = lambda *args, **kwargs: phone_target.RootScriptResult(
+            status="completed",
+            returncode=0,
+            stdout=b"raw/device/path=secret-derived-output\n",
+            stderr=b"",
+        )
+        try:
+            try:
+                module.observe_runtime_required_file_statuses(
+                    serial="serial",
+                    release_root=release,
+                    release_id="v0.1.7",
+                    required_paths=("service.sh",),
+                )
+            except phone_target.PhoneTargetUnavailable as error:
+                assert str(error) == "rooted runtime required-file observation is malformed"
+                assert "raw/device/path" not in str(error)
+                assert "secret-derived-output" not in str(error)
+            else:
+                raise AssertionError("malformed required-file output was accepted")
+        finally:
+            phone_target._probe_root_capability, phone_target._run_root_script = originals
 
 
 def test_expected_materialization_suppresses_secret_binding_ids_and_rendered_paths() -> None:
@@ -100,6 +242,10 @@ def test_observer_has_no_destructive_callsite() -> None:
         '"provider_mutation_performed": False',
         '"raw_device_identifier_recorded": False',
         '"raw_current_target_path_recorded": False',
+        '"raw_runtime_release_paths_recorded": False',
+        '"expected_file_digests_recorded": False',
+        '"observed_file_digests_recorded": False',
+        '"credential_derived_identifiers_recorded": False',
         '"raw_config_recorded": False',
         '"secret_values_recorded": False',
     ):
