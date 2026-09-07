@@ -181,6 +181,7 @@ def bind_renderer_inputs(materialized: PhoneRuntimeMaterialization, *, product_r
 def render_required_runtime_configs(
     materialized: PhoneRuntimeMaterialization, *, product_root: Path,
     manifest_json: str, release_id: str, environment: Mapping[str, str],
+    renderer_binary: Path | None = None,
 ) -> tuple[str, ...]:
     try:
         manifest = json.loads(manifest_json)
@@ -192,16 +193,28 @@ def render_required_runtime_configs(
     render_root = materialized.source_root.parent / "rendered"
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(manifest_path, 0o600)
+    if renderer_binary is None:
+        command = [
+            "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+            "--bin", "operator-cli", "--", "package-device-release",
+            "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
+            "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
+        ]
+    else:
+        if not renderer_binary.is_file():
+            raise ProductRuntimeRenderRefused(_PRODUCT_RUNTIME_RENDER_FAILURE)
+        command = [
+            str(renderer_binary), "package-device-release",
+            "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
+            "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
+        ]
     try:
         try:
             _run_checked(
-                [
-                    "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
-                    "--bin", "operator-cli", "--", "package-device-release",
-                    "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
-                    "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
-                ],
-                cwd=product_root, timeout=600, environment=environment,
+                command,
+                cwd=product_root,
+                timeout=600,
+                environment=environment,
             )
         except PhoneRuntimeRefused:
             raise ProductRuntimeRenderRefused(_PRODUCT_RUNTIME_RENDER_FAILURE) from None
