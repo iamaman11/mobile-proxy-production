@@ -20,14 +20,16 @@ from android_target import (  # noqa: E402
     AndroidObservationUnavailable,
     AndroidTargetStateUnavailable,
 )
+from phone_release_state import (  # noqa: E402
+    observe_exact_phone_release,
+    prepare_verified_release_runtime,
+)
 from phone_runtime import PhoneRuntimeRefused  # noqa: E402
 from phone_target import (  # noqa: E402
     PhoneTargetUnavailable,
     observe_runtime_required_file_statuses,
 )
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
-
-import run_phone_release_deployment as deployment_runner  # noqa: E402
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _STAGE4_RELEASE = "v0.1.7"
@@ -274,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
             root = Path(raw)
             facts: dict[str, object] = {}
             phase_started = time.monotonic()
-            materialized = deployment_runner._materialize_verified_release_runtime(
+            materialized = prepare_verified_release_runtime(
                 admitted,
                 archive=root / "phone-runtime.tar.gz",
                 work_root=root / "runtime",
@@ -286,13 +288,20 @@ def main(argv: list[str] | None = None) -> int:
             timings_ms["runtime_materialization"] = int((time.monotonic() - phase_started) * 1000)
             phone_access_started = True
             phase_started = time.monotonic()
-            apk, runtime = deployment_runner._observe_composite(
+            snapshot = observe_exact_phone_release(
                 serial=serial,
                 binding_key=binding_key,
                 admitted=admitted,
                 materialized=materialized,
             )
             timings_ms["phone_observation"] = int((time.monotonic() - phase_started) * 1000)
+            if snapshot.classification == "UNKNOWN":
+                if snapshot.failure is None:
+                    raise PhoneTargetUnavailable("exact phone Release observation is unavailable")
+                raise snapshot.failure
+            if snapshot.apk is None or snapshot.runtime is None:
+                raise PhoneTargetUnavailable("exact phone Release observation is incomplete")
+            apk, runtime = snapshot.apk, snapshot.runtime
             if (
                 runtime.target_release_exists
                 and runtime.current_target == runtime.target_release
@@ -314,11 +323,11 @@ def main(argv: list[str] | None = None) -> int:
                     rendered_paths=rendered_paths,
                 )
 
-        desired = bool(apk.desired and runtime.desired)
+        desired = snapshot.desired
         timings_ms["total"] = int((time.monotonic() - started_at) * 1000)
         payload = {
             **_base_payload(controller_revision=args.controller_revision, admitted=admitted),
-            "classification": "HEALTHY_EXACT" if desired else "DEGRADED",
+            "classification": snapshot.classification,
             "observation": {
                 "apk": _bounded_apk(apk),
                 "runtime": _bounded_runtime(runtime),

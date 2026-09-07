@@ -123,6 +123,44 @@
       "workflow": ".github/workflows/phone-release-observation.yml"
     },
     {
+      "allowed_targets": [
+        "phone-production"
+      ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-target-read-only-reconcile",
+      "concurrency_domain": "production-target-phone-production",
+      "destructive": false,
+      "dispatch_inputs": {},
+      "enabled": true,
+      "evidence_policy": "bounded-healthy-exact-phone-snapshot+existing-admitted-projection-readback",
+      "handler": "workflow_call",
+      "id": "reconcile-phone-release",
+      "idempotency_policy": "projection-readback-noop",
+      "operation": "reconcile-phone-release",
+      "operation_class": "RECONCILE",
+      "pattern": "^/reconcile-phone-release (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
+      "physical_domains": [],
+      "read_only": false,
+      "recovery_policy": "fail-closed-on-projection-ambiguity-target-read-only-rerun-safe",
+      "ref": "main",
+      "ref_policy": "controller-event-sha-exact",
+      "requires_phone": true,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "command-arguments+existing-admitted-projection",
+      "target_capability_policy": "phone-production-target-read-only-projection-reconcile",
+      "workflow": ".github/workflows/phone-release-reconcile.yml"
+    },
+    {
       "allowed_targets": [],
       "arguments": [],
       "authority_policy": "private-issue1-owner+controller-main-exact+registered-phone-read-only",

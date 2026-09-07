@@ -78,6 +78,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "observe-public-deployment-projection",
         "verify-product-release",
         "observe-phone-release",
+        "reconcile-phone-release",
         "phone-transport-preflight",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
@@ -89,6 +90,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "deploy-product-release",
         "verify-product-release",
         "observe-phone-release",
+        "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release",
     ]
@@ -211,6 +213,32 @@ def test_stage4_phone_observation_route_is_exact_read_only_and_bounded() -> None
         raise AssertionError("generic hosted dispatcher accepted phone-access workflow_call route")
 
 
+def test_stage4_phone_reconcile_route_is_distinct_target_read_only_control_plane_write() -> None:
+    route = accepted("/reconcile-phone-release phone-production v0.1.7")
+    assert route.route_id == "reconcile-phone-release"
+    assert route.handler == "workflow_call"
+    assert route.workflow == ".github/workflows/phone-release-reconcile.yml"
+    assert route.ref == "main"
+    assert route.operation == "reconcile-phone-release"
+    assert route.operation_class == "RECONCILE"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.read_only is False and route.destructive is False
+    assert route.concurrency_domain == "production-target-phone-production"
+    assert route.idempotency_policy == "projection-readback-noop"
+    assert route.ref_policy == "controller-event-sha-exact"
+    assert route.semantic_identity_policy == "command-arguments+existing-admitted-projection"
+    assert json.loads(route.arguments_json) == {
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused("/reconcile-phone-release phone-production v0.1.8")
+    refused("/reconcile-phone-release vm-production v0.1.7")
+    refused("/reconcile-phone-release phone-production v0.1.7 extra")
+    refused("/reconcile-phone-release phone-production v0.1.7;echo")
+    refused("/reconcile-phone-release phone-production v0.1.7\n/deploy phone-production v0.1.7")
+
+
 def test_phone_transport_preflight_route_is_exact_read_only_and_bounded() -> None:
     route = accepted("/phone-transport-preflight")
     assert route.route_id == "phone-transport-preflight"
@@ -258,6 +286,7 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
     assert inputs == {}
     for route_id, arguments in (
         ("observe-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
+        ("reconcile-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
         ("deploy-product-release", '{"release":"v0.1.4","target":"phone-production"}'),
         ("recover-quarantined-product-release", '{"quarantined_request_id":"req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7","release":"v0.1.7","target":"phone-production"}'),
     ):
@@ -461,7 +490,11 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "needs.route.outputs.destructive == 'false'",
         "needs.route.outputs.handler == 'workflow_call'",
         "needs.route.outputs.route_id == 'observe-phone-release'",
+        "needs.route.outputs.route_id == 'reconcile-phone-release'",
+        "needs.route.outputs.operation_class == 'RECONCILE'",
+        "needs.route.outputs.read_only == 'false'",
         "./.github/workflows/phone-release-observation.yml",
+        "./.github/workflows/phone-release-reconcile.yml",
         "./.github/workflows/release-deployment.yml",
         "./.github/workflows/production-runner-android-build-tools-bootstrap.yml",
         "./.github/workflows/quarantined-release-recovery.yml",
