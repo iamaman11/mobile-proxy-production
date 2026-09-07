@@ -138,6 +138,7 @@ jobs:
               'CONNECTION_RESET', 'ACTION_DOWNLOAD_TRANSPORT', 'ARTIFACT_TRANSPORT',
               'DIAGNOSTIC_EVIDENCE_UNAVAILABLE', 'DIAGNOSTIC_WINDOW_TRUNCATED',
               'RUNNER_VERSION_UNAVAILABLE', 'SESSION_ESTABLISHMENT_UNOBSERVED',
+              'SESSION_WINDOW_UNRESOLVED',
           }
           failure_classes = transport.get('failure_classes')
           if not isinstance(failure_classes, list) or any(item not in allowed_classes for item in failure_classes):
@@ -154,6 +155,10 @@ jobs:
                   item = transport.get(field)
                   if item is not None and (not isinstance(item, str) or len(item) > 64):
                       raise SystemExit('runner session timestamp evidence differs: ' + field)
+              session_started = transport.get('listener_session_started_at_utc')
+              unresolved = 'SESSION_WINDOW_UNRESOLVED' in failure_classes
+              if (session_started is None) != unresolved:
+                  raise SystemExit('runner transport session-window resolution evidence differs')
           safety = value.get('safety')
           if not isinstance(safety, dict):
               raise SystemExit('phone transport preflight safety evidence is unavailable')
