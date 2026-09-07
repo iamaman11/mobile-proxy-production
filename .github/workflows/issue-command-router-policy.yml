@@ -127,6 +127,7 @@ jobs:
               "needs.route.outputs.handler == 'workflow_call'",
               "needs.route.outputs.route_id == 'observe-phone-release'",
               "needs.route.outputs.route_id == 'phone-transport-preflight'",
+              'source_comment_created_at: ${{ github.event.comment.created_at }}',
               "needs.route.outputs.route_id == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'recover-quarantined-product-release'",
               "needs.route.outputs.operation_class == 'RECOVER'",
@@ -354,6 +355,7 @@ jobs:
           for required in (
               'workflow_call:',
               "inputs.command == '/phone-transport-preflight'",
+              'source_comment_created_at:',
               'inputs.source_issue_number == 1',
               'inputs.source_actor == github.repository_owner',
               'runs-on: [self-hosted, Linux, X64, android-production]',
@@ -365,6 +367,8 @@ jobs:
               'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
               'if-no-files-found: error',
               'PHONE_TRANSPORT_PREFLIGHT_CLASSIFIED',
+              'runner_assignment_latency_ms',
+              'artifact_upload_required',
           ):
               if required not in phone_transport_preflight:
                   raise SystemExit('Stage 5 phone transport preflight workflow invariant missing: ' + required)

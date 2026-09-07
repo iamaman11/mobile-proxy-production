@@ -18,6 +18,9 @@ on:
       source_comment_url:
         required: true
         type: string
+      source_comment_created_at:
+        required: true
+        type: string
     secrets:
       ANDROID_PRODUCTION_SERIAL:
         required: true
@@ -65,6 +68,7 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/phone_transport_preflight.py \
             --controller-revision "$GITHUB_SHA" \
+            --source-comment-created-at "${{ inputs.source_comment_created_at }}" \
             --output "$RUNNER_TEMP/phone-transport-preflight.json"
 
       - name: Preserve mandatory bounded transport evidence
@@ -88,7 +92,13 @@ jobs:
           if value.get('schema') != 'phone-transport-preflight.v1':
               raise SystemExit('phone transport preflight schema differs')
           if value.get('classification') not in {'READY', 'NOT_READY'}:
-              raise SystemExit('phone transport preflight classification differs')
+            raise SystemExit('phone transport preflight classification differs')
+          transport = value.get('transport')
+          if not isinstance(transport, dict) or transport.get('artifact_upload_required') is not True:
+              raise SystemExit('phone transport preflight evidence/upload contract differs')
+          latency = transport.get('runner_assignment_latency_ms')
+          if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
+              raise SystemExit('phone transport preflight assignment latency is unavailable')
           safety = value.get('safety')
           if not isinstance(safety, dict):
               raise SystemExit('phone transport preflight safety evidence is unavailable')

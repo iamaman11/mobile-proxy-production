@@ -6,12 +6,23 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "controller"))
 
 from phone_target import PhoneTargetUnavailable, _probe_root_capability, _require_device
+
+
+def _parse_created_at(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PhoneTargetUnavailable("command provenance timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        raise PhoneTargetUnavailable("command provenance timestamp is invalid")
+    return parsed.astimezone(timezone.utc)
 
 
 def _write(path: Path, value: dict[str, object]) -> None:
@@ -24,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--controller-revision", required=True)
+    parser.add_argument("--source-comment-created-at", required=True)
     args = parser.parse_args(argv)
     started = time.monotonic()
     timings: dict[str, int] = {}
@@ -37,7 +49,16 @@ def main(argv: list[str] | None = None) -> int:
         "raw_device_identifier_recorded": False,
         "secret_values_recorded": False,
     }
+    transport: dict[str, object] = {
+        "artifact_upload_required": True,
+        "runner_assignment_latency_ms": None,
+    }
     try:
+        created_at = _parse_created_at(args.source_comment_created_at)
+        assignment_latency_ms = int((datetime.now(timezone.utc) - created_at).total_seconds() * 1000)
+        if assignment_latency_ms < 0:
+            raise PhoneTargetUnavailable("command provenance clock differs")
+        transport["runner_assignment_latency_ms"] = assignment_latency_ms
         serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
         if not serial:
             raise PhoneTargetUnavailable("registered production phone binding is unavailable")
@@ -54,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
             "controller_revision": args.controller_revision,
             "classification": "READY",
             "timing_ms": timings,
+            "transport": transport,
             "safety": safety,
         })
         print("PHONE_TRANSPORT_PREFLIGHT classification=READY")
@@ -65,8 +87,8 @@ def main(argv: list[str] | None = None) -> int:
             "controller_revision": args.controller_revision,
             "classification": "NOT_READY",
             "failure_class": exc.__class__.__name__,
-            "failure_reason": str(exc),
             "timing_ms": timings,
+            "transport": transport,
             "safety": safety,
         })
         print("PHONE_TRANSPORT_PREFLIGHT classification=NOT_READY")
