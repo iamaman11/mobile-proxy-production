@@ -16,6 +16,17 @@ function Write-BridgeEvent {
     Write-Output ("{0:u} mobile-proxy-usb-bridge {1}" -f (Get-Date).ToUniversalTime(), $Message)
 }
 
+function Get-BridgeFailureCategory {
+    param([Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    switch -Regex ($ErrorRecord.Exception.Message) {
+        '^usbipd inventory unavailable$' { return 'inventory_unavailable' }
+        '^usbipd state unavailable$' { return 'state_unavailable' }
+        '^usbipd bind failed$' { return 'bind_failed' }
+        '^usbipd attach failed$' { return 'attach_failed' }
+        default { return 'unexpected_local_error' }
+    }
+}
+
 function Test-ApprovedUsbDevicePresent {
     $inventory = & usbipd.exe list 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'usbipd inventory unavailable' }
@@ -55,8 +66,9 @@ while ($true) {
         }
     }
     catch {
-        # Device-specific details are deliberately not printed.
-        Write-BridgeEvent 'bridge_operation_failed; retrying'
+        # Device-specific details are deliberately not printed. The bounded
+        # category is enough to distinguish a bridge failure from ADB/phone.
+        Write-BridgeEvent ("bridge_{0}; retrying" -f (Get-BridgeFailureCategory $_))
     }
     Start-Sleep -Seconds 15
 }
