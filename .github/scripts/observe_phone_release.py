@@ -135,6 +135,10 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
     cache_state = cache.get("state") if isinstance(cache, dict) else "unavailable"
     if cache_state not in {"disabled", "hit", "miss", "repaired"}:
         cache_state = "unavailable"
+    verifier = value.get("verifier_tool_cache")
+    verifier_state = verifier.get("state") if isinstance(verifier, dict) else "unavailable"
+    if verifier_state not in {"disabled", "hit", "miss", "repaired"}:
+        verifier_state = "unavailable"
     return {
         "exact_release_runtime": value.get("exact_release_runtime") is True,
         "artifact_name": value.get("artifact_name"),
@@ -151,6 +155,13 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
             "state": cache_state,
             "persistent": cache.get("persistent") is True if isinstance(cache, dict) else False,
             "rendered_trees_retained": False,
+        },
+        "verifier_tool_cache": {
+            "state": verifier_state,
+            "persistent": verifier.get("persistent") is True if isinstance(verifier, dict) else False,
+            "binary_identity_verified": verifier.get("binary_identity_verified") is True if isinstance(verifier, dict) else False,
+            "verification_results_cached": False,
+            "runtime_or_config_state_cached": False,
         },
         "phase_timing_ms": _bounded_phase_timing(value.get("phase_timing_ms")),
         "secret_binding_ids_recorded": False,
@@ -237,13 +248,26 @@ def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
     if isinstance(materialization, dict):
         phase_timing = materialization.get("phase_timing_ms")
         cache = materialization.get("runtime_archive_cache")
-        if isinstance(phase_timing, dict) and phase_timing and isinstance(cache, dict):
+        verifier = materialization.get("verifier_tool_cache")
+        if (
+            isinstance(phase_timing, dict)
+            and phase_timing
+            and isinstance(cache, dict)
+            and isinstance(verifier, dict)
+        ):
             summary["runtime_preparation"] = {
                 "phase_timing_ms": phase_timing,
                 "runtime_archive_cache": {
                     "state": cache.get("state"),
                     "persistent": cache.get("persistent") is True,
                     "rendered_trees_retained": False,
+                },
+                "verifier_tool_cache": {
+                    "state": verifier.get("state"),
+                    "persistent": verifier.get("persistent") is True,
+                    "binary_identity_verified": verifier.get("binary_identity_verified") is True,
+                    "verification_results_cached": False,
+                    "runtime_or_config_state_cached": False,
                 },
             }
     if payload.get("classification") == "UNKNOWN":
