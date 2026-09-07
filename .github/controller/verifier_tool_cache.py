@@ -57,8 +57,14 @@ class VerifierToolIdentity:
             raise VerifierToolCacheError("verifier rustc version is invalid")
         if not self.host_target or "\n" in self.host_target:
             raise VerifierToolCacheError("verifier host target is invalid")
-        if self.cargo_profile != _PROFILE or tuple(self.build_flags) != _BUILD_FLAGS:
-            raise VerifierToolCacheError("verifier build contract differs")
+        if not self.cargo_profile or "\n" in self.cargo_profile:
+            raise VerifierToolCacheError("verifier Cargo profile is invalid")
+        if (
+            not isinstance(self.build_flags, tuple)
+            or not self.build_flags
+            or any(not isinstance(item, str) or not item or "\n" in item for item in self.build_flags)
+        ):
+            raise VerifierToolCacheError("verifier build flags are invalid")
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -140,6 +146,8 @@ def derive_verifier_tool_identity(*, product_root: Path, source_sha: str) -> Ver
         cargo_lock_sha256=_sha256(cargo_lock),
         rustc_version=rustc_version,
         host_target=host_lines[0],
+        cargo_profile=_PROFILE,
+        build_flags=_BUILD_FLAGS,
     )
 
 
@@ -191,14 +199,16 @@ def _evict(root: Path, *, protected: Path, keep: int = _KEEP_ENTRIES) -> None:
         _remove_entry(path)
 
 
-def _cargo_build_verifier(*, product_root: Path, destination: Path) -> None:
+def _cargo_build_verifier(
+    *, product_root: Path, destination: Path, identity: VerifierToolIdentity,
+) -> None:
     with tempfile.TemporaryDirectory(prefix="verifier-build-") as raw:
         target_dir = Path(raw) / "target"
         environment = dict(os.environ)
         environment["CARGO_TARGET_DIR"] = str(target_dir)
         try:
             subprocess.run(
-                ["cargo", "build", *_BUILD_FLAGS],
+                ["cargo", "build", *identity.build_flags],
                 cwd=product_root,
                 env=environment,
                 capture_output=True,
@@ -208,7 +218,7 @@ def _cargo_build_verifier(*, product_root: Path, destination: Path) -> None:
             )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise VerifierToolCacheError("Product Release verifier build failed") from exc
-        built = target_dir / _PROFILE / _BINARY_NAME
+        built = target_dir / identity.cargo_profile / _BINARY_NAME
         if not _regular(built) or built.stat().st_size <= 0:
             raise VerifierToolCacheError("Product Release verifier build output is unavailable")
         shutil.copyfile(built, destination)
@@ -255,6 +265,7 @@ def get_or_build_verifier_tool(
                     lambda destination: _cargo_build_verifier(
                         product_root=product_root,
                         destination=destination,
+                        identity=identity,
                     )
                 )
                 builder(binary)
