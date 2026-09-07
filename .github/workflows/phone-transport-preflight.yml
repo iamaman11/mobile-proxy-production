@@ -34,6 +34,9 @@ jobs:
       inputs.source_actor == github.repository_owner
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 2
+    concurrency:
+      group: production-phone-read-only-preflight
+      cancel-in-progress: false
     environment: phone-production
     env:
       PYTHONDONTWRITEBYTECODE: '1'
