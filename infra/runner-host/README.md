@@ -26,6 +26,11 @@ event-driven auto-attach loop, which can survive a full WSL shutdown without
 noticing that its prior client disappeared. The policy test locks this argv
 shape and ownership boundary.
 
+The bridge keeps a bounded local event log under its ProgramData directory. It
+contains only generic bridge states such as `attach_failed`; it intentionally
+never persists USB inventory, command output, device identifiers, or exception
+text.
+
 ## Bootstrap after merge
 
 Run these versioned installers from a trusted local administrator session:
