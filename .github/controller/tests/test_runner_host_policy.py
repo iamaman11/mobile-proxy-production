@@ -13,18 +13,15 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     script = WINDOWS.read_text(encoding="utf-8").lower()
     assert "validatepattern('^\\d+-\\d+$')" in script
     assert "validatepattern('^[0-9a-fa-f]{4}:[0-9a-fa-f]{4}$')" in script
-    assert "usbipd.exe state" in script
     assert "wsl.exe --distribution $distro --exec /bin/true" in script
-    assert "convertfrom-json" in script
-    assert "clientipaddress" in script
     assert "usbipd.exe bind --busid $busid" in script
     assert "usbipd.exe attach --wsl $distro --busid $busid 2>$null" in script
     assert "--auto-attach" not in script
-    assert "if (-not (test-approvedusbdeviceattached))" in script
+    assert "convertfrom-json" not in script
     assert "mobile-proxy-usb-bridge.log" in script
     assert "65536" in script
     assert "exception text are deliberately never persisted" in script
-    for category in ("inventory_unavailable", "state_unavailable", "bind_failed", "attach_failed", "wsl_unavailable", "unexpected_local_error"):
+    for category in ("inventory_unavailable", "bind_failed", "attach_failed", "wsl_unavailable", "unexpected_local_error"):
         assert category in script
     assert "attach --wsl --distribution" not in script
     for forbidden in ("adb get-state", "adb kill-server", "adb.exe", "udevadm", "usbipd.exe detach"):
@@ -35,8 +32,8 @@ def test_windows_installer_updates_only_existing_named_task() -> None:
     assert "MobileProxyUsbBridge" in script
     assert "Get-ScheduledTask" in script
     assert "refusing to create" in script
-    assert "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest" in script
-    assert "New-ScheduledTaskTrigger -AtStartup" in script
+    assert "New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest" in script
+    assert "New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME" in script
     assert "Set-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Trigger $trigger" in script
     assert "-NonInteractive" not in script
 

@@ -24,9 +24,9 @@ if ($PSCmdlet.ShouldProcess($Destination, 'Install versioned USB bridge script')
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
     '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $Destination
 )
-if ($PSCmdlet.ShouldProcess($TaskName, 'Update bridge task to system boot scope')) {
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $trigger = New-ScheduledTaskTrigger -AtStartup
+if ($PSCmdlet.ShouldProcess($TaskName, 'Update existing owner-interactive bridge task')) {
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     Set-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Trigger $trigger | Out-Null
     Start-ScheduledTask -TaskName $TaskName
 }

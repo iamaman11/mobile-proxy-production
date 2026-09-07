@@ -56,19 +56,10 @@ function Ensure-WslDistroRunning {
     if ($LASTEXITCODE -ne 0) { throw 'wsl distro unavailable' }
 }
 
-function Test-ApprovedUsbDeviceAttached {
-    $rawState = & usbipd.exe state 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'usbipd state unavailable' }
-    $device = (($rawState | ConvertFrom-Json).Devices | Where-Object {
-        $_.BusId -eq $BusId
-    } | Select-Object -First 1)
-    return $null -ne $device -and -not [string]::IsNullOrWhiteSpace([string]$device.ClientIPAddress)
-}
-
-# usbipd auto-attach is not reliable across a full WSL shutdown: its Windows
-# process can remain alive while the old client disappears. Poll only this
-# allowlisted device's local USBIPD state and attach only when it is absent.
-# This script never owns the ADB server or a device detach operation.
+# Keep an idempotent attach lease for precisely one allowlisted device. This
+# avoids both usbipd's event-loop gap after WSL restarts and JSON state parsing
+# differences between task-host PowerShell versions. This script never owns
+# ADB, device detach, or any phone operation.
 while ($true) {
     try {
         Ensure-WslDistroRunning
@@ -77,13 +68,11 @@ while ($true) {
             Start-Sleep -Seconds 15
             continue
         }
-        if (-not (Test-ApprovedUsbDeviceAttached)) {
-            & usbipd.exe bind --busid $BusId 2>$null
-            if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
-            & usbipd.exe attach --wsl $Distro --busid $BusId 2>$null
-            if ($LASTEXITCODE -ne 0) { throw 'usbipd attach failed' }
-            Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
-        }
+        & usbipd.exe bind --busid $BusId 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'usbipd bind failed' }
+        & usbipd.exe attach --wsl $Distro --busid $BusId 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'usbipd attach failed' }
+        Write-BridgeEvent 'allowlisted_usb_attach_lease_refreshed'
     }
     catch {
         # Device-specific details are deliberately not printed. The bounded
