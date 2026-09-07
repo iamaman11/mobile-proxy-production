@@ -13,9 +13,11 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     script = WINDOWS.read_text(encoding="utf-8").lower()
     assert "validatepattern('^\\d+-\\d+$')" in script
     assert "validatepattern('^[0-9a-fa-f]{4}:[0-9a-fa-f]{4}$')" in script
-    assert "wsl.exe --distribution $distro --exec /bin/true" in script
-    assert "usbipd.exe bind --busid $busid" in script
-    assert "usbipd.exe attach --wsl $distro --busid $busid 2>$null" in script
+    assert "$usbipdexecutable = join-path $env:programfiles 'usbipd-win\\usbipd.exe'" in script
+    assert "$wslexecutable = join-path $env:systemroot 'system32\\wsl.exe'" in script
+    assert "& $wslexecutable --distribution $distro --exec /bin/true" in script
+    assert "& $usbipdexecutable bind --busid $busid" in script
+    assert "& $usbipdexecutable attach --wsl $distro --busid $busid 2>$null" in script
     assert "--auto-attach" not in script
     assert "convertfrom-json" not in script
     assert "mobile-proxy-usb-bridge.log" in script
