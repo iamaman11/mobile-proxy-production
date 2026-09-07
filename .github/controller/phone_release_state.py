@@ -22,6 +22,11 @@ from product_runtime_renderer import (
     verify_release_component_digests,
 )
 from runtime_asset_cache import RuntimeAssetCacheError, get_or_fetch_runtime_archive
+from verifier_tool_cache import (
+    VerifierToolCacheError,
+    derive_verifier_tool_identity,
+    get_or_build_verifier_tool,
+)
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RELEASE_URL_PREFIX = "https://github.com/iamaman11/mobile-proxy/releases/download/"
@@ -40,6 +45,7 @@ PHONE_RUNTIME_PREPARATION_TIMING_FIELDS = (
     "runtime_archive_acquisition",
     "immutable_static_materialization",
     "product_source_verification",
+    "verifier_tool_preparation",
     "product_component_verification",
     "renderer_input_binding",
     "runtime_manifest_validation",
@@ -168,6 +174,11 @@ def _runtime_cache_root() -> Path | None:
     return Path(raw) if raw else None
 
 
+def _verifier_tool_cache_root() -> Path | None:
+    raw = os.environ.get("MOBILE_PROXY_VERIFIER_TOOL_CACHE_DIR", "").strip()
+    return Path(raw) if raw else None
+
+
 def prepare_verified_release_runtime(
     admitted: object,
     *,
@@ -238,6 +249,27 @@ def prepare_verified_release_runtime(
     verify_product_source(product_root=product_root, expected_source_sha=identity.source_sha)
     phase_timing_ms["product_source_verification"] = _elapsed_ms(phase_started)
 
+    verifier_cache_root = _verifier_tool_cache_root()
+    verifier_binary = None
+    verifier_cache_state = "disabled"
+    phase_started = time.monotonic()
+    if verifier_cache_root is not None:
+        try:
+            verifier_identity = derive_verifier_tool_identity(
+                product_root=product_root,
+                source_sha=identity.source_sha,
+            )
+            verifier = get_or_build_verifier_tool(
+                cache_root=verifier_cache_root,
+                product_root=product_root,
+                identity=verifier_identity,
+            )
+        except VerifierToolCacheError as exc:
+            raise PhoneRuntimeRefused("Product Release verifier tool cache is unavailable") from exc
+        verifier_binary = verifier.path
+        verifier_cache_state = verifier.state
+    phase_timing_ms["verifier_tool_preparation"] = _elapsed_ms(phase_started)
+
     phase_started = time.monotonic()
     verify_release_component_digests(
         materialized,
@@ -246,6 +278,7 @@ def prepare_verified_release_runtime(
         expected_artifact_name=runtime_name,
         expected_artifact_digest=runtime_digest,
         expected_inventory_digest=inventory_digest,
+        verifier_binary=verifier_binary,
     )
     phase_timing_ms["product_component_verification"] = _elapsed_ms(phase_started)
 
@@ -295,6 +328,13 @@ def prepare_verified_release_runtime(
             "state": cache_state,
             "persistent": cache_root is not None,
             "rendered_trees_retained": False,
+        },
+        "verifier_tool_cache": {
+            "state": verifier_cache_state,
+            "persistent": verifier_cache_root is not None,
+            "binary_identity_verified": verifier_binary is not None,
+            "verification_results_cached": False,
+            "runtime_or_config_state_cached": False,
         },
         "phase_timing_ms": phase_timing_ms,
     }
