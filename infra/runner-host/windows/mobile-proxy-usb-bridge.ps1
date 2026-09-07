@@ -53,6 +53,22 @@ function Test-ApprovedUsbDevicePresent {
     })
 }
 
+function Test-ApprovedUsbDeviceAttached {
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $rawState = & $UsbipdExecutable state 2>&1
+    $stateExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorAction
+    if ($stateExitCode -ne 0) { throw 'usbipd state unavailable' }
+
+    try {
+        $state = $rawState | ConvertFrom-Json -ErrorAction Stop
+        $device = $state.Devices | Where-Object { $_.BusId -eq $BusId } | Select-Object -First 1
+        return $null -ne $device -and -not [string]::IsNullOrWhiteSpace([string]$device.ClientIPAddress)
+    }
+    catch { throw 'usbipd state invalid' }
+}
+
 function Ensure-WslDistroRunning {
     & $WslExecutable --distribution $Distro --exec /bin/true 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'wsl distro unavailable' }
@@ -70,13 +86,15 @@ while ($true) {
             Start-Sleep -Seconds 15
             continue
         }
-        $previousErrorAction = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        & $UsbipdExecutable attach --wsl $Distro --busid $BusId *> $null
-        $attachExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorAction
-        if ($attachExitCode -ne 0) { throw 'usbipd attach failed' }
-        Write-BridgeEvent 'allowlisted_usb_attach_lease_refreshed'
+        if (-not (Test-ApprovedUsbDeviceAttached)) {
+            $previousErrorAction = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            & $UsbipdExecutable attach --wsl $Distro --busid $BusId *> $null
+            $attachExitCode = $LASTEXITCODE
+            $ErrorActionPreference = $previousErrorAction
+            if ($attachExitCode -ne 0) { throw 'usbipd attach failed' }
+            Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
+        }
     }
     catch {
         # Device-specific details are deliberately not printed. The bounded
