@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -35,6 +36,17 @@ _RUNTIME_SECRET_FIELDS = (
     "reverseTunnelCertDerB64Env",
 )
 _CLASSIFICATIONS = frozenset({"HEALTHY_EXACT", "DEGRADED", "UNKNOWN"})
+PHONE_RUNTIME_PREPARATION_TIMING_FIELDS = (
+    "runtime_archive_acquisition",
+    "immutable_static_materialization",
+    "product_source_verification",
+    "product_component_verification",
+    "renderer_input_binding",
+    "runtime_manifest_validation",
+    "secret_derived_rendering",
+    "secret_binding_derivation",
+    "total",
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +70,10 @@ class PhoneReleaseSnapshot:
     @property
     def desired(self) -> bool:
         return self.classification == "HEALTHY_EXACT"
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((time.monotonic() - started_at) * 1000))
 
 
 def _download_release_asset(
@@ -164,6 +180,8 @@ def prepare_verified_release_runtime(
 ):
     """Prepare the exact expected rooted-phone Release state without phone mutation."""
 
+    preparation_started = time.monotonic()
+    phase_timing_ms: dict[str, int] = {}
     identity = admitted.identity
     runtime_name = identity.phone_runtime_artifact_name
     runtime_digest = identity.phone_runtime_artifact_digest
@@ -182,6 +200,7 @@ def prepare_verified_release_runtime(
     cache_root = _runtime_cache_root()
     archive_for_materialization = archive
     cache_state = "disabled"
+    phase_started = time.monotonic()
     if cache_root is None:
         _download_release_asset(
             url=str(admitted.phone_runtime_download_url),
@@ -205,13 +224,21 @@ def prepare_verified_release_runtime(
             raise PhoneRuntimeRefused("runtime archive cache is unavailable") from exc
         archive_for_materialization = cached.path
         cache_state = cached.state
+    phase_timing_ms["runtime_archive_acquisition"] = _elapsed_ms(phase_started)
 
+    phase_started = time.monotonic()
     materialized = materialize_runtime_bundle(
         archive_path=archive_for_materialization,
         work_root=work_root,
         expected_transport_sha256=expected_transport_sha256,
     )
+    phase_timing_ms["immutable_static_materialization"] = _elapsed_ms(phase_started)
+
+    phase_started = time.monotonic()
     verify_product_source(product_root=product_root, expected_source_sha=identity.source_sha)
+    phase_timing_ms["product_source_verification"] = _elapsed_ms(phase_started)
+
+    phase_started = time.monotonic()
     verify_release_component_digests(
         materialized,
         product_root=product_root,
@@ -220,9 +247,18 @@ def prepare_verified_release_runtime(
         expected_artifact_digest=runtime_digest,
         expected_inventory_digest=inventory_digest,
     )
+    phase_timing_ms["product_component_verification"] = _elapsed_ms(phase_started)
+
+    phase_started = time.monotonic()
     bind_renderer_inputs(materialized, product_root=product_root)
+    phase_timing_ms["renderer_input_binding"] = _elapsed_ms(phase_started)
+
+    phase_started = time.monotonic()
     manifest_json, manifest = _read_runtime_manifest(runtime_manifest_path)
+    phase_timing_ms["runtime_manifest_validation"] = _elapsed_ms(phase_started)
     environment = dict(os.environ)
+
+    phase_started = time.monotonic()
     rendered = render_required_runtime_configs(
         materialized,
         product_root=product_root,
@@ -230,11 +266,17 @@ def prepare_verified_release_runtime(
         release_id=identity.tag,
         environment=environment,
     )
+    phase_timing_ms["secret_derived_rendering"] = _elapsed_ms(phase_started)
+
+    phase_started = time.monotonic()
     secret_bindings = _runtime_secret_binding_ids(
         manifest,
         environment=environment,
         binding_key=binding_key,
     )
+    phase_timing_ms["secret_binding_derivation"] = _elapsed_ms(phase_started)
+    phase_timing_ms["total"] = _elapsed_ms(preparation_started)
+
     facts["runtime_verification"] = {
         "exact_release_runtime": True,
         "artifact_name": runtime_name,
@@ -254,6 +296,7 @@ def prepare_verified_release_runtime(
             "persistent": cache_root is not None,
             "rendered_trees_retained": False,
         },
+        "phase_timing_ms": phase_timing_ms,
     }
     return materialized
 

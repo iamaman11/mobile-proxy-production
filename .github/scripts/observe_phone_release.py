@@ -21,6 +21,7 @@ from android_target import (  # noqa: E402
     AndroidTargetStateUnavailable,
 )
 from phone_release_state import (  # noqa: E402
+    PHONE_RUNTIME_PREPARATION_TIMING_FIELDS,
     observe_exact_phone_release,
     prepare_verified_release_runtime,
 )
@@ -36,6 +37,7 @@ _STAGE4_RELEASE = "v0.1.7"
 _MANAGED_RELEASE_PREFIX = "/data/adb/mobile-proxy-node/releases/"
 _MAX_REASON_CHARS = 240
 _FILE_STATUSES = frozenset({"exact", "digest_mismatch", "missing", "wrong_type", "unreadable"})
+_TOP_LEVEL_TIMING_FIELDS = ("release_admission", "runtime_materialization", "phone_observation", "total")
 
 
 def _bounded_apk(apk: object) -> dict[str, object]:
@@ -111,6 +113,20 @@ def _bounded_runtime_file_drift(
     }
 
 
+def _bounded_phase_timing(raw: object) -> dict[str, int]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or set(raw) != set(PHONE_RUNTIME_PREPARATION_TIMING_FIELDS):
+        raise PhoneTargetUnavailable("runtime preparation timing evidence differs")
+    result: dict[str, int] = {}
+    for field in PHONE_RUNTIME_PREPARATION_TIMING_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise PhoneTargetUnavailable("runtime preparation timing evidence differs")
+        result[field] = value
+    return result
+
+
 def _bounded_materialization(raw: object) -> dict[str, object]:
     value = raw if isinstance(raw, dict) else {}
     secret_bindings = value.get("secret_binding_ids")
@@ -136,6 +152,7 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
             "persistent": cache.get("persistent") is True if isinstance(cache, dict) else False,
             "rendered_trees_retained": False,
         },
+        "phase_timing_ms": _bounded_phase_timing(value.get("phase_timing_ms")),
         "secret_binding_ids_recorded": False,
         "secret_values_recorded": False,
         "raw_rendered_config_recorded": False,
@@ -186,6 +203,18 @@ def _base_payload(*, controller_revision: str, admitted: object) -> dict[str, ob
     }
 
 
+def _bounded_top_level_timings(raw: object) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, int] = {}
+    for field in _TOP_LEVEL_TIMING_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            continue
+        result[field] = value
+    return result
+
+
 def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
     """Project decision-grade evidence safe for public workflow logs.
 
@@ -201,8 +230,22 @@ def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
         "product_release": payload.get("product_release"),
         "classification": payload.get("classification"),
         "mode": payload.get("mode"),
+        "timing_ms": _bounded_top_level_timings(payload.get("timing_ms")),
         "safety": payload.get("safety"),
     }
+    materialization = payload.get("expected_materialization")
+    if isinstance(materialization, dict):
+        phase_timing = materialization.get("phase_timing_ms")
+        cache = materialization.get("runtime_archive_cache")
+        if isinstance(phase_timing, dict) and phase_timing and isinstance(cache, dict):
+            summary["runtime_preparation"] = {
+                "phase_timing_ms": phase_timing,
+                "runtime_archive_cache": {
+                    "state": cache.get("state"),
+                    "persistent": cache.get("persistent") is True,
+                    "rendered_trees_retained": False,
+                },
+            }
     if payload.get("classification") == "UNKNOWN":
         for key in ("failure_class", "failure_code", "failure_reason", "target_state"):
             if key in payload:

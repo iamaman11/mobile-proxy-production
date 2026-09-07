@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -26,6 +27,29 @@ def _materialized() -> object:
     return SimpleNamespace(
         release_root=Path("/tmp/release"),
         required_live_release_paths=("bin/a", "config/b"),
+    )
+
+
+def _preparation_admitted() -> object:
+    return SimpleNamespace(
+        phone_runtime_download_url="https://github.com/iamaman11/mobile-proxy/releases/download/v0.1.7/runtime.tar.gz",
+        phone_runtime_transport_sha256="a" * 64,
+        identity=SimpleNamespace(
+            tag="v0.1.7",
+            source_sha="b" * 40,
+            phone_runtime_artifact_name="runtime.tar.gz",
+            phone_runtime_artifact_digest="b3:" + "c" * 64,
+            phone_runtime_inventory_digest="b3:" + "d" * 64,
+        ),
+    )
+
+
+def _preparation_materialized() -> object:
+    return SimpleNamespace(
+        transport_sha256="a" * 64,
+        components=(SimpleNamespace(name="runtime-supervisor"), SimpleNamespace(name="host-daemon")),
+        required_live_release_paths=("bin/a", "config/b"),
+        release_root=Path("/tmp/release"),
     )
 
 
@@ -80,11 +104,62 @@ def test_exact_snapshot_preserves_unknown_exception_for_deployment_state_machine
         raise AssertionError("UNKNOWN shared snapshot lost deployment exception semantics")
 
 
+def test_preparation_records_exact_nonsecret_phase_timing_contract() -> None:
+    materialized = _preparation_materialized()
+    facts: dict[str, object] = {}
+    with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+        state, "_runtime_cache_root", return_value=None
+    ), mock.patch.object(
+        state, "_download_release_asset", return_value=None
+    ), mock.patch.object(
+        state, "materialize_runtime_bundle", return_value=materialized
+    ), mock.patch.object(
+        state, "verify_product_source", return_value=None
+    ), mock.patch.object(
+        state, "verify_release_component_digests", return_value=None
+    ), mock.patch.object(
+        state, "bind_renderer_inputs", return_value=None
+    ), mock.patch.object(
+        state, "_read_runtime_manifest", return_value=("{}", {})
+    ), mock.patch.object(
+        state, "render_required_runtime_configs", return_value=("config/b",)
+    ), mock.patch.object(
+        state, "_runtime_secret_binding_ids", return_value={}
+    ):
+        result = state.prepare_verified_release_runtime(
+            _preparation_admitted(),
+            archive=Path(raw) / "runtime.tar.gz",
+            work_root=Path(raw) / "work",
+            product_root=Path(raw) / "product",
+            runtime_manifest_path=Path(raw) / "manifest.json",
+            binding_key="k" * 32,
+            facts=facts,
+        )
+    assert result is materialized
+    verification = facts.get("runtime_verification")
+    assert isinstance(verification, dict)
+    timings = verification.get("phase_timing_ms")
+    assert isinstance(timings, dict)
+    assert tuple(timings) == state.PHONE_RUNTIME_PREPARATION_TIMING_FIELDS
+    assert all(type(value) is int and value >= 0 for value in timings.values())
+    assert verification["runtime_archive_cache"] == {
+        "state": "disabled",
+        "persistent": False,
+        "rendered_trees_retained": False,
+    }
+    rendered = repr(timings)
+    for forbidden in ("SECRET", "token", "config/b", "runtime.tar.gz", "hmac-sha256"):
+        assert forbidden not in rendered
+
+
 def test_observer_and_deployment_consume_shared_concrete_state_owner() -> None:
     observer = (SCRIPTS / "observe_phone_release.py").read_text(encoding="utf-8")
     deployment = (SCRIPTS / "run_phone_release_deployment.py").read_text(encoding="utf-8")
     assert "run_phone_release_deployment as deployment_runner" not in observer
     assert "from phone_release_state import" in observer
+    assert "PHONE_RUNTIME_PREPARATION_TIMING_FIELDS" in observer
+    assert "phase_timing_ms" in observer
+    assert 'summary["runtime_preparation"]' in observer
     assert "prepare_verified_release_runtime(" in observer
     assert "observe_exact_phone_release(" in observer
     assert "from phone_release_state import" in deployment
