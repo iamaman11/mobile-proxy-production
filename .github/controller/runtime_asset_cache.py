@@ -56,10 +56,11 @@ def _prepare_root(root: Path) -> None:
         raise RuntimeAssetCacheError("runtime cache root is unsafe")
 
 
-def _evict(root: Path, *, keep: int = 3) -> None:
+def _evict(root: Path, *, protected: Path, keep: int = 3) -> None:
     entries = [path for path in root.glob("runtime-*.tar.gz") if _regular(path)]
-    entries.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
-    for path in entries[keep:]:
+    entries = [path for path in entries if path != protected]
+    entries.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+    for path in entries[max(keep - 1, 0):]:
         path.unlink(missing_ok=True)
 
 
@@ -97,7 +98,7 @@ def get_or_fetch_runtime_archive(
                     raise RuntimeAssetCacheError("fresh runtime archive transport digest differs")
                 os.replace(temporary, entry)
                 os.chmod(entry, 0o600)
-                _evict(cache_root)
+                _evict(cache_root, protected=entry)
             finally:
                 temporary.unlink(missing_ok=True)
             return RuntimeAssetCacheResult(path=entry, state="repaired" if repaired else "miss")
