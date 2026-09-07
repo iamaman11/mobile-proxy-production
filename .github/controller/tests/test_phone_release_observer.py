@@ -106,11 +106,18 @@ def test_observer_has_no_destructive_callsite() -> None:
         assert token in source
 
 
-def test_workflow_is_exact_read_only_phone_observation_under_target_lock() -> None:
+def test_workflow_is_exact_issue1_read_only_observation_under_target_lock() -> None:
     source = (WORKFLOWS / "phone-release-observation.yml").read_text(encoding="utf-8")
     required = (
-        "workflow_dispatch:",
-        "inputs.target == 'phone-production' && inputs.release_tag == 'v0.1.7'",
+        "workflow_call:",
+        "command:",
+        "source_issue_number:",
+        "source_comment_id:",
+        "source_actor:",
+        "source_comment_url:",
+        "command != '/observe-phone-release phone-production v0.1.7'",
+        "SOURCE_ISSUE_NUMBER'] != '1'",
+        "SOURCE_ACTOR'] != os.environ['EXPECTED_OWNER']",
         "runs-on: [self-hosted, Linux, X64, android-production]",
         "group: production-target-phone-production",
         "cancel-in-progress: false",
@@ -125,6 +132,7 @@ def test_workflow_is_exact_read_only_phone_observation_under_target_lock() -> No
     missing = [token for token in required if token not in source]
     assert not missing, missing
     forbidden = (
+        "workflow_dispatch:",
         "issue_comment:",
         "/deploy ",
         "/retry-deploy ",
@@ -132,16 +140,33 @@ def test_workflow_is_exact_read_only_phone_observation_under_target_lock() -> No
         "dispatch_install_once",
         "adb shell rm",
         "adb install",
-        "provider",
     )
-    # Provider words are allowed only in explicit false safety assertions.
-    present = [
-        token for token in forbidden[:-1]
-        if token in source
-    ]
+    present = [token for token in forbidden if token in source]
     assert not present, present
     assert "provider_access=false" in source
     assert "provider_mutation_performed" in source
+
+
+def test_only_production_router_references_phone_observer_workflow() -> None:
+    callers = []
+    for path in WORKFLOWS.glob("*.yml"):
+        if path.name == "phone-release-observation.yml":
+            continue
+        if "./.github/workflows/phone-release-observation.yml" in path.read_text(encoding="utf-8"):
+            callers.append(path.name)
+    assert callers == ["production-control-router.yml"], callers
+    router = (WORKFLOWS / "production-control-router.yml").read_text(encoding="utf-8")
+    for required in (
+        "needs.route.outputs.handler == 'workflow_call'",
+        "needs.route.outputs.route_id == 'observe-phone-release'",
+        "needs.route.outputs.operation_class == 'OBSERVE'",
+        "needs.route.outputs.read_only == 'true'",
+        "needs.route.outputs.destructive == 'false'",
+        "command: ${{ github.event.comment.body }}",
+        "source_comment_id: ${{ github.event.comment.id }}",
+        "secrets: inherit",
+    ):
+        assert required in router
 
 
 def main() -> int:
