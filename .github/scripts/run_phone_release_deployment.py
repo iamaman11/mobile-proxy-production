@@ -39,6 +39,7 @@ from product_runtime_renderer import (  # noqa: E402
 )
 from release_handoff import parse_admitted_release  # noqa: E402
 from release_resolver import ReleaseAdmissionError  # noqa: E402
+from runtime_asset_cache import RuntimeAssetCacheError, get_or_fetch_runtime_archive  # noqa: E402
 from terminal_result import DeploymentTerminal, validate_terminal  # noqa: E402
 
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -165,6 +166,13 @@ def _runtime_secret_binding_ids(
     return dict(sorted(result.items()))
 
 
+def _runtime_cache_root() -> Path | None:
+    raw = os.environ.get("MOBILE_PROXY_RUNTIME_CACHE_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw)
+
+
 def _materialize_verified_release_runtime(
     admitted: object, *, archive: Path, work_root: Path, product_root: Path,
     runtime_manifest_path: Path, binding_key: str, facts: dict[str, object],
@@ -179,17 +187,36 @@ def _materialize_verified_release_runtime(
         or not admitted.phone_runtime_download_url or not admitted.phone_runtime_transport_sha256
     ):
         raise PhoneRuntimeRefused("admitted rooted-phone runtime identity is incomplete")
-    _download_release_asset(
-        url=str(admitted.phone_runtime_download_url), destination=archive,
-        expected_transport_sha256=str(admitted.phone_runtime_transport_sha256), label="rooted-phone runtime",
-    )
+    expected_transport_sha256 = str(admitted.phone_runtime_transport_sha256)
+    cache_root = _runtime_cache_root()
+    archive_for_materialization = archive
+    cache_state = "disabled"
+    if cache_root is None:
+        _download_release_asset(
+            url=str(admitted.phone_runtime_download_url), destination=archive,
+            expected_transport_sha256=expected_transport_sha256, label="rooted-phone runtime",
+        )
+    else:
+        try:
+            cached = get_or_fetch_runtime_archive(
+                cache_root=cache_root,
+                expected_transport_sha256=expected_transport_sha256,
+                fetch=lambda destination: _download_release_asset(
+                    url=str(admitted.phone_runtime_download_url), destination=destination,
+                    expected_transport_sha256=expected_transport_sha256, label="rooted-phone runtime",
+                ),
+            )
+        except RuntimeAssetCacheError as exc:
+            raise PhoneRuntimeRefused("runtime archive cache is unavailable") from exc
+        archive_for_materialization = cached.path
+        cache_state = cached.state
     materialized = materialize_runtime_bundle(
-        archive_path=archive, work_root=work_root,
-        expected_transport_sha256=str(admitted.phone_runtime_transport_sha256),
+        archive_path=archive_for_materialization, work_root=work_root,
+        expected_transport_sha256=expected_transport_sha256,
     )
     verify_product_source(product_root=product_root, expected_source_sha=identity.source_sha)
     verify_release_component_digests(
-        materialized, product_root=product_root, runtime_archive=archive,
+        materialized, product_root=product_root, runtime_archive=archive_for_materialization,
         expected_artifact_name=runtime_name, expected_artifact_digest=runtime_digest,
         expected_inventory_digest=inventory_digest,
     )
@@ -217,6 +244,11 @@ def _materialize_verified_release_runtime(
         "secret_binding_ids": secret_bindings,
         "secret_values_recorded": False,
         "vm_provider_access_performed": False,
+        "runtime_archive_cache": {
+            "state": cache_state,
+            "persistent": cache_root is not None,
+            "rendered_trees_retained": False,
+        },
     }
     return materialized
 
