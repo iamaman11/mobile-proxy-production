@@ -113,6 +113,10 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
     value = raw if isinstance(raw, dict) else {}
     secret_bindings = value.get("secret_binding_ids")
     rendered = value.get("derived_files_rendered")
+    cache = value.get("runtime_archive_cache")
+    cache_state = cache.get("state") if isinstance(cache, dict) else "unavailable"
+    if cache_state not in {"disabled", "hit", "miss", "repaired"}:
+        cache_state = "unavailable"
     return {
         "exact_release_runtime": value.get("exact_release_runtime") is True,
         "artifact_name": value.get("artifact_name"),
@@ -125,6 +129,11 @@ def _bounded_materialization(raw: object) -> dict[str, object]:
         "renderer_source_sha": value.get("renderer_source_sha"),
         "runtime_manifest_sha256": value.get("runtime_manifest_sha256"),
         "secret_binding_count": len(secret_bindings) if isinstance(secret_bindings, dict) else 0,
+        "runtime_archive_cache": {
+            "state": cache_state,
+            "persistent": cache.get("persistent") is True if isinstance(cache, dict) else False,
+            "rendered_trees_retained": False,
+        },
         "secret_binding_ids_recorded": False,
         "secret_values_recorded": False,
         "raw_rendered_config_recorded": False,
