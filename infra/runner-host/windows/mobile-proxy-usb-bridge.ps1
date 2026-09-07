@@ -70,8 +70,12 @@ while ($true) {
             Start-Sleep -Seconds 15
             continue
         }
-        & $UsbipdExecutable attach --wsl $Distro --busid $BusId 2>$null
-        if ($LASTEXITCODE -ne 0) { throw 'usbipd attach failed' }
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & $UsbipdExecutable attach --wsl $Distro --busid $BusId *> $null
+        $attachExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
+        if ($attachExitCode -ne 0) { throw 'usbipd attach failed' }
         Write-BridgeEvent 'allowlisted_usb_attach_lease_refreshed'
     }
     catch {
