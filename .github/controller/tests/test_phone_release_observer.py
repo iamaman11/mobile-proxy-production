@@ -213,6 +213,11 @@ def test_expected_materialization_suppresses_secret_binding_ids_and_rendered_pat
                 "SECRET_A": "hmac-sha256:" + "f" * 64,
                 "SECRET_B": "hmac-sha256:" + "1" * 64,
             },
+            "runtime_archive_cache": {
+                "state": "hit",
+                "persistent": True,
+                "rendered_trees_retained": False,
+            },
         }
     )
     assert value["derived_file_count"] == 2
@@ -220,6 +225,9 @@ def test_expected_materialization_suppresses_secret_binding_ids_and_rendered_pat
     assert value["secret_binding_ids_recorded"] is False
     assert value["secret_values_recorded"] is False
     assert value["raw_rendered_config_recorded"] is False
+    assert value["runtime_archive_cache"] == {
+        "state": "hit", "persistent": True, "rendered_trees_retained": False,
+    }
     assert "SECRET_A" not in repr(value)
     assert "host-daemon.json" not in repr(value)
 
