@@ -23,6 +23,8 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "mobile-proxy-usb-bridge.log" in script
     assert "65536" in script
     assert "exception text are deliberately never persisted" in script
+    assert "exception.gettype().name" in script
+    assert "scriptlinenumber" in script
     for category in ("inventory_unavailable", "bind_failed", "attach_failed", "wsl_unavailable", "unexpected_local_error"):
         assert category in script
     assert "attach --wsl --distribution" not in script

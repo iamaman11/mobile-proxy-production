@@ -78,8 +78,12 @@ while ($true) {
     }
     catch {
         # Device-specific details are deliberately not printed. The bounded
-        # category is enough to distinguish a bridge failure from ADB/phone.
-        Write-BridgeEvent ("bridge_{0}; retrying" -f (Get-BridgeFailureCategory $_))
+        # category plus exception type/line locates a task-host defect without
+        # recording an exception message, command output, or device identity.
+        $category = Get-BridgeFailureCategory $_
+        $type = $_.Exception.GetType().Name -replace '[^A-Za-z0-9_]', '_'
+        $line = [Math]::Max(0, $_.InvocationInfo.ScriptLineNumber)
+        Write-BridgeEvent ("bridge_{0}_{1}_line{2}; retrying" -f $category, $type, $line)
     }
     Start-Sleep -Seconds 15
 }
