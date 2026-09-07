@@ -92,11 +92,11 @@ def test_verify_release_component_digests_binds_outer_runtime_and_inventory() ->
         product.mkdir()
         runtime_archive = root / "runtime.tar.gz"
         runtime_archive.write_bytes(b"runtime-tar")
-        calls: list[tuple[str, Path]] = []
+        calls: list[tuple[str, Path, Path | None]] = []
         original = renderer._product_digest
 
-        def fake(*, product_root, asset_name, path):
-            calls.append((asset_name, Path(path)))
+        def fake(*, product_root, asset_name, path, verifier_binary=None):
+            calls.append((asset_name, Path(path), verifier_binary))
             return DIGEST
 
         renderer._product_digest = fake
@@ -108,9 +108,10 @@ def test_verify_release_component_digests_binds_outer_runtime_and_inventory() ->
             )
         finally:
             renderer._product_digest = original
-        assert calls[0] == ("mobile-proxy-phone-production-runtime-v0.1.6.tar.gz", runtime_archive)
+        assert calls[0][:2] == ("mobile-proxy-phone-production-runtime-v0.1.6.tar.gz", runtime_archive)
         assert calls[1][0] == "phone-production-runtime/components.json"
         assert len(calls) == len(value.components) + 2
+        assert all(item[2] is None for item in calls)
 
 
 def test_bind_renderer_inputs_uses_release_native_bytes_and_exact_tracked_inputs() -> None:
@@ -163,6 +164,43 @@ def test_render_copies_only_missing_required_derived_files_and_removes_manifest(
             renderer._run_checked = original
         assert copied == ("config/host-daemon.json", "config/sing-box.json")
         assert not (value.source_root.parent / "phone-production-manifest.json").exists()
+
+
+def test_cached_renderer_invokes_verified_binary_directly() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        value = materialized(root / "work")
+        product = root / "product"
+        product.mkdir()
+        (value.release_root / "service.sh").write_text("service\n")
+        native = value.release_root / "bin/runtime-supervisor"
+        native.parent.mkdir(parents=True)
+        native.write_text("runtime\n")
+        cached_renderer = root / "operator-cli"
+        cached_renderer.write_text("cached\n", encoding="utf-8")
+        original = renderer._run_checked
+        captured: list[list[str]] = []
+
+        def fake(command, *, cwd, timeout, environment=None):
+            captured.append(list(command))
+            out = Path(command[command.index("--output-dir") + 1]) / command[command.index("--release-id") + 1] / "config"
+            out.mkdir(parents=True)
+            (out / "host-daemon.json").write_text('{"ok":1}\n')
+            (out / "sing-box.json").write_text('{"ok":1}\n')
+            return ""
+
+        renderer._run_checked = fake
+        try:
+            renderer.render_required_runtime_configs(
+                value, product_root=product, manifest_json='{"deviceId":"x"}', release_id="v0.1.6",
+                environment=dict(os.environ), renderer_binary=cached_renderer,
+            )
+        finally:
+            renderer._run_checked = original
+        assert len(captured) == 1
+        assert captured[0][0] == str(cached_renderer)
+        assert captured[0][1] == "package-device-release"
+        assert "cargo" not in captured[0]
 
 
 def main() -> None:

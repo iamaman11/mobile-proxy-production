@@ -71,15 +71,21 @@ def verify_product_source(*, product_root: Path, expected_source_sha: str) -> No
         raise PhoneRuntimeRefused("PRODUCT renderer source has tracked worktree drift")
 
 
-def _product_digest(*, product_root: Path, asset_name: str, path: Path) -> str:
+def _product_digest(
+    *, product_root: Path, asset_name: str, path: Path,
+    verifier_binary: Path | None = None,
+) -> str:
+    if verifier_binary is None:
+        command = [
+            "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+            "--bin", "product-release-asset-digest", "--", asset_name, str(path.resolve()),
+        ]
+    else:
+        if not verifier_binary.is_file():
+            raise ProductReleaseComponentDigestRefused(_PRODUCT_RELEASE_COMPONENT_DIGEST_FAILURE)
+        command = [str(verifier_binary), asset_name, str(path.resolve())]
     try:
-        value = _run_checked(
-            [
-                "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
-                "--bin", "product-release-asset-digest", "--", asset_name, str(path.resolve()),
-            ],
-            cwd=product_root, timeout=600,
-        )
+        value = _run_checked(command, cwd=product_root, timeout=600)
     except PhoneRuntimeRefused:
         raise ProductReleaseComponentDigestRefused(_PRODUCT_RELEASE_COMPONENT_DIGEST_FAILURE) from None
     if _TYPED_DIGEST.fullmatch(value) is None:
@@ -91,6 +97,7 @@ def verify_release_component_digests(
     materialized: PhoneRuntimeMaterialization, *, product_root: Path,
     runtime_archive: Path, expected_artifact_name: str,
     expected_artifact_digest: str, expected_inventory_digest: str,
+    verifier_binary: Path | None = None,
 ) -> None:
     if (
         not expected_artifact_name or "/" in expected_artifact_name
@@ -98,11 +105,16 @@ def verify_release_component_digests(
         or _TYPED_DIGEST.fullmatch(expected_inventory_digest) is None
     ):
         raise PhoneRuntimeRefused("admitted phone runtime Product identity is invalid")
-    if _product_digest(product_root=product_root, asset_name=expected_artifact_name, path=runtime_archive) != expected_artifact_digest:
+    if _product_digest(
+        product_root=product_root,
+        asset_name=expected_artifact_name,
+        path=runtime_archive,
+        verifier_binary=verifier_binary,
+    ) != expected_artifact_digest:
         raise PhoneRuntimeRefused("phone runtime outer Product content digest differs")
     if _product_digest(
         product_root=product_root, asset_name="phone-production-runtime/components.json",
-        path=materialized.inventory_path,
+        path=materialized.inventory_path, verifier_binary=verifier_binary,
     ) != expected_inventory_digest:
         raise PhoneRuntimeRefused("phone runtime component inventory digest differs")
     for component in materialized.components:
@@ -110,6 +122,7 @@ def verify_release_component_digests(
             product_root=product_root,
             asset_name=f"phone-production-runtime/{component.archive_path}",
             path=materialized.component_source(component.name),
+            verifier_binary=verifier_binary,
         )
         if actual != component.content_digest:
             raise PhoneRuntimeRefused(f"phone runtime component digest differs: {component.name}")
@@ -168,6 +181,7 @@ def bind_renderer_inputs(materialized: PhoneRuntimeMaterialization, *, product_r
 def render_required_runtime_configs(
     materialized: PhoneRuntimeMaterialization, *, product_root: Path,
     manifest_json: str, release_id: str, environment: Mapping[str, str],
+    renderer_binary: Path | None = None,
 ) -> tuple[str, ...]:
     try:
         manifest = json.loads(manifest_json)
@@ -179,16 +193,28 @@ def render_required_runtime_configs(
     render_root = materialized.source_root.parent / "rendered"
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(manifest_path, 0o600)
+    if renderer_binary is None:
+        command = [
+            "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
+            "--bin", "operator-cli", "--", "package-device-release",
+            "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
+            "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
+        ]
+    else:
+        if not renderer_binary.is_file():
+            raise ProductRuntimeRenderRefused(_PRODUCT_RUNTIME_RENDER_FAILURE)
+        command = [
+            str(renderer_binary), "package-device-release",
+            "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
+            "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
+        ]
     try:
         try:
             _run_checked(
-                [
-                    "cargo", "run", "--quiet", "--locked", "--release", "-p", "operator-cli",
-                    "--bin", "operator-cli", "--", "package-device-release",
-                    "--manifest-path", str(manifest_path.resolve()), "--release-id", release_id,
-                    "--output-dir", str(render_root.resolve()), "--tunnel-owner", _TUNNEL_OWNER,
-                ],
-                cwd=product_root, timeout=600, environment=environment,
+                command,
+                cwd=product_root,
+                timeout=600,
+                environment=environment,
             )
         except PhoneRuntimeRefused:
             raise ProductRuntimeRenderRefused(_PRODUCT_RUNTIME_RENDER_FAILURE) from None
