@@ -194,6 +194,30 @@ jobs:
       source_comment_url: ${{ github.event.comment.html_url }}
     secrets: inherit
 
+  reconcile-phone-release:
+    name: Route target-read-only Stage 4 phone Product Release reconcile
+    needs: route
+    if: >-
+      needs.route.outputs.handler == 'workflow_call' &&
+      needs.route.outputs.route_id == 'reconcile-phone-release' &&
+      needs.route.outputs.operation == 'reconcile-phone-release' &&
+      needs.route.outputs.operation_class == 'RECONCILE' &&
+      needs.route.outputs.read_only == 'false' &&
+      needs.route.outputs.destructive == 'false'
+    permissions:
+      contents: read
+      issues: read
+    uses: ./.github/workflows/phone-release-reconcile.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      target: ${{ needs.route.outputs.target }}
+      release_tag: ${{ needs.route.outputs.release_tag }}
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+    secrets: inherit
+
   phone-transport-preflight:
     name: Route bounded registered-phone transport preflight
     needs: route
