@@ -152,7 +152,8 @@ def test_only_production_router_references_phone_observer_workflow() -> None:
     for path in WORKFLOWS.glob("*.yml"):
         if path.name == "phone-release-observation.yml":
             continue
-        if "./.github/workflows/phone-release-observation.yml" in path.read_text(encoding="utf-8"):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if any(line.strip() == "uses: ./.github/workflows/phone-release-observation.yml" for line in lines):
             callers.append(path.name)
     assert callers == ["production-control-router.yml"], callers
     router = (WORKFLOWS / "production-control-router.yml").read_text(encoding="utf-8")
