@@ -135,7 +135,10 @@ def test_bounded_diagnostic_window_marks_truncation_degraded() -> None:
 
 
 def main() -> int:
-    tests = sorted(value for name, value in globals().items() if name.startswith("test_") and callable(value))
+    tests = sorted(
+        (value for name, value in globals().items() if name.startswith("test_") and callable(value)),
+        key=lambda item: item.__name__,
+    )
     for test in tests:
         test()
     print(f"RUNNER_TRANSPORT_EVIDENCE_TESTS_OK count={len(tests)}")
