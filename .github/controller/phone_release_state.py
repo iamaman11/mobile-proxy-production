@@ -21,12 +21,12 @@ from product_runtime_renderer import (
     verify_product_source,
     verify_release_component_digests,
 )
-from runtime_asset_cache import RuntimeAssetCacheError, get_or_fetch_runtime_archive
-from verifier_tool_cache import (
-    VerifierToolCacheError,
-    derive_verifier_tool_identity,
-    get_or_build_verifier_tool,
+from product_tool_cache import (
+    ProductToolCacheError,
+    derive_product_tool_identity,
+    get_or_build_product_tools,
 )
+from runtime_asset_cache import RuntimeAssetCacheError, get_or_fetch_runtime_archive
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RELEASE_URL_PREFIX = "https://github.com/iamaman11/mobile-proxy/releases/download/"
@@ -45,7 +45,7 @@ PHONE_RUNTIME_PREPARATION_TIMING_FIELDS = (
     "runtime_archive_acquisition",
     "immutable_static_materialization",
     "product_source_verification",
-    "verifier_tool_preparation",
+    "product_tool_preparation",
     "product_component_verification",
     "renderer_input_binding",
     "runtime_manifest_validation",
@@ -174,12 +174,12 @@ def _runtime_cache_root() -> Path | None:
     return Path(raw) if raw else None
 
 
-def _verifier_tool_cache_root() -> Path | None:
-    explicit = os.environ.get("MOBILE_PROXY_VERIFIER_TOOL_CACHE_DIR", "").strip()
+def _product_tool_cache_root() -> Path | None:
+    explicit = os.environ.get("MOBILE_PROXY_PRODUCT_TOOL_CACHE_DIR", "").strip()
     if explicit:
         return Path(explicit)
     runner_tool_cache = os.environ.get("RUNNER_TOOL_CACHE", "").strip()
-    return Path(runner_tool_cache) / "mobile-proxy-verifier-tool-cache" if runner_tool_cache else None
+    return Path(runner_tool_cache) / "mobile-proxy-product-tool-cache" if runner_tool_cache else None
 
 
 def prepare_verified_release_runtime(
@@ -252,26 +252,28 @@ def prepare_verified_release_runtime(
     verify_product_source(product_root=product_root, expected_source_sha=identity.source_sha)
     phase_timing_ms["product_source_verification"] = _elapsed_ms(phase_started)
 
-    verifier_cache_root = _verifier_tool_cache_root()
+    tool_cache_root = _product_tool_cache_root()
     verifier_binary = None
-    verifier_cache_state = "disabled"
+    renderer_binary = None
+    tool_cache_state = "disabled"
     phase_started = time.monotonic()
-    if verifier_cache_root is not None:
+    if tool_cache_root is not None:
         try:
-            verifier_identity = derive_verifier_tool_identity(
+            tool_identity = derive_product_tool_identity(
                 product_root=product_root,
                 source_sha=identity.source_sha,
             )
-            verifier = get_or_build_verifier_tool(
-                cache_root=verifier_cache_root,
+            tools = get_or_build_product_tools(
+                cache_root=tool_cache_root,
                 product_root=product_root,
-                identity=verifier_identity,
+                identity=tool_identity,
             )
-        except VerifierToolCacheError as exc:
-            raise PhoneRuntimeRefused("Product Release verifier tool cache is unavailable") from exc
-        verifier_binary = verifier.path
-        verifier_cache_state = verifier.state
-    phase_timing_ms["verifier_tool_preparation"] = _elapsed_ms(phase_started)
+        except ProductToolCacheError as exc:
+            raise PhoneRuntimeRefused("PRODUCT runtime tool cache is unavailable") from exc
+        verifier_binary = tools.verifier_path
+        renderer_binary = tools.renderer_path
+        tool_cache_state = tools.state
+    phase_timing_ms["product_tool_preparation"] = _elapsed_ms(phase_started)
 
     phase_started = time.monotonic()
     verify_release_component_digests(
@@ -301,6 +303,7 @@ def prepare_verified_release_runtime(
         manifest_json=manifest_json,
         release_id=identity.tag,
         environment=environment,
+        renderer_binary=renderer_binary,
     )
     phase_timing_ms["secret_derived_rendering"] = _elapsed_ms(phase_started)
 
@@ -332,11 +335,12 @@ def prepare_verified_release_runtime(
             "persistent": cache_root is not None,
             "rendered_trees_retained": False,
         },
-        "verifier_tool_cache": {
-            "state": verifier_cache_state,
-            "persistent": verifier_cache_root is not None,
-            "binary_identity_verified": verifier_binary is not None,
+        "product_tool_cache": {
+            "state": tool_cache_state,
+            "persistent": tool_cache_root is not None,
+            "binary_identity_verified": verifier_binary is not None and renderer_binary is not None,
             "verification_results_cached": False,
+            "rendered_outputs_cached": False,
             "runtime_or_config_state_cached": False,
         },
         "phase_timing_ms": phase_timing_ms,
