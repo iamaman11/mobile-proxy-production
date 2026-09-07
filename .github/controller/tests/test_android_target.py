@@ -269,8 +269,8 @@ def test_adb_read_starts_local_server_before_target_state() -> None:
         calls.append(argv)
         if argv == ("/usr/bin/adb", "start-server"):
             return _completed()
-        if argv == ("/usr/bin/adb", "-s", SERIAL, "get-state"):
-            return _completed("device\n")
+        if argv == ("/usr/bin/adb", "devices"):
+            return _completed(f"List of devices attached\n{SERIAL}\tdevice\n")
         if argv == ("/usr/bin/adb", "-s", SERIAL, "shell", "echo", "ok"):
             return _completed("ok\n")
         raise AssertionError(f"unexpected adb command: {argv!r}")
@@ -283,7 +283,7 @@ def test_adb_read_starts_local_server_before_target_state() -> None:
     assert result.stdout == "ok\n"
     assert calls == [
         ("/usr/bin/adb", "start-server"),
-        ("/usr/bin/adb", "-s", SERIAL, "get-state"),
+        ("/usr/bin/adb", "devices"),
         ("/usr/bin/adb", "-s", SERIAL, "shell", "echo", "ok"),
     ]
 

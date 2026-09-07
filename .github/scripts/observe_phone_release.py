@@ -15,7 +15,10 @@ CONTROLLER = SCRIPTS.parent / "controller"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(CONTROLLER))
 
-from android_target import AndroidObservationUnavailable  # noqa: E402
+from android_target import (  # noqa: E402
+    AndroidObservationUnavailable,
+    AndroidTargetStateUnavailable,
+)
 from phone_runtime import PhoneRuntimeRefused  # noqa: E402
 from phone_target import (  # noqa: E402
     PhoneTargetUnavailable,
@@ -171,6 +174,63 @@ def _base_payload(*, controller_revision: str, admitted: object) -> dict[str, ob
     }
 
 
+def _bounded_log_summary(payload: dict[str, object]) -> dict[str, object]:
+    """Project decision-grade evidence safe for public workflow logs.
+
+    The artifact remains richer, but the log summary deliberately omits target
+    binding identifiers, APK digests, materialization digests, raw paths, and all
+    secret-derived values so GitHub artifact transport is not a single point of
+    failure for Stage 4 classification.
+    """
+    summary: dict[str, object] = {
+        "schema": payload.get("schema"),
+        "controller_revision": payload.get("controller_revision"),
+        "target": payload.get("target"),
+        "product_release": payload.get("product_release"),
+        "classification": payload.get("classification"),
+        "mode": payload.get("mode"),
+        "safety": payload.get("safety"),
+    }
+    if payload.get("classification") == "UNKNOWN":
+        for key in ("failure_class", "failure_code", "failure_reason", "target_state"):
+            if key in payload:
+                summary[key] = payload[key]
+        return summary
+
+    observation = payload.get("observation")
+    if not isinstance(observation, dict):
+        return summary
+    apk = observation.get("apk")
+    runtime = observation.get("runtime")
+    safe_apk = None
+    if isinstance(apk, dict):
+        safe_apk = {
+            "package_name": apk.get("package_name"),
+            "installed": apk.get("installed"),
+            "version_name": apk.get("version_name"),
+            "version_code": apk.get("version_code"),
+            "exact_artifact_verified": apk.get("exact_artifact_verified"),
+            "desired": apk.get("desired"),
+            "mode": apk.get("mode"),
+            "raw_device_identifier_recorded": False,
+        }
+    summary["observation"] = {
+        "apk": safe_apk,
+        "runtime": runtime if isinstance(runtime, dict) else None,
+        "runtime_file_drift": observation.get("runtime_file_drift"),
+        "desired": observation.get("desired"),
+    }
+    return summary
+
+
+def _write_evidence(path: Path, payload: dict[str, object]) -> None:
+    _write(path, payload)
+    print(
+        "STAGE4_PHONE_RELEASE_EVIDENCE "
+        + json.dumps(_bounded_log_summary(payload), sort_keys=True, separators=(",", ":"))
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
@@ -247,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             "expected_materialization": _bounded_materialization(facts.get("runtime_verification")),
             "safety": _safety(phone_access_started=phone_access_started),
         }
-        _write(args.output, payload)
+        _write_evidence(args.output, payload)
         print(
             "STAGE4_PHONE_RELEASE_OBSERVED "
             f"classification={payload['classification']} target={args.target} release={args.release_tag}"
@@ -264,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
             release_id=None,
             source_sha=None,
         )
-        payload = {
+        payload: dict[str, object] = {
             "schema": "stage4-phone-release-observation.v1",
             "controller_revision": args.controller_revision,
             "target": args.target,
@@ -277,7 +337,10 @@ def main(argv: list[str] | None = None) -> int:
             "failure_reason": _failure_reason(exc),
             "safety": _safety(phone_access_started=phone_access_started),
         }
-        _write(args.output, payload)
+        if isinstance(exc, AndroidTargetStateUnavailable):
+            payload["failure_code"] = "ANDROID_TARGET_STATE_NOT_DEVICE"
+            payload["target_state"] = exc.state
+        _write_evidence(args.output, payload)
         print(
             "STAGE4_PHONE_RELEASE_OBSERVATION_UNKNOWN "
             f"failure_class={payload['failure_class']} reason={payload['failure_reason']}",
