@@ -67,12 +67,19 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
-def test_runtime_process_count_uses_one_bounded_process_snapshot() -> None:
+def test_runtime_process_count_uses_one_evidence_calibrated_process_snapshot() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
 
-    assert module._PROCESS_COUNT_TIMEOUT_SECONDS == 3
-    assert b'"$BB_BIN" timeout -t 3 "$BB_BIN" sh -c' in script
+    assert module._PROCESS_COUNT_TIMEOUT_SECONDS == 5
+    assert module._HEALTH_TRANSPORT_TIMEOUT_SECONDS == 5
+    assert module._ROOT_SCRIPT_TIMEOUT_SECONDS == 15
+    assert module._ROOT_SCRIPT_TIMEOUT_SECONDS >= (
+        module._PROCESS_COUNT_TIMEOUT_SECONDS
+        + module._HEALTH_TRANSPORT_TIMEOUT_SECONDS
+        + 3
+    )
+    assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" sh -c' in script
     process_block = script.split(b"stage4_phase=process_count_start", 1)[1].split(
         b"stage4_phase=process_count_done", 1
     )[0]
