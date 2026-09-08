@@ -67,7 +67,7 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
-def test_runtime_process_count_uses_bounded_specialized_lookup() -> None:
+def test_runtime_process_count_uses_one_bounded_process_snapshot() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
 
@@ -77,15 +77,14 @@ def test_runtime_process_count_uses_bounded_specialized_lookup() -> None:
         b"stage4_phase=process_count_done", 1
     )[0]
     assert b"/proc/[0-9]*/cmdline" not in process_block
-    assert b'"$BB_BIN" tr "\\000" " "' not in process_block
-    assert b'"$BB_BIN" --list | "$BB_BIN" grep -Fxq pgrep || exit 26' in process_block
-    assert b'"$BB_BIN" pgrep -f "$needle"' in process_block
-    assert b'"$BB_BIN" wc -l' in process_block
+    assert b"pgrep -f" not in process_block
+    assert process_block.count(b'"$BB_BIN" ps -o args') == 1
+    assert b"while IFS= read -r process_line" in process_block
     for needle in (
-        b'count_cmdline_matches "$WATCHDOG_NEEDLE"',
-        b'count_cmdline_matches "$RUNTIME_SUPERVISOR_NEEDLE"',
-        b'count_cmdline_matches "$HOST_DAEMON_NEEDLE"',
-        b'count_cmdline_matches "$SING_BOX_NEEDLE"',
+        b'*"$WATCHDOG_NEEDLE"*',
+        b'*"$RUNTIME_SUPERVISOR_NEEDLE"*',
+        b'*"$HOST_DAEMON_NEEDLE"*',
+        b'*"$SING_BOX_NEEDLE"*',
     ):
         assert needle in process_block
     assert b"process_ids_recorded" not in script
