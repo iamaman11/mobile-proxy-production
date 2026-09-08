@@ -23,6 +23,12 @@ _TARGET = "phone-production"
 _RELEASE = "v0.1.7"
 _SHA = re.compile(r"[0-9a-f]{40}")
 _ALLOWED_CLASSIFICATIONS = frozenset({"READY", "DEGRADED", "UNKNOWN"})
+_ALLOWED_FAILURE_CODES = frozenset(
+    {
+        "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE",
+        "PHONE_TARGET_UNAVAILABLE",
+    }
+)
 _ALLOWED_FAILURE_PHASES = frozenset(
     {
         "busybox_selected",
@@ -67,6 +73,31 @@ def _unknown_observation() -> dict[str, object]:
         "mode": "read_only",
         "localhost_only": True,
     }
+
+
+def _bounded_terminal(payload: dict[str, object]) -> str:
+    classification = payload.get("classification")
+    if classification not in _ALLOWED_CLASSIFICATIONS:
+        raise ValueError("phone operational terminal classification is invalid")
+    fields = [f"classification={classification}"]
+    failure_code = payload.get("failure_code")
+    if failure_code is not None:
+        if failure_code not in _ALLOWED_FAILURE_CODES:
+            raise ValueError("phone operational failure code is not allowlisted")
+        fields.append(f"failure_code={failure_code}")
+    failure_phase = payload.get("failure_phase")
+    if failure_phase is not None:
+        if failure_phase not in _ALLOWED_FAILURE_PHASES:
+            raise ValueError("phone operational failure phase is not allowlisted")
+        fields.append(f"failure_phase={failure_phase}")
+    fields.extend(
+        (
+            "phone_mutation=false",
+            "provider_access=false",
+            "exact_release_state_observed=false",
+        )
+    )
+    return "STAGE4_PHONE_OPERATIONAL_OBSERVATION " + " ".join(fields)
 
 
 def observe(
@@ -140,11 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         admin_token=admin_token,
         output=args.output,
     )
-    print(
-        "STAGE4_PHONE_OPERATIONAL_OBSERVATION "
-        f"classification={payload['classification']} "
-        "phone_mutation=false provider_access=false exact_release_state_observed=false"
-    )
+    print(_bounded_terminal(payload))
     return 0
 
 
