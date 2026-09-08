@@ -95,6 +95,22 @@ def test_windows_installer_hardens_existing_bridge_task_lifetime() -> None:
     assert "New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME" in script
 
 
+def test_windows_installer_activates_replaced_payload_with_bounded_same_task_restart() -> None:
+    script = WINDOWS_INSTALLER.read_text(encoding="utf-8")
+    assert "$currentState = (Get-ScheduledTask -TaskName $TaskName).State" in script
+    assert "if ($currentState -eq 'Running')" in script
+    assert "Stop-ScheduledTask -TaskName $TaskName" in script
+    assert "$stopDeadline = (Get-Date).AddSeconds(15)" in script
+    assert "$startDeadline = (Get-Date).AddSeconds(15)" in script
+    assert "Start-Sleep -Milliseconds 250" in script
+    assert "Start-ScheduledTask -TaskName $TaskName" in script
+    assert "did not stop within bounded activation window" in script
+    assert "did not reach Running within bounded activation window" in script
+    assert script.index("Stop-ScheduledTask -TaskName $TaskName") < script.index("Start-ScheduledTask -TaskName $TaskName")
+    for forbidden in ("Stop-Process", "taskkill", "usbipd.exe detach", "adb.exe", "adb "):
+        assert forbidden not in script
+
+
 def test_watchdog_is_bounded_and_never_reconfigures_runner_or_phone() -> None:
     script = WATCHDOG.read_text(encoding="utf-8")
     assert "readonly STALE_SECONDS=300" in script
