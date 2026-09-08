@@ -160,24 +160,22 @@ export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_
 printf '{_PHASE_PREFIX}process_count_start\\n'
 process_counts="$(
   "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -c '
-    "$BB_BIN" --list | "$BB_BIN" grep -Fxq pgrep || exit 26
-
-    count_cmdline_matches() {{
-      needle="$1"
-      count="$(
-        "$BB_BIN" pgrep -f "$needle" 2>/dev/null |
-          "$BB_BIN" wc -l
-      )"
-      case "$count" in ''|*[!0-9]*) exit 24 ;; esac
-      printf "%s" "$count"
+    process_snapshot="$("$BB_BIN" ps -o args 2>/dev/null)" || exit 26
+    printf "%s\\n" "$process_snapshot" | {{
+      watchdog_count=0
+      runtime_supervisor_count=0
+      host_daemon_count=0
+      sing_box_count=0
+      while IFS= read -r process_line; do
+        case "$process_line" in *"$WATCHDOG_NEEDLE"*) watchdog_count=$((watchdog_count + 1)) ;; esac
+        case "$process_line" in *"$RUNTIME_SUPERVISOR_NEEDLE"*) runtime_supervisor_count=$((runtime_supervisor_count + 1)) ;; esac
+        case "$process_line" in *"$HOST_DAEMON_NEEDLE"*) host_daemon_count=$((host_daemon_count + 1)) ;; esac
+        case "$process_line" in *"$SING_BOX_NEEDLE"*) sing_box_count=$((sing_box_count + 1)) ;; esac
+      done
+      printf "%s %s %s %s" \
+        "$watchdog_count" "$runtime_supervisor_count" "$host_daemon_count" "$sing_box_count"
     }}
-
-    watchdog_count="$(count_cmdline_matches "$WATCHDOG_NEEDLE")" || exit 25
-    runtime_supervisor_count="$(count_cmdline_matches "$RUNTIME_SUPERVISOR_NEEDLE")" || exit 25
-    host_daemon_count="$(count_cmdline_matches "$HOST_DAEMON_NEEDLE")" || exit 25
-    sing_box_count="$(count_cmdline_matches "$SING_BOX_NEEDLE")" || exit 25
-    printf "%s %s %s %s" \
-      "$watchdog_count" "$runtime_supervisor_count" "$host_daemon_count" "$sing_box_count"
+    process_snapshot=""
   ' 2>/dev/null
 )" || exit 21
 set -- $process_counts
