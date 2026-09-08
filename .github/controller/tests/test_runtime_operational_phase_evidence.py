@@ -67,7 +67,7 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
-def test_runtime_process_count_is_fixed_cost_and_independently_bounded() -> None:
+def test_runtime_process_count_uses_bounded_specialized_lookup() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
 
@@ -76,9 +76,10 @@ def test_runtime_process_count_is_fixed_cost_and_independently_bounded() -> None
     process_block = script.split(b"stage4_phase=process_count_start", 1)[1].split(
         b"stage4_phase=process_count_done", 1
     )[0]
-    assert b"for cmdfile in /proc/[0-9]*/cmdline" not in process_block
+    assert b"/proc/[0-9]*/cmdline" not in process_block
     assert b'"$BB_BIN" tr "\\000" " "' not in process_block
-    assert b'"$BB_BIN" grep -F -l "$needle" /proc/[0-9]*/cmdline' in process_block
+    assert b'"$BB_BIN" --list | "$BB_BIN" grep -Fxq pgrep || exit 26' in process_block
+    assert b'"$BB_BIN" pgrep -f "$needle"' in process_block
     assert b'"$BB_BIN" wc -l' in process_block
     for needle in (
         b'count_cmdline_matches "$WATCHDOG_NEEDLE"',
