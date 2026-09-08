@@ -34,7 +34,6 @@ _SESSION_SUCCESS_PATTERNS = (
 _COUNTER_KEYS = (
     "broker_reconnect",
     "runserver_reconnect",
-    "expected_local_poll_cancellation",
     "tls_error",
     "eof_error",
     "connection_reset",
@@ -281,7 +280,6 @@ def _scan_file(
         flags = _line_flags(line)
         if "broker_reconnect" in flags and _expected_local_poll_cancellation(lines, index):
             flags.discard("broker_reconnect")
-            counters["expected_local_poll_cancellation"] += 1
             if flags == {"transport_error_lines"}:
                 flags.clear()
         for key in flags:
