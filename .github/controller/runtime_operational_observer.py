@@ -193,7 +193,14 @@ done
 printf "%s %s %s %s" \
   "$watchdog_count" "$runtime_supervisor_count" "$host_daemon_count" "$sing_box_count"
 STAGE4_PROCESS_COUNT
-)" || exit 21
+)"
+process_count_status="$?"
+if [ "$process_count_status" -ne 0 ]; then
+  if [ "$process_count_status" -eq 26 ]; then
+    printf '{_PHASE_PREFIX}process_count_done\\n'
+  fi
+  exit 21
+fi
 set -- $process_counts
 [ "$#" -eq 4 ] || exit 22
 for process_count in "$@"; do
