@@ -20,7 +20,7 @@ def test_watchdog_keeps_private_governor_state_and_publishes_only_projection() -
         'install -d -m 0755 "$PROJECTION_DIR"',
         'chmod 0644 "$temporary"',
         'mv -f "$temporary" "$PROJECTION_FILE"',
-        'write_projection HEALTHY',
+        'finish_with_projection HEALTHY',
         'write_projection RESTART_ELIGIBLE',
         'write_projection OBSERVE',
         'write_projection UNKNOWN',
