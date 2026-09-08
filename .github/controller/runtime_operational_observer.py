@@ -5,7 +5,15 @@ from dataclasses import asdict, dataclass
 import phone_target
 
 _ALLOWED_READINESS = frozenset(
-    {"booting", "waiting_wireguard", "waiting_cellular", "starting_proxy", "healthy"}
+    {
+        "booting",
+        "waiting_tunnel",
+        "waiting_cellular",
+        "starting_proxy",
+        "healthy",
+        "recovering",
+        "quarantined",
+    }
 )
 _ALLOWED_PROXY_STATUS = frozenset({"running", "degraded"})
 _ALLOWED_TUNNEL_OWNERS = frozenset(
