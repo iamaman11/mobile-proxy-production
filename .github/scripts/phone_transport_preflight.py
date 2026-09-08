@@ -137,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     if not readiness.ready:
         timings["total"] = int((time.monotonic() - started) * 1000)
         assert readiness.failure_phase is not None and readiness.failure_code is not None
+        if readiness.failure_phase in {"strict_get_state", "root_contract"}:
+            safety["phone_access_performed"] = True
         return _write_not_ready(
             output=args.output,
             controller_revision=args.controller_revision,
