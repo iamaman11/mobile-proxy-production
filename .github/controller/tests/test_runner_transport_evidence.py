@@ -28,6 +28,21 @@ def _listener(diag: Path, *extra: str) -> None:
     (diag / "Runner_20260907-220000-utc.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _listener_named(diag: Path, name: str, started: str, established: str) -> Path:
+    path = diag / name
+    path.write_text(
+        "\n".join(
+            (
+                f"[RUNNER {started} INFO Runner] Runner version: '2.337.0'",
+                f"[RUNNER {established} INFO Terminal] Listening for Jobs",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _worker(diag: Path, name: str, *lines: str) -> None:
     (diag / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -83,6 +98,7 @@ def test_repeated_broker_tls_eof_is_counted_without_raw_log_content() -> None:
         assert counters["tls_error"] == 1
         assert counters["eof_error"] == 2
         assert counters["transport_error_lines"] == 2
+        assert counters["expected_local_poll_cancellation"] == 0
         assert value["repeated_transport_error"] is True
         assert value["transport_degraded"] is True
         assert {"BROKER_RECONNECT", "TLS_ERROR", "EOF_ERROR"}.issubset(set(value["failure_classes"]))
@@ -93,6 +109,50 @@ def test_repeated_broker_tls_eof_is_counted_without_raw_log_content() -> None:
         assert "token=" not in rendered
 
 
+def test_script_literal_does_not_create_runserver_reconnect() -> None:
+    literal = "    'broker_reconnect', 'runserver_reconnect', 'tls_error', 'eof_error',"
+    assert evidence._line_flags(literal) == set()
+
+
+def test_real_runserver_reconnect_is_counted() -> None:
+    flags = evidence._line_flags(
+        "[RUNNER 2026-09-07 22:02:00Z WARN RunServer] request failed; reconnect retry scheduled"
+    )
+    assert "runserver_reconnect" in flags
+    assert "transport_error_lines" in flags
+
+
+def test_expected_local_poll_cancellation_is_separate_nonfailure_evidence() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runner_temp, diag = _layout(Path(raw))
+        _listener(
+            diag,
+            "[RUNNER 2026-09-07 22:01:00Z WARN BrokerServer] System.Net.Sockets.SocketException (125); retrying with backoff",
+            "[RUNNER 2026-09-07 22:01:00.100Z INFO BrokerMessageListener] OnJobStatus operation canceled by local token cancellation",
+        )
+        value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
+        counters = value["error_counters"]
+        assert counters["expected_local_poll_cancellation"] == 1
+        assert counters["broker_reconnect"] == 0
+        assert counters["transport_error_lines"] == 0
+        assert "BROKER_RECONNECT" not in value["failure_classes"]
+        assert value["transport_degraded"] is False
+
+
+def test_outer_broker_reconnect_is_not_hidden_by_cancellation_context() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runner_temp, diag = _layout(Path(raw))
+        _listener(
+            diag,
+            "[RUNNER 2026-09-07 22:01:00Z WARN BrokerServer] System.Net.Sockets.SocketException (125); retrying with backoff",
+            "[RUNNER 2026-09-07 22:01:00.100Z INFO BrokerMessageListener] OnJobStatus operation canceled by local token cancellation",
+            "[RUNNER 2026-09-07 22:01:00.200Z WARN BrokerMessageListener] get next message failed; reconnecting to broker",
+        )
+        value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
+        assert value["error_counters"]["broker_reconnect"] >= 1
+        assert "BROKER_RECONNECT" in value["failure_classes"]
+
+
 def test_worker_action_download_and_artifact_reset_are_classified() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runner_temp, diag = _layout(Path(raw))
@@ -101,18 +161,40 @@ def test_worker_action_download_and_artifact_reset_are_classified() -> None:
             diag,
             "Worker_20260907-220100-utc.log",
             "[WORKER 2026-09-07 22:01:00Z ERR Worker] Failed to resolve action download info. Error: The SSL connection could not be established",
+            "[WORKER 2026-09-07 22:01:01Z WARN Worker] Failed to download action repository after transport error",
             "[WORKER 2026-09-07 22:01:02Z ERR Worker] Failed to CreateArtifact: Unable to make request: ECONNRESET",
         )
         value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
         counters = value["error_counters"]
-        assert counters["action_download_error"] == 1
+        assert counters["action_download_error"] == 2
         assert counters["artifact_transport_error"] == 1
         assert counters["tls_error"] == 1
         assert counters["connection_reset"] == 1
-        assert counters["transport_error_lines"] == 2
+        assert counters["transport_error_lines"] == 3
         assert value["worker_files_scanned"] == 1
         assert value["transport_degraded"] is True
         assert {"ACTION_DOWNLOAD_TRANSPORT", "ARTIFACT_TRANSPORT", "TLS_ERROR", "CONNECTION_RESET"}.issubset(set(value["failure_classes"]))
+
+
+def test_current_listener_is_selected_by_embedded_session_time_not_mtime() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runner_temp, diag = _layout(Path(raw))
+        _listener_named(
+            diag,
+            "Runner_new_session.log",
+            "2026-09-07 23:00:00Z",
+            "2026-09-07 23:00:01Z",
+        )
+        _listener_named(
+            diag,
+            "Runner_old_but_touched_later.log",
+            "2026-09-07 21:00:00Z",
+            "2026-09-07 21:00:01Z",
+        )
+        value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
+        assert value["listener_session_started_at_utc"] == "2026-09-07T23:00:00Z"
+        assert value["last_successful_session_establishment_at_utc"] == "2026-09-07T23:00:01Z"
+        assert "SESSION_WINDOW_UNRESOLVED" not in value["failure_classes"]
 
 
 def test_workers_before_current_listener_session_are_excluded() -> None:
