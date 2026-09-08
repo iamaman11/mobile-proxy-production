@@ -67,7 +67,7 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
-def test_runtime_process_count_uses_one_evidence_calibrated_process_snapshot() -> None:
+def test_runtime_process_count_uses_one_android_toybox_snapshot() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
 
@@ -80,12 +80,14 @@ def test_runtime_process_count_uses_one_evidence_calibrated_process_snapshot() -
         + 3
     )
     assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" sh -c' in script
+    assert b'[ -x /system/bin/ps ] || exit 27' in script
     process_block = script.split(b"stage4_phase=process_count_start", 1)[1].split(
         b"stage4_phase=process_count_done", 1
     )[0]
     assert b"/proc/[0-9]*/cmdline" not in process_block
     assert b"pgrep -f" not in process_block
-    assert process_block.count(b'"$BB_BIN" ps -o args') == 1
+    assert b'"$BB_BIN" ps -o args' not in process_block
+    assert process_block.count(b'/system/bin/ps -A -w -o CMDLINE') == 1
     assert b"while IFS= read -r process_line" in process_block
     for needle in (
         b'*"$WATCHDOG_NEEDLE"*',
