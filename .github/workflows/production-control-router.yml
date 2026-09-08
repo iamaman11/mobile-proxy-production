@@ -263,6 +263,28 @@ jobs:
       source_comment_created_at: ${{ github.event.comment.created_at }}
     secrets: inherit
 
+  observe-runner-transport:
+    name: Route independent Stage 4 runner transport observation
+    needs: route
+    if: >-
+      needs.route.outputs.handler == 'workflow_call' &&
+      needs.route.outputs.route_id == 'observe-runner-transport' &&
+      needs.route.outputs.operation == 'observe-runner-transport' &&
+      needs.route.outputs.operation_class == 'DIAGNOSTIC' &&
+      needs.route.outputs.read_only == 'true' &&
+      needs.route.outputs.destructive == 'false'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/runner-transport-observation.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+      source_comment_created_at: ${{ github.event.comment.created_at }}
+
   android-build-tools-bootstrap:
     name: Route exact bounded Android Build Tools bootstrap contract
     needs: route
