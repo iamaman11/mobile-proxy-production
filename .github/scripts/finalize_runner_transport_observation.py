@@ -214,6 +214,12 @@ def finalize(
     retained = [item for item in limitations if item != "BROKER_ASSIGNMENT_TIMESTAMP_UNAVAILABLE"]
     value["evidence_limitations"] = sorted(set(retained + timing_limitations))
 
+    watchdog = value.get("watchdog")
+    if not isinstance(watchdog, dict):
+        raise ValueError("runner transport watchdog evidence differs")
+    if watchdog.get("state_readable") is not True or watchdog.get("timer_state") == "UNKNOWN":
+        value["classification"] = "TRANSPORT_UNAVAILABLE"
+
     observer.validate_observation(value)
     output_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     return value
