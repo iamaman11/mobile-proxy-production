@@ -50,7 +50,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\runner-host\wind
 ```bash
 cd /home/bose/projects/mobile-proxy-production
 sudo ./infra/runner-host/wsl/install-runner-transport-health.sh
-sudo ./infra/runner-host/wsl/install-runner-android-usb-permissions.sh
+sudo bash ./infra/runner-host/wsl/install-runner-android-usb-permissions.sh
 ```
 
 The Windows installer updates only the named `MobileProxyUsbBridge` task and
