@@ -12,7 +12,10 @@ CONTROLLER = SCRIPTS.parent / "controller"
 sys.path.insert(0, str(CONTROLLER))
 
 from phone_target import PhoneTargetUnavailable  # noqa: E402
-from runtime_operational_observer import observe_runtime_operational_health  # noqa: E402
+from runtime_operational_observer import (  # noqa: E402
+    RuntimeOperationalObservationUnavailable,
+    observe_runtime_operational_health,
+)
 
 _MAX_REASON_CHARS = 160
 
@@ -88,6 +91,7 @@ def enrich(path: Path, *, serial: str, admin_token: str) -> int:
         print("STAGE4_RUNTIME_OPERATIONAL_OBSERVED evaluated=false reason=runtime_not_exact")
         return 0
 
+    payload.pop("failure_phase", None)
     try:
         operational = observe_runtime_operational_health(
             serial,
@@ -118,13 +122,20 @@ def enrich(path: Path, *, serial: str, admin_token: str) -> int:
         payload["failure_class"] = "RuntimeOperationalObservationUnavailable"
         payload["failure_code"] = "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE"
         payload["failure_reason"] = _bounded_reason(exc)
+        if (
+            isinstance(exc, RuntimeOperationalObservationUnavailable)
+            and exc.last_phase is not None
+        ):
+            payload["failure_phase"] = exc.last_phase
         observation["operational"] = _not_evaluated("observation_unavailable")
         observation["desired"] = False
         safety.update(_operational_safety(performed=True))
         _write(path, payload)
+        phase = payload.get("failure_phase", "unknown")
         print(
             "STAGE4_RUNTIME_OPERATIONAL_UNKNOWN "
-            f"failure_code={payload['failure_code']} reason={payload['failure_reason']}",
+            f"failure_code={payload['failure_code']} phase={phase} "
+            f"reason={payload['failure_reason']}",
             file=sys.stderr,
         )
         return 2

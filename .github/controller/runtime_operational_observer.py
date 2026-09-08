@@ -36,6 +36,15 @@ _ALLOWED_DEGRADATION = frozenset(
         "local_probe_failed",
     }
 )
+_PHASE_SEQUENCE = (
+    "process_count_done",
+    "busybox_selected",
+    "health_transport_start",
+    "health_transport_done",
+    "health_parse_done",
+)
+_ALLOWED_PHASES = frozenset(_PHASE_SEQUENCE)
+_PHASE_PREFIX = "stage4_phase="
 _EXPECTED_TUNNEL_OWNER = "first_party_reverse_tunnel"
 _HEALTH_HOST = "127.0.0.1"
 _HEALTH_PORT = 8088
@@ -46,6 +55,14 @@ _HEALTH_TRANSPORT_TIMEOUT_SECONDS = 5
 _ROOT_SCRIPT_TIMEOUT_SECONDS = 12
 _MALFORMED = "runtime operational observation is malformed"
 _UNAVAILABLE = "runtime operational observation is unavailable"
+
+
+class RuntimeOperationalObservationUnavailable(phone_target.PhoneTargetUnavailable):
+    def __init__(self, message: str, *, last_phase: str | None = None) -> None:
+        super().__init__(message)
+        if last_phase is not None and last_phase not in _ALLOWED_PHASES:
+            raise ValueError("runtime operational failure phase is not allowlisted")
+        self.last_phase = last_phase
 
 
 @dataclass(frozen=True)
@@ -141,6 +158,7 @@ watchdog_count="$(count_cmdline '/data/adb/mobile-proxy-node/logs/runtime-watchd
 runtime_supervisor_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/runtime-supervisor')"
 host_daemon_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/host-daemon')"
 sing_box_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/sing-box')"
+printf '{_PHASE_PREFIX}process_count_done\\n'
 
 health_api_authenticated=false
 readiness_state=unknown
@@ -158,8 +176,10 @@ if [ -x /data/adb/magisk/busybox ]; then
 elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
   BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
 fi
+printf '{_PHASE_PREFIX}busybox_selected\\n'
 
 health_raw=""
+printf '{_PHASE_PREFIX}health_transport_start\\n'
 if [ -n "$BB_BIN" ]; then
   health_raw="$(
     printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
@@ -167,6 +187,7 @@ if [ -n "$BB_BIN" ]; then
       "$BB_BIN" head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
   )"
 fi
+printf '{_PHASE_PREFIX}health_transport_done\\n'
 ADMIN_TOKEN=''
 
 status_line="$(printf '%s\\n' "$health_raw" | head -n1 | tr -d '\\r')"
@@ -202,6 +223,7 @@ if [ "$health_api_authenticated" = true ]; then
   [ -n "$degradation_reason_code" ] || degradation_reason_code=invalid
 fi
 health_raw=''
+printf '{_PHASE_PREFIX}health_parse_done\\n'
 
 printf 'watchdog_count=%s\\n' "$watchdog_count"
 printf 'runtime_supervisor_count=%s\\n' "$runtime_supervisor_count"
@@ -217,6 +239,35 @@ printf 'local_serving_ready=%s\\n' "$local_serving_ready"
 printf 'tunnel_owner=%s\\n' "$tunnel_owner"
 printf 'degradation_reason_code=%s\\n' "$degradation_reason_code"
 '''.encode("utf-8")
+
+
+def _split_phase_markers(raw: bytes) -> tuple[tuple[str, ...], bytes]:
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise phone_target.PhoneTargetUnavailable(_MALFORMED) from exc
+    phases: list[str] = []
+    payload: list[str] = []
+    for line in lines:
+        if line.startswith(_PHASE_PREFIX):
+            phase = line[len(_PHASE_PREFIX) :]
+            if phase not in _ALLOWED_PHASES:
+                raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+            phases.append(phase)
+        else:
+            payload.append(line)
+    if tuple(phases) != _PHASE_SEQUENCE[: len(phases)]:
+        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+    body = ("\n".join(payload) + ("\n" if payload else "")).encode("utf-8")
+    return tuple(phases), body
+
+
+def _last_allowlisted_phase(raw: bytes) -> str | None:
+    try:
+        phases, _ = _split_phase_markers(raw)
+    except phone_target.PhoneTargetUnavailable:
+        return None
+    return phases[-1] if phases else None
 
 
 def _parse_bool(raw: str) -> bool | None:
@@ -336,6 +387,14 @@ def observe_runtime_operational_health(
         _operational_script(admin_token),
         timeout=_ROOT_SCRIPT_TIMEOUT_SECONDS,
     )
+    if result.status == "timeout":
+        raise RuntimeOperationalObservationUnavailable(
+            _UNAVAILABLE,
+            last_phase=_last_allowlisted_phase(result.stdout),
+        )
     if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
-        raise phone_target.PhoneTargetUnavailable(_UNAVAILABLE)
-    return _parse_output(result.stdout)
+        raise RuntimeOperationalObservationUnavailable(_UNAVAILABLE)
+    phases, payload = _split_phase_markers(result.stdout)
+    if phases != _PHASE_SEQUENCE:
+        raise RuntimeOperationalObservationUnavailable(_UNAVAILABLE)
+    return _parse_output(payload)
