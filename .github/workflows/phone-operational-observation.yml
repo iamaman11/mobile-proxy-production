@@ -120,7 +120,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Observe bounded phone operational state
+      - name: Observe bounded phone operational state exactly once
         shell: bash
         env:
           TARGET: ${{ inputs.target }}
@@ -133,12 +133,24 @@ jobs:
             --controller-revision "$GITHUB_SHA" \
             --output "$RUNNER_TEMP/stage4-phone-operational-observation.json"
 
-      - name: Preserve mandatory bounded operational evidence
-        id: evidence_upload
+      - name: Preserve mandatory bounded operational evidence — primary transport
+        id: evidence_upload_primary
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: stage4-phone-operational-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage4-phone-operational-observation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retry only evidence transport without re-observing phone
+        id: evidence_upload_retry
+        if: always() && steps.evidence_upload_primary.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stage4-phone-operational-observation-${{ github.run_id }}-${{ github.run_attempt }}-retry1
           path: ${{ runner.temp }}/stage4-phone-operational-observation.json
           if-no-files-found: error
           retention-days: 90
@@ -197,25 +209,59 @@ jobs:
           if safety.get('localhost_only') is not True:
               raise SystemExit('Stage 4 operational probe is not localhost-only')
 
+          failure_code = value.get('failure_code')
+          failure_phase = value.get('failure_phase')
           if classification == 'UNKNOWN':
-              if value.get('failure_code') not in {
+              if failure_code not in {
                   'RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE',
                   'PHONE_TARGET_UNAVAILABLE',
               }:
                   raise SystemExit('Stage 4 operational UNKNOWN lacks bounded failure code')
-          elif 'failure_code' in value or 'failure_phase' in value:
-              raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
-
-          print(
-              'STAGE4_PHONE_OPERATIONAL_CLASSIFIED '
-              f"workflow_execution=success phone_operational_state={classification} "
-              'phone_mutation=false provider_access=false exact_release_state_observed=false'
+              fields = [
+                  'STAGE4_PHONE_OPERATIONAL_CLASSIFIED',
+                  'workflow_execution=success',
+                  'phone_operational_state=UNKNOWN',
+                  f'failure_code={failure_code}',
+              ]
+              if failure_phase is not None:
+                  if failure_phase not in {
+                      'busybox_selected',
+                      'process_count_start',
+                      'process_count_done',
+                      'health_transport_start',
+                      'health_transport_done',
+                      'health_parse_done',
+                  }:
+                      raise SystemExit('Stage 4 operational UNKNOWN failure phase differs')
+                  fields.append(f'failure_phase={failure_phase}')
+          else:
+              if failure_code is not None or failure_phase is not None:
+                  raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
+              fields = [
+                  'STAGE4_PHONE_OPERATIONAL_CLASSIFIED',
+                  'workflow_execution=success',
+                  f'phone_operational_state={classification}',
+              ]
+          fields.extend(
+              (
+                  'phone_mutation=false',
+                  'provider_access=false',
+                  'exact_release_state_observed=false',
+              )
           )
+          print(' '.join(fields))
           PY
 
-      - name: Require mandatory artifact transport success
+      - name: Require at least one mandatory artifact transport success
         if: always()
+        env:
+          PRIMARY_OUTCOME: ${{ steps.evidence_upload_primary.outcome }}
+          RETRY_OUTCOME: ${{ steps.evidence_upload_retry.outcome }}
         shell: bash
         run: |
           set -euo pipefail
-          test '${{ steps.evidence_upload.outcome }}' = 'success'
+          if [[ "$PRIMARY_OUTCOME" != 'success' && "$RETRY_OUTCOME" != 'success' ]]; then
+            echo 'Stage 4 operational evidence transport failed after bounded retry' >&2
+            exit 1
+          fi
+          echo "STAGE4_PHONE_OPERATIONAL_EVIDENCE_TRANSPORT_ACCEPTED primary=$PRIMARY_OUTCOME retry=$RETRY_OUTCOME"
