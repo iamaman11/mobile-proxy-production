@@ -94,6 +94,15 @@ def _failure_domain(runner: dict[str, object], active: dict[str, object]) -> str
     return "UNKNOWN"
 
 
+def _watchdog_recovery_context(watchdog: dict[str, object]) -> bool:
+    restart_count = watchdog.get("restart_count_window")
+    return bool(
+        watchdog.get("cooldown_active") is True
+        or watchdog.get("post_restart_grace_active") is True
+        or (type(restart_count) is int and restart_count > 0)
+    )
+
+
 def _classification(
     *,
     runner: dict[str, object],
@@ -150,7 +159,8 @@ def _classification(
         or any(item != "SUCCESS" for item in finals)
         or active.get("retry_observed") is True
         or watchdog.get("timer_state") == "INACTIVE"
-        or watchdog.get("decision") in {"RATE_LIMITED", "OBSERVE", "RESTART_ELIGIBLE"}
+        or watchdog.get("decision") in {"RATE_LIMITED", "RESTART_ELIGIBLE"}
+        or _watchdog_recovery_context(watchdog)
     )
     return ("TRANSPORT_DEGRADED" if degraded else "HEALTHY"), sorted(set(limitations))
 
