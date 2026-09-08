@@ -33,11 +33,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash -n infra/runner-host/wsl/runner-transport-health.sh
           python3 -m py_compile \
             .github/controller/runner_transport_probe.py \
             .github/scripts/observe_runner_transport.py \
-            .github/controller/tests/test_runner_transport_observer.py
+            .github/controller/tests/test_runner_transport_observer.py \
+            .github/controller/tests/test_runner_watchdog_projection.py
           python3 .github/controller/tests/test_runner_transport_observer.py
+          python3 .github/controller/tests/test_runner_watchdog_projection.py
 
       - name: Compile and test runner transport artifact finalization
         shell: bash
@@ -70,6 +73,8 @@ jobs:
           probe = Path('.github/controller/runner_transport_probe.py').read_text(encoding='utf-8')
           finalizer = Path('.github/scripts/finalize_runner_transport_observation.py').read_text(encoding='utf-8')
           observer_workflow = Path('.github/workflows/runner-transport-observation.yml').read_text(encoding='utf-8')
+          watchdog = Path('infra/runner-host/wsl/runner-transport-health.sh').read_text(encoding='utf-8')
+          watchdog_service = Path('infra/runner-host/wsl/mobile-proxy-runner-transport-health.service').read_text(encoding='utf-8')
           observer_policy = json.loads(Path('.github/production/runner-transport-policy.json').read_text(encoding='utf-8'))
 
           for required in (
@@ -161,6 +166,8 @@ jobs:
               'BROKER_ASSIGNMENT_TIMESTAMP_UNAVAILABLE',
               'CURRENT_SESSION_EVIDENCE_INCOMPLETE',
               'SERVICE_ENVIRONMENT_UNAVAILABLE',
+              'WATCHDOG_STATE_UNAVAILABLE',
+              'WATCHDOG_DECISION_UNKNOWN',
               'HEALTHY', 'TRANSPORT_DEGRADED', 'TRANSPORT_UNAVAILABLE',
               'raw_runner_log_recorded', 'raw_transport_url_recorded',
               'network_configuration_changed', 'automatic_recovery_performed',
@@ -171,11 +178,41 @@ jobs:
           for required in (
               'RUNNER_SERVICE = "mobile-proxy-phone-runner.service"',
               'WATCHDOG_TIMER = "mobile-proxy-runner-transport-health.timer"',
+              'WATCHDOG_PROJECTION = Path("/run/mobile-proxy-runner-health/observation.json")',
+              'WATCHDOG_PROJECTION_SCHEMA = "runner-transport-health-projection.v1"',
               'systemctl', 'show', '--retry', '0', '--proto', '=https',
-              'service_environment_observed',
+              'service_environment_observed', '_parse_watchdog_projection',
           ):
               if required not in probe:
                   raise SystemExit('runner transport probe invariant missing: ' + required)
+          for forbidden in (
+              '/var/lib/mobile-proxy-runner-health/state',
+              'WATCHDOG_COOLDOWN_SECONDS',
+              'WATCHDOG_WINDOW_SECONDS',
+              'WATCHDOG_MAX_RESTARTS',
+              'WATCHDOG_POST_RESTART_GRACE_SECONDS',
+          ):
+              if forbidden in probe:
+                  raise SystemExit('runner observer duplicated private watchdog state/policy: ' + forbidden)
+
+          for required in (
+              'runner-transport-health-projection.v1',
+              'PROJECTION_DIR="/run/mobile-proxy-runner-health"',
+              'install -d -m 0700 "$STATE_DIR"',
+              'install -d -m 0755 "$PROJECTION_DIR"',
+              'chmod 0644 "$temporary"',
+              'write_projection RESTART_ELIGIBLE',
+          ):
+              if required not in watchdog:
+                  raise SystemExit('watchdog projection owner invariant missing: ' + required)
+          for required in (
+              'RuntimeDirectory=mobile-proxy-runner-health',
+              'RuntimeDirectoryMode=0755',
+              'RuntimeDirectoryPreserve=yes',
+              'ReadWritePaths=/var/lib/mobile-proxy-runner-health /run/mobile-proxy-runner-health',
+          ):
+              if required not in watchdog_service:
+                  raise SystemExit('watchdog projection service boundary missing: ' + required)
 
           for required in (
               'ISSUE_COMMENT_CREATED_AT_TO_ACTIONS_JOB_STARTED_AT',

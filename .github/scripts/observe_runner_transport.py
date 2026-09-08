@@ -130,8 +130,13 @@ def _classification(
         unavailable = True
     if watchdog.get("state_readable") is not True:
         limitations.append("WATCHDOG_STATE_UNAVAILABLE")
+        unavailable = True
     if watchdog.get("timer_state") == "UNKNOWN":
         limitations.append("WATCHDOG_TIMER_STATE_UNAVAILABLE")
+        unavailable = True
+    if watchdog.get("decision") == "UNKNOWN":
+        limitations.append("WATCHDOG_DECISION_UNKNOWN")
+        unavailable = True
 
     if unavailable:
         return "TRANSPORT_UNAVAILABLE", sorted(set(limitations))
@@ -145,7 +150,7 @@ def _classification(
         or any(item != "SUCCESS" for item in finals)
         or active.get("retry_observed") is True
         or watchdog.get("timer_state") == "INACTIVE"
-        or watchdog.get("decision") in {"RATE_LIMITED", "OBSERVE"}
+        or watchdog.get("decision") in {"RATE_LIMITED", "OBSERVE", "RESTART_ELIGIBLE"}
     )
     return ("TRANSPORT_DEGRADED" if degraded else "HEALTHY"), sorted(set(limitations))
 
