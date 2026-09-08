@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,11 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "production" / "runner-transport-policy.json"
 RUNNER_SERVICE = "mobile-proxy-phone-runner.service"
 WATCHDOG_TIMER = "mobile-proxy-runner-transport-health.timer"
-WATCHDOG_STATE = Path("/var/lib/mobile-proxy-runner-health/state")
-WATCHDOG_COOLDOWN_SECONDS = 900
-WATCHDOG_WINDOW_SECONDS = 3600
-WATCHDOG_MAX_RESTARTS = 3
-WATCHDOG_POST_RESTART_GRACE_SECONDS = 300
+WATCHDOG_PROJECTION = Path("/run/mobile-proxy-runner-health/observation.json")
+WATCHDOG_PROJECTION_SCHEMA = "runner-transport-health-projection.v1"
+_MAX_PROJECTION_BYTES = 4096
+_MAX_PROJECTION_COUNTER = 1000
+_WATCHDOG_DECISIONS = frozenset({"HEALTHY", "OBSERVE", "RESTART_ELIGIBLE", "RATE_LIMITED", "UNKNOWN"})
 
 _PROXY_KEYS = frozenset({
     "http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
@@ -206,63 +207,70 @@ def collect_runner_runtime(
     return runner_state, environment_presence
 
 
-def _parse_watchdog_state(path: Path) -> dict[str, int] | None:
+def _parse_watchdog_projection(path: Path, *, now_epoch: int) -> dict[str, object] | None:
     try:
-        lines = path.read_text(encoding="ascii").splitlines()
-    except (OSError, UnicodeError):
-        return None
-    values: dict[str, int] = {}
-    for line in lines:
-        if "=" not in line:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_PROJECTION_BYTES:
             return None
-        key, raw = line.split("=", 1)
-        if key not in {"last_restart", "window_started", "restarts"} or not raw.isdigit():
+        if info.st_mode & 0o022:
             return None
-        values[key] = int(raw)
-    if set(values) != {"last_restart", "window_started", "restarts"}:
+        value = json.loads(path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return values
+
+    expected = {
+        "schema", "observed_at_epoch", "expires_at_epoch", "decision", "cooldown_active",
+        "restart_budget_remaining", "post_restart_grace_active", "restart_count_window",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        return None
+    if value.get("schema") != WATCHDOG_PROJECTION_SCHEMA:
+        return None
+    observed = value.get("observed_at_epoch")
+    expires = value.get("expires_at_epoch")
+    if type(observed) is not int or type(expires) is not int or observed < 0 or expires <= observed:
+        return None
+    if not observed <= now_epoch <= expires:
+        return None
+    if value.get("decision") not in _WATCHDOG_DECISIONS:
+        return None
+    for key in ("cooldown_active", "post_restart_grace_active"):
+        if type(value.get(key)) is not bool:
+            return None
+    for key in ("restart_budget_remaining", "restart_count_window"):
+        item = value.get(key)
+        if type(item) is not int or not 0 <= item <= _MAX_PROJECTION_COUNTER:
+            return None
+    return value
 
 
 def collect_watchdog(
     *,
     runner: CommandRunner = _run,
-    state_path: Path = WATCHDOG_STATE,
+    projection_path: Path = WATCHDOG_PROJECTION,
     now_epoch: int | None = None,
 ) -> dict[str, object]:
     now = int(time.time()) if now_epoch is None else now_epoch
     timer_state = _systemctl_value(WATCHDOG_TIMER, "ActiveState", runner)
-    state = _parse_watchdog_state(state_path)
+    projection = _parse_watchdog_projection(projection_path, now_epoch=now)
     result: dict[str, object] = {
         "timer_state": "ACTIVE" if timer_state == "active" else ("INACTIVE" if timer_state else "UNKNOWN"),
-        "state_readable": state is not None,
+        "state_readable": projection is not None,
         "decision": "UNKNOWN",
         "cooldown_active": None,
         "restart_budget_remaining": None,
         "post_restart_grace_active": None,
         "restart_count_window": None,
     }
-    if state is None:
+    if projection is None:
         return result
-
-    last_restart = state["last_restart"]
-    window_started = state["window_started"]
-    restarts = state["restarts"]
-    if now - window_started >= WATCHDOG_WINDOW_SECONDS:
-        restarts = 0
-    cooldown = last_restart > 0 and 0 <= now - last_restart < WATCHDOG_COOLDOWN_SECONDS
-    grace = last_restart > 0 and 0 <= now - last_restart < WATCHDOG_POST_RESTART_GRACE_SECONDS
-    remaining = max(0, WATCHDOG_MAX_RESTARTS - restarts)
     result.update({
-        "cooldown_active": cooldown,
-        "restart_budget_remaining": remaining,
-        "post_restart_grace_active": grace,
-        "restart_count_window": restarts,
+        "decision": projection["decision"],
+        "cooldown_active": projection["cooldown_active"],
+        "restart_budget_remaining": projection["restart_budget_remaining"],
+        "post_restart_grace_active": projection["post_restart_grace_active"],
+        "restart_count_window": projection["restart_count_window"],
     })
-    if remaining == 0:
-        result["decision"] = "RATE_LIMITED"
-    elif cooldown or grace:
-        result["decision"] = "OBSERVE"
     return result
 
 
