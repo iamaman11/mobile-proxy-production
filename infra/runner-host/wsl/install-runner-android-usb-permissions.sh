@@ -18,6 +18,8 @@ fail() {
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
 command -v getent >/dev/null 2>&1 || fail "getent is required"
 command -v install >/dev/null 2>&1 || fail "install is required"
+command -v awk >/dev/null 2>&1 || fail "awk is required"
+command -v cut >/dev/null 2>&1 || fail "cut is required"
 [[ -f "${SOURCE_DROPIN}" ]] || fail "versioned runner permission drop-in is missing"
 
 getent group "${REQUIRED_GROUP}" >/dev/null 2>&1 || fail "required plugdev group does not exist"
@@ -37,7 +39,7 @@ case " ${supplementary_groups} " in
   *) fail "runner service did not load required supplementary group" ;;
 esac
 
-systemctl restart "${RUNNER_SERVICE}"
+systemctl restart --no-block "${RUNNER_SERVICE}"
 
 deadline=$((SECONDS + ACTIVATION_TIMEOUT_SECONDS))
 until systemctl is-active --quiet "${RUNNER_SERVICE}"; do
