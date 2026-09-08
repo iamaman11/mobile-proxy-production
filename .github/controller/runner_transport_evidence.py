@@ -243,6 +243,7 @@ def _scan_file(
     remaining_bytes: int,
     counters: dict[str, int],
     listener: bool,
+    context_counters: dict[str, int] | None = None,
 ) -> tuple[int, bool, str | None, datetime | None]:
     consumed = 0
     truncated = False
@@ -280,6 +281,8 @@ def _scan_file(
         flags = _line_flags(line)
         if "broker_reconnect" in flags and _expected_local_poll_cancellation(lines, index):
             flags.discard("broker_reconnect")
+            if context_counters is not None:
+                context_counters["expected_local_poll_cancellation"] += 1
             if flags == {"transport_error_lines"}:
                 flags.clear()
         for key in flags:
@@ -301,8 +304,14 @@ def _derive_diag_dir(runner_temp: Path) -> Path | None:
     return diag
 
 
-def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_ms: int) -> dict[str, object]:
+def collect_runner_transport_evidence(
+    *,
+    runner_temp: Path,
+    assignment_latency_ms: int,
+    include_context: bool = False,
+) -> dict[str, object]:
     counters = {key: 0 for key in _COUNTER_KEYS}
+    context_counters = {"expected_local_poll_cancellation": 0}
     evidence: dict[str, object] = {
         "diagnostic_window": "current_listener_session",
         "diagnostic_evidence_available": False,
@@ -320,6 +329,8 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
         "repeated_transport_error": False,
         "transport_degraded": False,
     }
+    if include_context:
+        evidence["context_counters"] = context_counters
 
     diag = _derive_diag_dir(runner_temp)
     if diag is None:
@@ -345,6 +356,7 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
         remaining_bytes=remaining,
         counters=counters,
         listener=True,
+        context_counters=context_counters if include_context else None,
     )
     remaining -= used
     evidence["listener_files_scanned"] = 1
@@ -377,6 +389,7 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
             remaining_bytes=remaining,
             counters=counters,
             listener=False,
+            context_counters=context_counters if include_context else None,
         )
         remaining -= used
         if evidence["runner_version"] is None and worker_version is not None:
