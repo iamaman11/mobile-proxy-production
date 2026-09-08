@@ -65,9 +65,10 @@ jobs:
                   raise SystemExit('runner transport evidence owner invariant missing: ' + required)
 
           for required in (
-              'phone-transport-preflight.v2',
+              'phone-transport-preflight.v3',
               'collect_runner_transport_evidence',
               'classify_preflight',
+              'phone_failure_phase',
               'raw_runner_log_recorded',
               'raw_transport_url_recorded',
           ):
@@ -79,6 +80,7 @@ jobs:
               'timeout-minutes: 2',
               'group: production-phone-read-only-preflight',
               'cancel-in-progress: false',
+              'Validate bounded transport evidence',
               'Preserve mandatory bounded transport evidence',
               'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
               'if-no-files-found: error',
@@ -91,6 +93,11 @@ jobs:
               'artifact_transport_error',
               'SESSION_WINDOW_UNRESOLVED',
               'runner transport session-window resolution evidence differs',
+              "classification == 'NOT_READY' and phone_failure_phase == 'NONE'",
+              "classification != 'NOT_READY' and phone_failure_phase != 'NONE'",
+              'workflow_execution=success',
+              'phone_readiness=',
+              'automatic_recovery_performed=false',
               'raw_runner_log_recorded',
               'raw_transport_url_recorded',
           ):
