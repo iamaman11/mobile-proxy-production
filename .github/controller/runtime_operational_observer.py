@@ -37,8 +37,9 @@ _ALLOWED_DEGRADATION = frozenset(
     }
 )
 _PHASE_SEQUENCE = (
-    "process_count_done",
     "busybox_selected",
+    "process_count_start",
+    "process_count_done",
     "health_transport_start",
     "health_transport_done",
     "health_parse_done",
@@ -51,6 +52,7 @@ _HEALTH_PORT = 8088
 _MAX_PROCESS_COUNT = 8
 _MAX_ADMIN_TOKEN_CHARS = 4096
 _MAX_HEALTH_RESPONSE_BYTES = 16 * 1024
+_PROCESS_COUNT_TIMEOUT_SECONDS = 3
 _HEALTH_TRANSPORT_TIMEOUT_SECONDS = 5
 _ROOT_SCRIPT_TIMEOUT_SECONDS = 12
 _MALFORMED = "runtime operational observation is malformed"
@@ -141,23 +143,51 @@ def _operational_script(admin_token: str) -> bytes:
     return f'''set -u
 ADMIN_TOKEN={token}
 
-count_cmdline() {{
-  needle="$1"
-  count=0
-  for cmdfile in /proc/[0-9]*/cmdline; do
-    [ -r "$cmdfile" ] || continue
-    cmd="$(tr '\\000' ' ' < "$cmdfile" 2>/dev/null || true)"
-    case "$cmd" in
-      *"$needle"*) count=$((count + 1)) ;;
-    esac
-  done
-  printf '%s' "$count"
-}}
+BB_BIN=""
+if [ -x /data/adb/magisk/busybox ]; then
+  BB_BIN=/data/adb/magisk/busybox
+elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
+  BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
+fi
+[ -n "$BB_BIN" ] || exit 20
+printf '{_PHASE_PREFIX}busybox_selected\\n'
 
-watchdog_count="$(count_cmdline '/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh')"
-runtime_supervisor_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/runtime-supervisor')"
-host_daemon_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/host-daemon')"
-sing_box_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/sing-box')"
+WATCHDOG_NEEDLE='/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh'
+RUNTIME_SUPERVISOR_NEEDLE='/data/adb/mobile-proxy-node/current/bin/runtime-supervisor'
+HOST_DAEMON_NEEDLE='/data/adb/mobile-proxy-node/current/bin/host-daemon'
+SING_BOX_NEEDLE='/data/adb/mobile-proxy-node/current/bin/sing-box'
+export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_BOX_NEEDLE
+printf '{_PHASE_PREFIX}process_count_start\\n'
+process_counts="$(
+  "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -c '
+    watchdog_count=0
+    runtime_supervisor_count=0
+    host_daemon_count=0
+    sing_box_count=0
+    for cmdfile in /proc/[0-9]*/cmdline; do
+      [ -r "$cmdfile" ] || continue
+      cmd="$("$BB_BIN" tr "\\000" " " < "$cmdfile" 2>/dev/null || true)"
+      case "$cmd" in *"$WATCHDOG_NEEDLE"*) watchdog_count=$((watchdog_count + 1)) ;; esac
+      case "$cmd" in *"$RUNTIME_SUPERVISOR_NEEDLE"*) runtime_supervisor_count=$((runtime_supervisor_count + 1)) ;; esac
+      case "$cmd" in *"$HOST_DAEMON_NEEDLE"*) host_daemon_count=$((host_daemon_count + 1)) ;; esac
+      case "$cmd" in *"$SING_BOX_NEEDLE"*) sing_box_count=$((sing_box_count + 1)) ;; esac
+      cmd=""
+    done
+    printf "%s %s %s %s" \
+      "$watchdog_count" "$runtime_supervisor_count" "$host_daemon_count" "$sing_box_count"
+  ' 2>/dev/null
+)" || exit 21
+set -- $process_counts
+[ "$#" -eq 4 ] || exit 22
+for process_count in "$@"; do
+  case "$process_count" in ''|*[!0-9]*) exit 23 ;; esac
+done
+watchdog_count="$1"
+runtime_supervisor_count="$2"
+host_daemon_count="$3"
+sing_box_count="$4"
+process_counts=''
+unset WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_BOX_NEEDLE
 printf '{_PHASE_PREFIX}process_count_done\\n'
 
 health_api_authenticated=false
@@ -170,23 +200,13 @@ local_serving_ready=unknown
 tunnel_owner=unknown
 degradation_reason_code=unknown
 
-BB_BIN=""
-if [ -x /data/adb/magisk/busybox ]; then
-  BB_BIN=/data/adb/magisk/busybox
-elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
-  BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
-fi
-printf '{_PHASE_PREFIX}busybox_selected\\n'
-
 health_raw=""
 printf '{_PHASE_PREFIX}health_transport_start\\n'
-if [ -n "$BB_BIN" ]; then
-  health_raw="$(
-    printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
-      "$BB_BIN" timeout -t {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} "$BB_BIN" nc -w {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
-      "$BB_BIN" head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
-  )"
-fi
+health_raw="$(
+  printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
+    "$BB_BIN" timeout -t {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} "$BB_BIN" nc -w {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
+    "$BB_BIN" head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
+)"
 printf '{_PHASE_PREFIX}health_transport_done\\n'
 ADMIN_TOKEN=''
 
@@ -387,13 +407,11 @@ def observe_runtime_operational_health(
         _operational_script(admin_token),
         timeout=_ROOT_SCRIPT_TIMEOUT_SECONDS,
     )
-    if result.status == "timeout":
+    if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
         raise RuntimeOperationalObservationUnavailable(
             _UNAVAILABLE,
             last_phase=_last_allowlisted_phase(result.stdout),
         )
-    if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
-        raise RuntimeOperationalObservationUnavailable(_UNAVAILABLE)
     phases, payload = _split_phase_markers(result.stdout)
     if phases != _PHASE_SEQUENCE:
         raise RuntimeOperationalObservationUnavailable(_UNAVAILABLE)
