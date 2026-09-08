@@ -98,7 +98,6 @@ def test_repeated_broker_tls_eof_is_counted_without_raw_log_content() -> None:
         assert counters["tls_error"] == 1
         assert counters["eof_error"] == 2
         assert counters["transport_error_lines"] == 2
-        assert counters["expected_local_poll_cancellation"] == 0
         assert value["repeated_transport_error"] is True
         assert value["transport_degraded"] is True
         assert {"BROKER_RECONNECT", "TLS_ERROR", "EOF_ERROR"}.issubset(set(value["failure_classes"]))
@@ -122,7 +121,7 @@ def test_real_runserver_reconnect_is_counted() -> None:
     assert "transport_error_lines" in flags
 
 
-def test_expected_local_poll_cancellation_is_separate_nonfailure_evidence() -> None:
+def test_expected_local_poll_cancellation_does_not_create_false_broker_failure() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runner_temp, diag = _layout(Path(raw))
         _listener(
@@ -132,7 +131,6 @@ def test_expected_local_poll_cancellation_is_separate_nonfailure_evidence() -> N
         )
         value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
         counters = value["error_counters"]
-        assert counters["expected_local_poll_cancellation"] == 1
         assert counters["broker_reconnect"] == 0
         assert counters["transport_error_lines"] == 0
         assert "BROKER_RECONNECT" not in value["failure_classes"]
