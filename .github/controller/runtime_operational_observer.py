@@ -160,10 +160,12 @@ export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_
 printf '{_PHASE_PREFIX}process_count_start\\n'
 process_counts="$(
   "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -c '
+    "$BB_BIN" --list | "$BB_BIN" grep -Fxq pgrep || exit 26
+
     count_cmdline_matches() {{
       needle="$1"
       count="$(
-        "$BB_BIN" grep -F -l "$needle" /proc/[0-9]*/cmdline 2>/dev/null |
+        "$BB_BIN" pgrep -f "$needle" 2>/dev/null |
           "$BB_BIN" wc -l
       )"
       case "$count" in ''|*[!0-9]*) exit 24 ;; esac
