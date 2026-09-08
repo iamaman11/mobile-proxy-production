@@ -217,21 +217,32 @@ def test_stderr_contract_failure_is_protocol_mismatch_after_positive_probe() -> 
         assert payload["phone_failure_phase"] == "ROOT_SCRIPT_PROTOCOL_MISMATCH"
 
 
-def test_artifact_never_contains_serial_raw_output_url_or_secret_text() -> None:
+def test_artifact_never_contains_raw_identifier_output_url_or_secret_values() -> None:
     module = load_preflight()
     _, payload, _ = _run(module, failure_phase=PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH, degraded=True)
     rendered = json.dumps(payload, sort_keys=True)
     for forbidden in (
         SERIAL,
         "raw-secret",
-        "stderr",
-        "stdout",
         "example.invalid",
         "https://",
         "adb -s",
         "/data/adb/",
     ):
         assert forbidden not in rendered
+
+    forbidden_keys = {"serial", "adb_argv", "stdout", "stderr", "device_path", "token", "url", "raw_runner_log"}
+
+    def assert_safe_keys(value) -> None:
+        if isinstance(value, dict):
+            assert forbidden_keys.isdisjoint(value)
+            for item in value.values():
+                assert_safe_keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                assert_safe_keys(item)
+
+    assert_safe_keys(payload)
 
 
 def test_unexpected_programming_failure_is_not_converted_to_valid_not_ready() -> None:
