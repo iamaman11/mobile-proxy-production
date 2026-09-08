@@ -67,6 +67,19 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
+def test_runtime_timeout_adapter_supports_modern_and_legacy_busybox() -> None:
+    module = load_operational_observer()
+    script = module._operational_script("stage4-admin-token-safe-value")
+
+    assert b'if "$BB_BIN" timeout 1 "$BB_BIN" true >/dev/null 2>&1; then' in script
+    assert b'elif "$BB_BIN" timeout -t 1 "$BB_BIN" true >/dev/null 2>&1; then' in script
+    assert b'run_timeout() {' in script
+    assert b'"$BB_BIN" timeout "$timeout_seconds" "$@"' in script
+    assert b'"$BB_BIN" timeout -t "$timeout_seconds" "$@"' in script
+    assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" sh -s' not in script
+    assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" nc' not in script
+
+
 def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
@@ -82,7 +95,7 @@ def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     process_block = script.split(b"stage4_phase=process_count_start", 1)[1].split(
         b"stage4_phase=process_count_done", 1
     )[0]
-    assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" sh -s <<\'STAGE4_PROCESS_COUNT\'' in process_block
+    assert b'run_timeout 5 "$BB_BIN" sh -s <<\'STAGE4_PROCESS_COUNT\'' in process_block
     assert b"/system/bin/ps" not in process_block
     assert b"pgrep" not in process_block
     assert b" sh -c" not in process_block

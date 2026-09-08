@@ -29,10 +29,7 @@ def test_runtime_health_transport_has_independent_hard_timeout() -> None:
 
     assert module._HEALTH_TRANSPORT_TIMEOUT_SECONDS == 5
     assert module._ROOT_SCRIPT_TIMEOUT_SECONDS == 15
-    assert (
-        b'"$BB_BIN" timeout -t 5 "$BB_BIN" nc -w 5 127.0.0.1 8088'
-        in script
-    )
+    assert b'run_timeout 5 "$BB_BIN" nc -w 5 127.0.0.1 8088' in script
     assert b"head -c 16384" in script
     assert b"command -v nc" not in script
 
