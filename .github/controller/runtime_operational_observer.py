@@ -44,6 +44,18 @@ _MAX_ADMIN_TOKEN_CHARS = 4096
 _MAX_HEALTH_RESPONSE_BYTES = 16 * 1024
 _HEALTH_TRANSPORT_TIMEOUT_SECONDS = 5
 _ROOT_SCRIPT_TIMEOUT_SECONDS = 12
+_PHASE_PREFIX = "__stage4_phase="
+_PHASES = (
+    "script_started",
+    "process_counts_done",
+    "busybox_selection_done",
+    "health_transport_start",
+    "health_transport_done",
+    "health_parse_done",
+    "output_done",
+)
+_PHASE_INDEX = {value: index for index, value in enumerate(_PHASES)}
+_NO_PHASE = "no_phase_observed"
 _MALFORMED = "runtime operational observation is malformed"
 _UNAVAILABLE = "runtime operational observation is unavailable"
 
@@ -123,6 +135,7 @@ def _operational_script(admin_token: str) -> bytes:
     token = shlex.quote(_validate_admin_token(admin_token))
     return f'''set -u
 ADMIN_TOKEN={token}
+printf '{_PHASE_PREFIX}script_started\\n'
 
 count_cmdline() {{
   needle="$1"
@@ -141,6 +154,7 @@ watchdog_count="$(count_cmdline '/data/adb/mobile-proxy-node/logs/runtime-watchd
 runtime_supervisor_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/runtime-supervisor')"
 host_daemon_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/host-daemon')"
 sing_box_count="$(count_cmdline '/data/adb/mobile-proxy-node/current/bin/sing-box')"
+printf '{_PHASE_PREFIX}process_counts_done\\n'
 
 health_api_authenticated=false
 readiness_state=unknown
@@ -158,14 +172,17 @@ if [ -x /data/adb/magisk/busybox ]; then
 elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
   BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
 fi
+printf '{_PHASE_PREFIX}busybox_selection_done\\n'
 
 health_raw=""
 if [ -n "$BB_BIN" ]; then
+  printf '{_PHASE_PREFIX}health_transport_start\\n'
   health_raw="$(
     printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
       "$BB_BIN" timeout -t {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} "$BB_BIN" nc -w {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
       "$BB_BIN" head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
   )"
+  printf '{_PHASE_PREFIX}health_transport_done\\n'
 fi
 ADMIN_TOKEN=''
 
@@ -202,6 +219,7 @@ if [ "$health_api_authenticated" = true ]; then
   [ -n "$degradation_reason_code" ] || degradation_reason_code=invalid
 fi
 health_raw=''
+printf '{_PHASE_PREFIX}health_parse_done\\n'
 
 printf 'watchdog_count=%s\\n' "$watchdog_count"
 printf 'runtime_supervisor_count=%s\\n' "$runtime_supervisor_count"
@@ -216,7 +234,40 @@ printf 'proxy_bind_ready=%s\\n' "$proxy_bind_ready"
 printf 'local_serving_ready=%s\\n' "$local_serving_ready"
 printf 'tunnel_owner=%s\\n' "$tunnel_owner"
 printf 'degradation_reason_code=%s\\n' "$degradation_reason_code"
+printf '{_PHASE_PREFIX}output_done\\n'
 '''.encode("utf-8")
+
+
+def _decode_lines(raw: bytes) -> list[str]:
+    try:
+        return raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise phone_target.PhoneTargetUnavailable(_MALFORMED) from exc
+
+
+def _split_phase_lines(raw: bytes) -> tuple[list[str], list[str]]:
+    phases: list[str] = []
+    values: list[str] = []
+    last_index = -1
+    for line in _decode_lines(raw):
+        if line.startswith(_PHASE_PREFIX):
+            phase = line[len(_PHASE_PREFIX) :]
+            index = _PHASE_INDEX.get(phase)
+            if index is None or index <= last_index:
+                raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+            phases.append(phase)
+            last_index = index
+        else:
+            values.append(line)
+    return phases, values
+
+
+def _last_observed_phase(raw: bytes) -> str:
+    try:
+        phases, _ = _split_phase_lines(raw)
+    except phone_target.PhoneTargetUnavailable:
+        return _NO_PHASE
+    return phases[-1] if phases else _NO_PHASE
 
 
 def _parse_bool(raw: str) -> bool | None:
@@ -245,12 +296,11 @@ def _require_enum(raw: str, allowed: frozenset[str]) -> str:
 
 
 def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED) from exc
+    phases, data_lines = _split_phase_lines(raw)
+    if not phases or phases[-1] != "output_done":
+        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
     values: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in data_lines:
         if "=" not in line:
             raise phone_target.PhoneTargetUnavailable(_MALFORMED)
         key, value = line.split("=", 1)
@@ -337,5 +387,6 @@ def observe_runtime_operational_health(
         timeout=_ROOT_SCRIPT_TIMEOUT_SECONDS,
     )
     if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
-        raise phone_target.PhoneTargetUnavailable(_UNAVAILABLE)
+        phase = _last_observed_phase(result.stdout)
+        raise phone_target.PhoneTargetUnavailable(f"{_UNAVAILABLE}; phase={phase}")
     return _parse_output(result.stdout)
