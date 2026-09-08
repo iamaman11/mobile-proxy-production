@@ -150,6 +150,7 @@ elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
   BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
 fi
 [ -n "$BB_BIN" ] || exit 20
+[ -x /system/bin/ps ] || exit 27
 printf '{_PHASE_PREFIX}busybox_selected\\n'
 
 WATCHDOG_NEEDLE='/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh'
@@ -160,7 +161,7 @@ export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_
 printf '{_PHASE_PREFIX}process_count_start\\n'
 process_counts="$(
   "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -c '
-    process_snapshot="$("$BB_BIN" ps -o args 2>/dev/null)" || exit 26
+    process_snapshot="$(/system/bin/ps -A -w -o CMDLINE 2>/dev/null)" || exit 26
     printf "%s\\n" "$process_snapshot" | {{
       watchdog_count=0
       runtime_supervisor_count=0
