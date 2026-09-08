@@ -42,6 +42,8 @@ _HEALTH_PORT = 8088
 _MAX_PROCESS_COUNT = 8
 _MAX_ADMIN_TOKEN_CHARS = 4096
 _MAX_HEALTH_RESPONSE_BYTES = 16 * 1024
+_HEALTH_TRANSPORT_TIMEOUT_SECONDS = 5
+_ROOT_SCRIPT_TIMEOUT_SECONDS = 12
 _MALFORMED = "runtime operational observation is malformed"
 _UNAVAILABLE = "runtime operational observation is unavailable"
 
@@ -150,33 +152,20 @@ local_serving_ready=unknown
 tunnel_owner=unknown
 degradation_reason_code=unknown
 
-NC_MODE=""
+BB_BIN=""
 if [ -x /data/adb/magisk/busybox ]; then
-  NC_BIN=/data/adb/magisk/busybox
-  NC_MODE=busybox
+  BB_BIN=/data/adb/magisk/busybox
 elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
-  NC_BIN=/debug_ramdisk/.magisk/busybox/busybox
-  NC_MODE=busybox
-elif command -v nc >/dev/null 2>&1; then
-  NC_BIN="$(command -v nc)"
-  NC_MODE=direct
+  BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
 fi
 
 health_raw=""
-if [ -n "$NC_MODE" ]; then
-  if [ "$NC_MODE" = busybox ]; then
-    health_raw="$(
-      printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
-        "$NC_BIN" nc -w 5 {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
-        head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
-    )"
-  else
-    health_raw="$(
-      printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
-        "$NC_BIN" -w 5 {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
-        head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
-    )"
-  fi
+if [ -n "$BB_BIN" ]; then
+  health_raw="$(
+    printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
+      "$BB_BIN" timeout -t {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} "$BB_BIN" nc -w {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
+      "$BB_BIN" head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
+  )"
 fi
 ADMIN_TOKEN=''
 
@@ -345,7 +334,7 @@ def observe_runtime_operational_health(
     result = phone_target._run_root_script(
         serial,
         _operational_script(admin_token),
-        timeout=20,
+        timeout=_ROOT_SCRIPT_TIMEOUT_SECONDS,
     )
     if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
         raise phone_target.PhoneTargetUnavailable(_UNAVAILABLE)
