@@ -20,7 +20,7 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "& $usbipdexecutable state 2>&1" in script
     assert "convertfrom-json -erroraction stop" in script
     assert "if (-not (test-approvedusbdeviceattached))" in script
-    assert "& $usbipdexecutable attach --wsl $distro --busid $busid *> $null" in script
+    assert "$rawattach = @(& $usbipdexecutable attach --wsl $distro --busid $busid 2>&1)" in script
     assert "$attachexitcode = $lastexitcode" in script
     assert "--auto-attach" not in script
     assert "mobile-proxy-usb-bridge.log" in script
@@ -33,6 +33,37 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "attach --wsl --distribution" not in script
     for forbidden in ("adb get-state", "adb kill-server", "adb.exe", "udevadm", "usbipd.exe detach"):
         assert forbidden not in script
+
+
+def test_windows_bridge_reduces_attach_output_to_bounded_categories() -> None:
+    script = WINDOWS.read_text(encoding="utf-8").lower()
+    assert "function get-usbipdattachfailurecategory" in script
+    assert "$attachfailurecategory = get-usbipdattachfailurecategory -outputlines $rawattach" in script
+    assert '$rawattach = $null' in script
+    assert 'throw "usbipd attach failed:$attachfailurecategory"' in script
+    assert "write-bridgeevent $rawattach" not in script
+    assert "add-content -literalpath $logpath -value $rawattach" not in script
+    for category in (
+        "wsl2_unavailable",
+        "wsl_support_missing",
+        "usbipd_not_local_drive",
+        "distro_missing",
+        "distro_not_wsl2",
+        "distro_not_running",
+        "kernel_not_usbip_capable",
+        "vhci_unavailable",
+        "wsl_support_mount_failed",
+        "usbip_client_unavailable",
+        "host_address_unavailable",
+        "networking_mode_unsupported",
+        "firewall_blocked",
+        "windows_device_busy",
+        "usbipd_service_unavailable",
+        "usbip_client_attach_failed",
+        "unknown",
+    ):
+        assert category in script
+
 
 def test_windows_installer_updates_only_existing_named_task() -> None:
     script = WINDOWS_INSTALLER.read_text(encoding="utf-8")
