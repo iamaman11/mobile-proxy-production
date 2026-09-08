@@ -77,6 +77,19 @@ The local agent is never deployment mutation authority. Raw/manual destructive A
 
 A repeatable safely machine-observable local-agent dependency is a Controller capability-gap candidate, not automatic framework permission. Prefer the smallest demonstrated target-adapter observation improvement.
 
+### ADB and rooted-shell transport ownership
+
+Do not treat host transport lifecycle, read-only phone observation and phone mutation as one `ADB` category.
+
+- The local ADB daemon is **ephemeral host tooling**. Runner cleanup may remove it between jobs. An accepted `adb start-server` used only to establish the local transport daemon is host-side readiness, not a phone mutation and not evidence that the registered target is healthy.
+- A Controller/local diagnostic must not infer `missing`, `offline`, `unauthorized` or any stronger phone state merely because the ADB daemon was absent. Establish the allowed host transport first, then classify only the registered target through the owning adapter.
+- When a local-agent task requires ADB-backed read-only evidence, the task must state whether host-side ADB server establishment is allowed. Never request ADB-backed evidence while simultaneously forbidding every possible daemon start unless a running daemon is an explicitly proven prerequisite.
+- Rooted runtime mechanics are not free-form shell access. Before constructing or interpreting a rooted local-agent probe, inspect current `.github/controller/phone_target.py` and Controller #97. Current protected code is authoritative over historical diagnostic prose.
+- The current canonical rooted-script transport is the fixed non-PTY argv `adb -s <registered-serial> shell -T su 0`, with the static POSIX script supplied through stdin. Do not invent `su -c`, `sh -c`, `su 0 sh -s`, alternate quoting, PTY, or another root-shell protocol for a Controller-owned observation.
+- A failed root capability/marker proves only that the rooted transport contract was not established for that attempt. It does not prove BusyBox absence, runtime failure, phone corruption or mutation need. Preserve those downstream facts as unknown until the owning transport issue is classified.
+
+The implementation should make transport prerequisites explicit rather than rely on accidental call order. If one target adapter silently depends on another adapter having started ADB earlier, treat that as a demonstrated Controller capability/ownership smell and close the smallest Stage-relevant gap instead of encoding the ordering only in operator memory.
+
 ## Controller-local engineering discipline
 
 - Work on a topic/stage branch.
