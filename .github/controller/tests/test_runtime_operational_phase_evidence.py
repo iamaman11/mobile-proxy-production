@@ -92,6 +92,8 @@ def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     assert b'"$BB_BIN" tr \'\\000\' \'\\n\'' in process_block
     assert b"readable_processes=0" in process_block
     assert b'[ "$readable_processes" -gt 0 ] || exit 26' in process_block
+    assert b'process_count_status="$?"' in process_block
+    assert b'if [ "$process_count_status" -eq 26 ]; then' in process_block
     for needle in (
         b'case "$process_args" in *"\n$WATCHDOG_NEEDLE\n"*',
         b'case "$process_args" in *"\n$RUNTIME_SUPERVISOR_NEEDLE\n"*',
@@ -146,6 +148,28 @@ def test_runtime_process_count_failure_retains_started_phase() -> None:
         assert exc.last_phase == "process_count_start"
     else:
         raise AssertionError("bounded process-count failure must fail closed")
+
+
+def test_runtime_process_count_unreadable_retains_completed_process_phase() -> None:
+    module = load_operational_observer()
+    module.phone_target._probe_root_capability = lambda serial: None
+    module.phone_target._run_root_script = lambda serial, script, timeout: module.phone_target.RootScriptResult(
+        status="completed",
+        returncode=21,
+        stdout=(
+            b"stage4_phase=busybox_selected\n"
+            b"stage4_phase=process_count_start\n"
+            b"stage4_phase=process_count_done\n"
+        ),
+        stderr=b"",
+    )
+
+    try:
+        module.observe_runtime_operational_health("registered-phone", admin_token="safe-token")
+    except module.RuntimeOperationalObservationUnavailable as exc:
+        assert exc.last_phase == "process_count_done"
+    else:
+        raise AssertionError("unreadable process snapshot must retain bounded completed phase")
 
 
 def test_runtime_health_phase_parser_rejects_unallowlisted_or_out_of_order_markers() -> None:
