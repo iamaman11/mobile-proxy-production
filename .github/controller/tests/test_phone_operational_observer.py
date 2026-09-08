@@ -80,10 +80,12 @@ def test_ready_and_degraded_are_independent_from_exact_release_state(tmp_path: P
         assert "stage4-admin-token-secret-value" not in text
         assert "failure_code" not in value
         assert "failure_phase" not in value
+        assert "phone_failure_phase" not in value
         terminal = module._bounded_terminal(value)
         assert f"classification={expected}" in terminal
         assert "failure_code=" not in terminal
         assert "failure_phase=" not in terminal
+        assert "phone_failure_phase=" not in terminal
 
 
 def test_runtime_unavailable_is_valid_bounded_unknown(tmp_path: Path) -> None:
@@ -108,6 +110,7 @@ def test_runtime_unavailable_is_valid_bounded_unknown(tmp_path: Path) -> None:
     assert value["classification"] == "UNKNOWN"
     assert value["failure_code"] == "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE"
     assert value["failure_phase"] == "process_count_start"
+    assert "phone_failure_phase" not in value
     assert value["observation"]["evaluated"] is False
     text = output.read_text(encoding="utf-8")
     assert "registered-phone-secret-identifier" not in text
@@ -116,8 +119,41 @@ def test_runtime_unavailable_is_valid_bounded_unknown(tmp_path: Path) -> None:
     assert "classification=UNKNOWN" in terminal
     assert "failure_code=RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE" in terminal
     assert "failure_phase=process_count_start" in terminal
+    assert "phone_failure_phase=" not in terminal
     assert "registered-phone-secret-identifier" not in terminal
     assert "stage4-admin-token-secret-value" not in terminal
+
+
+def test_diagnostic_phone_target_failure_preserves_only_bounded_phase(tmp_path: Path) -> None:
+    module = load_script()
+
+    def fail(serial: str, *, admin_token: str):
+        raise module.PhoneTargetDiagnosticFailure(
+            module.PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE,
+            "unsafe raw transport detail registered-phone-secret-identifier stage4-admin-token-secret-value",
+        )
+
+    module.observe_runtime_operational_health = fail
+    output = tmp_path / "operational.json"
+    value = module.observe(
+        target="phone-production",
+        release_tag="v0.1.7",
+        controller_revision="c" * 40,
+        serial="registered-phone-secret-identifier",
+        admin_token="stage4-admin-token-secret-value",
+        output=output,
+    )
+    assert value["classification"] == "UNKNOWN"
+    assert value["failure_code"] == "PHONE_TARGET_UNAVAILABLE"
+    assert value["phone_failure_phase"] == "REGISTERED_DEVICE_NOT_DEVICE"
+    assert "failure_phase" not in value
+    text = output.read_text(encoding="utf-8")
+    assert "unsafe raw transport detail" not in text
+    assert "registered-phone-secret-identifier" not in text
+    assert "stage4-admin-token-secret-value" not in text
+    terminal = module._bounded_terminal(value)
+    assert "phone_failure_phase=REGISTERED_DEVICE_NOT_DEVICE" in terminal
+    assert "unsafe raw transport detail" not in terminal
 
 
 def test_generic_phone_target_failure_does_not_copy_raw_exception(tmp_path: Path) -> None:
@@ -140,12 +176,14 @@ def test_generic_phone_target_failure_does_not_copy_raw_exception(tmp_path: Path
     )
     assert value["classification"] == "UNKNOWN"
     assert value["failure_code"] == "PHONE_TARGET_UNAVAILABLE"
+    assert "phone_failure_phase" not in value
     text = output.read_text(encoding="utf-8")
     assert "unsafe raw transport detail" not in text
     assert "registered-phone-secret-identifier" not in text
     assert "stage4-admin-token-secret-value" not in text
     terminal = module._bounded_terminal(value)
     assert "failure_code=PHONE_TARGET_UNAVAILABLE" in terminal
+    assert "phone_failure_phase=" not in terminal
     assert "unsafe raw transport detail" not in terminal
     assert "registered-phone-secret-identifier" not in terminal
     assert "stage4-admin-token-secret-value" not in terminal
@@ -160,6 +198,16 @@ def test_bounded_terminal_rejects_unknown_metadata() -> None:
             "classification": "UNKNOWN",
             "failure_code": "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE",
             "failure_phase": "raw-shell-stderr",
+        },
+        {
+            "classification": "UNKNOWN",
+            "failure_code": "PHONE_TARGET_UNAVAILABLE",
+            "phone_failure_phase": "raw-adb-stderr",
+        },
+        {
+            "classification": "UNKNOWN",
+            "failure_code": "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE",
+            "phone_failure_phase": "REGISTERED_DEVICE_NOT_DEVICE",
         },
     ):
         try:
@@ -205,6 +253,7 @@ def test_workflow_is_standalone_read_only_and_does_not_enrich_release_observatio
         "exact_phone_release_state_observed",
         "phone_mutation_performed",
         "provider_mutation_performed",
+        "phone_failure_phase",
     ):
         assert required in source
     for forbidden in (
@@ -235,6 +284,7 @@ def test_evidence_transport_retry_reuses_one_completed_phone_observation() -> No
     assert "Stage 4 operational evidence transport failed after bounded retry" in source
     assert "failure_code={failure_code}" in source
     assert "failure_phase={failure_phase}" in source
+    assert "phone_failure_phase={phone_failure_phase}" in source
 
 
 def test_evidence_schema_contains_only_bounded_unknown_failure_metadata(tmp_path: Path) -> None:
