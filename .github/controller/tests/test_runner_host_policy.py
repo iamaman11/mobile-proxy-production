@@ -48,6 +48,22 @@ def test_windows_installer_updates_only_existing_named_task() -> None:
     assert "$ErrorActionPreference = 'Continue'" in script
     assert "$bindExitCode = $LASTEXITCODE" in script
 
+
+def test_windows_installer_hardens_existing_bridge_task_lifetime() -> None:
+    script = WINDOWS_INSTALLER.read_text(encoding="utf-8")
+    assert "$settings = New-ScheduledTaskSettingsSet" in script
+    assert "-RestartCount 3" in script
+    assert "-RestartInterval (New-TimeSpan -Minutes 1)" in script
+    assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in script
+    assert "-StartWhenAvailable" in script
+    assert "-AllowStartIfOnBatteries" in script
+    assert "-DontStopIfGoingOnBatteries" in script
+    assert "-MultipleInstances IgnoreNew" in script
+    assert "-Settings $settings" in script
+    assert script.count("New-ScheduledTaskTrigger") == 1
+    assert "New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME" in script
+
+
 def test_watchdog_is_bounded_and_never_reconfigures_runner_or_phone() -> None:
     script = WATCHDOG.read_text(encoding="utf-8")
     assert "readonly STALE_SECONDS=300" in script
