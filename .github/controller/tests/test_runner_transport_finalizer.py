@@ -28,13 +28,28 @@ def finalizer():
     return _load("finalize_runner_transport_observation_tests", SCRIPTS / "finalize_runner_transport_observation.py")
 
 
+def _active_probes() -> dict[str, object]:
+    return {
+        "roles": [
+            {
+                "role": role,
+                "attempts": [{"attempt": 1, "result": "SUCCESS", "duration_ms": 5}],
+                "final_result": "SUCCESS",
+            }
+            for role in ("GITHUB_API", "REPOSITORY_TRANSPORT", "ACTION_DOWNLOAD", "ACTIONS_RESULTS")
+        ],
+        "retry_observed": False,
+        "budget_exhausted": False,
+    }
+
+
 def _core(*, watchdog_readable: bool = True) -> dict[str, object]:
     return {
         "schema": "runner-transport-observation.v1",
         "controller_revision": "a" * 40,
         "observation_started_at_utc": "2026-09-08T20:00:00Z",
         "observation_finished_at_utc": "2026-09-08T20:00:01Z",
-        "classification": "HEALTHY",
+        "classification": "HEALTHY" if watchdog_readable else "TRANSPORT_UNAVAILABLE",
         "session": {
             "diagnostic_window": "CURRENT_LISTENER_SESSION",
             "evidence_available": True,
@@ -68,7 +83,7 @@ def _core(*, watchdog_readable: bool = True) -> dict[str, object]:
             "context_counters": {"expected_local_poll_cancellation": 0},
             "failure_classes": [],
             "repeated_transport_error": False,
-            "active_probes": {"roles": [], "retry_observed": False, "budget_exhausted": False},
+            "active_probes": _active_probes(),
         },
         "capabilities": {
             "active_probe_budget_seconds": 120,
@@ -92,7 +107,7 @@ def _core(*, watchdog_readable: bool = True) -> dict[str, object]:
         "watchdog": {
             "timer_state": "ACTIVE",
             "state_readable": watchdog_readable,
-            "decision": "UNKNOWN",
+            "decision": "HEALTHY" if watchdog_readable else "UNKNOWN",
             "cooldown_active": False if watchdog_readable else None,
             "restart_budget_remaining": 3 if watchdog_readable else None,
             "post_restart_grace_active": False if watchdog_readable else None,
@@ -163,6 +178,26 @@ def _write_inputs(root: Path, core: dict[str, object]) -> tuple[Path, Path, Path
     jobs_path.write_text(json.dumps(_jobs(), sort_keys=True) + "\n", encoding="utf-8")
     digest = hashlib.sha256(core_path.read_bytes()).hexdigest()
     return core_path, jobs_path, output_path, digest
+
+
+def _assert_finalization_rejected(core: dict[str, object]) -> None:
+    module = finalizer()
+    with tempfile.TemporaryDirectory() as raw:
+        core_path, jobs_path, output_path, digest = _write_inputs(Path(raw), core)
+        try:
+            module.finalize(
+                core_path=core_path,
+                jobs_path=jobs_path,
+                output_path=output_path,
+                expected_core_sha256=digest,
+                source_comment_created_at="2026-09-08T20:00:00Z",
+                artifact_upload_retry_observed=False,
+            )
+        except (AssertionError, ValueError):
+            pass
+        else:
+            raise AssertionError("runner transport finalizer accepted malformed core evidence")
+        assert not output_path.exists()
 
 
 def test_finalizer_uses_exact_job_step_timestamps_and_keeps_broker_unknown() -> None:
@@ -259,6 +294,37 @@ def test_ambiguous_observer_job_lineage_fails_closed() -> None:
     except ValueError:
         return
     raise AssertionError("runner transport finalizer accepted ambiguous observer job lineage")
+
+
+def test_nested_extra_field_is_rejected_before_final_artifact() -> None:
+    core = _core()
+    core["session"]["unexpected"] = True
+    _assert_finalization_rejected(core)
+
+
+def test_healthy_core_cannot_hide_unknown_watchdog_decision() -> None:
+    core = _core()
+    core["watchdog"]["decision"] = "UNKNOWN"
+    _assert_finalization_rejected(core)
+
+
+def test_healthy_core_requires_complete_active_probe_role_set() -> None:
+    core = _core()
+    core["transport"]["active_probes"]["roles"].pop()
+    _assert_finalization_rejected(core)
+
+
+def test_future_listener_session_is_rejected() -> None:
+    core = _core()
+    core["session"]["listener_session_started_at_utc"] = "2026-09-08T21:00:00Z"
+    core["session"]["last_successful_session_establishment_at_utc"] = "2026-09-08T21:00:01Z"
+    _assert_finalization_rejected(core)
+
+
+def test_counter_boolean_is_not_accepted_as_integer_evidence() -> None:
+    core = _core()
+    core["transport"]["error_counters"]["tls_error"] = False
+    _assert_finalization_rejected(core)
 
 
 def main() -> int:
