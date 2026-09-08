@@ -31,8 +31,39 @@ function Write-BridgeEvent {
     Write-Output $line
 }
 
+function Get-UsbipdAttachFailureCategory {
+    param([Parameter(Mandatory = $true)][object[]]$OutputLines)
+
+    # usbipd output may contain device identifiers, distribution names and host
+    # addresses. Keep it only in process memory, reduce it to one allowlisted
+    # generic category, then discard it. Never persist the raw command output.
+    $text = ($OutputLines | ForEach-Object { [string]$_ }) -join "`n"
+    switch -Regex ($text) {
+        'Windows Subsystem for Linux version 2 is not available' { return 'wsl2_unavailable' }
+        'WSL support was not installed' { return 'wsl_support_missing' }
+        "Option '--wsl' requires that this software is installed on a local drive" { return 'usbipd_not_local_drive' }
+        'The WSL distribution .+ does not exist' { return 'distro_missing' }
+        'selected WSL distribution is using (WSL 1|unsupported WSL)' { return 'distro_not_wsl2' }
+        'selected WSL distribution is not running' { return 'distro_not_running' }
+        'WSL kernel is not USBIP capable' { return 'kernel_not_usbip_capable' }
+        "The 'modprobe' command is unavailable|Loading vhci_hcd failed" { return 'vhci_unavailable' }
+        'Mounting .+ within WSL failed' { return 'wsl_support_mount_failed' }
+        "Unable to run 'usbip' client tool" { return 'usbip_client_unavailable' }
+        'Unable to determine host address' { return 'host_address_unavailable' }
+        'Networking mode .+ is not supported' { return 'networking_mode_unsupported' }
+        'A firewall appears to be blocking the connection' { return 'firewall_blocked' }
+        'Device busy|appears to be used by Windows' { return 'windows_device_busy' }
+        'service.+not running|server.+not running' { return 'usbipd_service_unavailable' }
+        'Failed to attach device with busid' { return 'usbip_client_attach_failed' }
+        default { return 'unknown' }
+    }
+}
+
 function Get-BridgeFailureCategory {
     param([Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    if ($ErrorRecord.Exception.Message -match '^usbipd attach failed:([a-z0-9_]+)$') {
+        return "attach_$($Matches[1])"
+    }
     switch -Regex ($ErrorRecord.Exception.Message) {
         '^usbipd inventory unavailable$' { return 'inventory_unavailable' }
         '^usbipd state unavailable$' { return 'state_unavailable' }
@@ -89,10 +120,15 @@ while ($true) {
         if (-not (Test-ApprovedUsbDeviceAttached)) {
             $previousErrorAction = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
-            & $UsbipdExecutable attach --wsl $Distro --busid $BusId *> $null
+            $rawAttach = @(& $UsbipdExecutable attach --wsl $Distro --busid $BusId 2>&1)
             $attachExitCode = $LASTEXITCODE
             $ErrorActionPreference = $previousErrorAction
-            if ($attachExitCode -ne 0) { throw 'usbipd attach failed' }
+            if ($attachExitCode -ne 0) {
+                $attachFailureCategory = Get-UsbipdAttachFailureCategory -OutputLines $rawAttach
+                $rawAttach = $null
+                throw "usbipd attach failed:$attachFailureCategory"
+            }
+            $rawAttach = $null
             Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
         }
     }
