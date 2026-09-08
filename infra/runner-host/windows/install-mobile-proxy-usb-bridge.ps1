@@ -35,7 +35,15 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
 if ($PSCmdlet.ShouldProcess($TaskName, 'Update existing owner-interactive bridge task')) {
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    Set-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Trigger $trigger | Out-Null
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew
+    Set-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Trigger $trigger -Settings $settings | Out-Null
     Start-ScheduledTask -TaskName $TaskName
 }
-Write-Output 'mobile-proxy USB bridge installed; existing owner-logon task retained.'
+Write-Output 'mobile-proxy USB bridge installed; existing owner-logon task retained with bounded restart policy.'
