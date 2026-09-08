@@ -105,6 +105,10 @@ function Ensure-WslDistroRunning {
     if ($LASTEXITCODE -ne 0) { throw 'wsl distro unavailable' }
 }
 
+# Record only a generic process-lifetime marker. This intentionally contains
+# no device, distribution, user, process, or host identity.
+Write-BridgeEvent 'bridge_started'
+
 # Keep an idempotent attach lease for precisely one allowlisted device. This
 # avoids both usbipd's event-loop gap after WSL restarts and JSON state parsing
 # differences between task-host PowerShell versions. This script never owns
