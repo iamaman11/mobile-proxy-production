@@ -152,6 +152,24 @@ fi
 [ -n "$BB_BIN" ] || exit 20
 printf '{_PHASE_PREFIX}busybox_selected\\n'
 
+TIMEOUT_STYLE=""
+if "$BB_BIN" timeout 1 "$BB_BIN" true >/dev/null 2>&1; then
+  TIMEOUT_STYLE=positional
+elif "$BB_BIN" timeout -t 1 "$BB_BIN" true >/dev/null 2>&1; then
+  TIMEOUT_STYLE=legacy
+fi
+[ -n "$TIMEOUT_STYLE" ] || exit 24
+
+run_timeout() {{
+  timeout_seconds="$1"
+  shift
+  if [ "$TIMEOUT_STYLE" = positional ]; then
+    "$BB_BIN" timeout "$timeout_seconds" "$@"
+  else
+    "$BB_BIN" timeout -t "$timeout_seconds" "$@"
+  fi
+}}
+
 WATCHDOG_NEEDLE='/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh'
 RUNTIME_SUPERVISOR_NEEDLE='/data/adb/mobile-proxy-node/current/bin/runtime-supervisor'
 HOST_DAEMON_NEEDLE='/data/adb/mobile-proxy-node/current/bin/host-daemon'
@@ -159,7 +177,7 @@ SING_BOX_NEEDLE='/data/adb/mobile-proxy-node/current/bin/sing-box'
 export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_BOX_NEEDLE
 printf '{_PHASE_PREFIX}process_count_start\\n'
 process_counts="$(
-  "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -s <<'STAGE4_PROCESS_COUNT'
+  run_timeout {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -s <<'STAGE4_PROCESS_COUNT'
 watchdog_count=0
 runtime_supervisor_count=0
 host_daemon_count=0
@@ -228,7 +246,7 @@ health_raw=""
 printf '{_PHASE_PREFIX}health_transport_start\\n'
 health_raw="$(
   printf 'GET /v1/health HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n' "$ADMIN_TOKEN" |
-    "$BB_BIN" timeout -t {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} "$BB_BIN" nc -w {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
+    run_timeout {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} "$BB_BIN" nc -w {_HEALTH_TRANSPORT_TIMEOUT_SECONDS} {_HEALTH_HOST} {_HEALTH_PORT} 2>/dev/null |
     "$BB_BIN" head -c {_MAX_HEALTH_RESPONSE_BYTES} || true
 )"
 printf '{_PHASE_PREFIX}health_transport_done\\n'
