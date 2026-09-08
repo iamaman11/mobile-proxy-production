@@ -16,6 +16,17 @@ from phone_target import PhoneTargetUnavailable, _probe_root_capability, _requir
 from runner_transport_evidence import classify_preflight, collect_runner_transport_evidence
 
 
+_ALLOWED_FAILURE_PHASES = frozenset(
+    {
+        "command_provenance",
+        "runner_transport_evidence",
+        "target_binding",
+        "registered_device_state",
+        "root_contract",
+    }
+)
+
+
 def _parse_created_at(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -60,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         "artifact_upload_required": True,
         "runner_assignment_latency_ms": None,
     }
+    failure_phase = "command_provenance"
 
     try:
         created_at = _parse_created_at(args.source_comment_created_at)
@@ -68,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             raise PhoneTargetUnavailable("command provenance clock differs")
         transport["runner_assignment_latency_ms"] = assignment_latency_ms
 
+        failure_phase = "runner_transport_evidence"
         runner_temp = os.environ.get("RUNNER_TEMP", "")
         transport.update(
             collect_runner_transport_evidence(
@@ -76,13 +89,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+        failure_phase = "target_binding"
         serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
         if not serial:
             raise PhoneTargetUnavailable("registered production phone binding is unavailable")
+
+        failure_phase = "registered_device_state"
         phase = time.monotonic()
         _require_device(serial)
         timings["registered_device_state"] = int((time.monotonic() - phase) * 1000)
         safety["phone_access_performed"] = True
+
+        failure_phase = "root_contract"
         phase = time.monotonic()
         _probe_root_capability(serial)
         timings["root_capability"] = int((time.monotonic() - phase) * 1000)
@@ -103,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PHONE_TRANSPORT_PREFLIGHT classification={classification}")
         return 0
     except PhoneTargetUnavailable as exc:
+        if failure_phase not in _ALLOWED_FAILURE_PHASES:
+            raise AssertionError("phone transport failure phase differs")
         timings["total"] = int((time.monotonic() - started) * 1000)
         _write(
             args.output,
@@ -111,12 +131,13 @@ def main(argv: list[str] | None = None) -> int:
                 "controller_revision": args.controller_revision,
                 "classification": "NOT_READY",
                 "failure_class": exc.__class__.__name__,
+                "failure_phase": failure_phase,
                 "timing_ms": timings,
                 "transport": transport,
                 "safety": safety,
             },
         )
-        print("PHONE_TRANSPORT_PREFLIGHT classification=NOT_READY")
+        print(f"PHONE_TRANSPORT_PREFLIGHT classification=NOT_READY failure_phase={failure_phase}")
         return 0
 
 
