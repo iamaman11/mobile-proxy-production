@@ -29,6 +29,16 @@ jobs:
             .github/controller/tests/test_runner_transport_evidence.py
           python3 .github/controller/tests/test_runner_transport_evidence.py
 
+      - name: Compile and test standalone runner transport observer core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/controller/runner_transport_probe.py \
+            .github/scripts/observe_runner_transport.py \
+            .github/controller/tests/test_runner_transport_observer.py
+          python3 .github/controller/tests/test_runner_transport_observer.py
+
       - name: Test service-scoped WSL proxy environment
         shell: bash
         run: |
@@ -41,11 +51,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import json
           from pathlib import Path
 
           owner = Path('.github/controller/runner_transport_evidence.py').read_text(encoding='utf-8')
           adapter = Path('.github/scripts/phone_transport_preflight.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/phone-transport-preflight.yml').read_text(encoding='utf-8')
+          observer = Path('.github/scripts/observe_runner_transport.py').read_text(encoding='utf-8')
+          probe = Path('.github/controller/runner_transport_probe.py').read_text(encoding='utf-8')
+          observer_policy = json.loads(Path('.github/production/runner-transport-policy.json').read_text(encoding='utf-8'))
 
           for required in (
               'ASSIGNMENT_NORMAL_SLO_MS = 20_000',
@@ -67,6 +81,7 @@ jobs:
               '_safe_recent_paths',
               'replace(" ", "T")',
               'if not window_unresolved:',
+              'expected_local_poll_cancellation',
           ):
               if required not in owner:
                   raise SystemExit('runner transport evidence owner invariant missing: ' + required)
@@ -111,7 +126,47 @@ jobs:
               if required not in workflow:
                   raise SystemExit('phone transport workflow invariant missing: ' + required)
 
-          combined = '\n'.join((owner, adapter, workflow)).lower()
+          if observer_policy != {
+              'active_probe_budget_seconds': 120,
+              'attempt_timeout_seconds': 10,
+              'classifications': ['HEALTHY', 'TRANSPORT_DEGRADED', 'TRANSPORT_UNAVAILABLE'],
+              'destinations': [
+                  {'role': 'GITHUB_API', 'url': 'https://api.github.com/'},
+                  {'role': 'REPOSITORY_TRANSPORT', 'url': 'https://github.com/'},
+                  {'role': 'ACTION_DOWNLOAD', 'url': 'https://codeload.github.com/'},
+                  {'role': 'ACTIONS_RESULTS', 'url': 'https://results-receiver.actions.githubusercontent.com/'},
+              ],
+              'failure_domains': ['UNKNOWN', 'RUNNER_SERVICE', 'DNS_RESOLUTION', 'TLS_VALIDATION'],
+              'max_concurrency': 2,
+              'max_destinations': 5,
+              'max_attempts_per_destination': 3,
+              'schema': 'runner-transport-policy.v1',
+              'tls_verification_required': True,
+          }:
+              raise SystemExit('runner transport observer policy differs')
+
+          for required in (
+              'runner-transport-observation.v1',
+              'BROKER_ASSIGNMENT_TIMESTAMP_UNAVAILABLE',
+              'CURRENT_SESSION_EVIDENCE_INCOMPLETE',
+              'SERVICE_ENVIRONMENT_UNAVAILABLE',
+              'HEALTHY', 'TRANSPORT_DEGRADED', 'TRANSPORT_UNAVAILABLE',
+              'raw_runner_log_recorded', 'raw_transport_url_recorded',
+              'network_configuration_changed', 'automatic_recovery_performed',
+          ):
+              if required not in observer:
+                  raise SystemExit('runner transport observer invariant missing: ' + required)
+
+          for required in (
+              'RUNNER_SERVICE = "mobile-proxy-phone-runner.service"',
+              'WATCHDOG_TIMER = "mobile-proxy-runner-transport-health.timer"',
+              'systemctl', 'show', '--retry', '0', '--proto', '=https',
+              'service_environment_observed', 'expected_local_poll_cancellation',
+          ):
+              if required not in probe and required != 'expected_local_poll_cancellation':
+                  raise SystemExit('runner transport probe invariant missing: ' + required)
+
+          combined = '\n'.join((owner, adapter, workflow, observer, probe)).lower()
           forbidden = (
               'systemctl restart',
               'service restart',
@@ -123,6 +178,10 @@ jobs:
               'continue-on-error:',
               'adb install',
               'adb push',
+              'curl -k',
+              '--insecure',
+              'ip route add',
+              'ip route replace',
           )
           present = [item for item in forbidden if item in combined]
           if present:
