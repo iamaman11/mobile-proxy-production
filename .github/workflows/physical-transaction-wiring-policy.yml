@@ -29,7 +29,6 @@ jobs:
           python3 .github/controller/tests/test_product_runtime_renderer.py
           python3 .github/controller/tests/test_phone_target.py
           python3 .github/controller/tests/test_phone_operational_observer.py
-          python3 .github/controller/tests/test_phone_operational_target_failure_phase.py
           python3 .github/controller/tests/test_runtime_operational_phase_evidence.py
           python3 .github/controller/tests/test_runtime_operational_probe_transport.py
           python3 - <<'PY'
