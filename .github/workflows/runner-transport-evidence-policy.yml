@@ -38,8 +38,10 @@ jobs:
             .github/controller/runner_transport_probe.py \
             .github/scripts/observe_runner_transport.py \
             .github/controller/tests/test_runner_transport_observer.py \
+            .github/controller/tests/test_runner_transport_watchdog_classification.py \
             .github/controller/tests/test_runner_watchdog_projection.py
           python3 .github/controller/tests/test_runner_transport_observer.py
+          python3 .github/controller/tests/test_runner_transport_watchdog_classification.py
           python3 .github/controller/tests/test_runner_watchdog_projection.py
 
       - name: Compile and test runner transport artifact finalization
@@ -168,6 +170,8 @@ jobs:
               'SERVICE_ENVIRONMENT_UNAVAILABLE',
               'WATCHDOG_STATE_UNAVAILABLE',
               'WATCHDOG_DECISION_UNKNOWN',
+              '_watchdog_recovery_context',
+              'restart_count_window',
               'HEALTHY', 'TRANSPORT_DEGRADED', 'TRANSPORT_UNAVAILABLE',
               'raw_runner_log_recorded', 'raw_transport_url_recorded',
               'network_configuration_changed', 'automatic_recovery_performed',
