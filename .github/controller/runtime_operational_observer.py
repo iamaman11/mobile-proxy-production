@@ -150,7 +150,6 @@ elif [ -x /debug_ramdisk/.magisk/busybox/busybox ]; then
   BB_BIN=/debug_ramdisk/.magisk/busybox/busybox
 fi
 [ -n "$BB_BIN" ] || exit 20
-[ -x /system/bin/ps ] || exit 27
 printf '{_PHASE_PREFIX}busybox_selected\\n'
 
 WATCHDOG_NEEDLE='/data/adb/mobile-proxy-node/logs/runtime-watchdog.sh'
@@ -160,24 +159,40 @@ SING_BOX_NEEDLE='/data/adb/mobile-proxy-node/current/bin/sing-box'
 export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_BOX_NEEDLE
 printf '{_PHASE_PREFIX}process_count_start\\n'
 process_counts="$(
-  "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -c '
-    process_snapshot="$(/system/bin/ps -A -w -o CMDLINE 2>/dev/null)" || exit 26
-    printf "%s\\n" "$process_snapshot" | {{
-      watchdog_count=0
-      runtime_supervisor_count=0
-      host_daemon_count=0
-      sing_box_count=0
-      while IFS= read -r process_line; do
-        case "$process_line" in *"$WATCHDOG_NEEDLE"*) watchdog_count=$((watchdog_count + 1)) ;; esac
-        case "$process_line" in *"$RUNTIME_SUPERVISOR_NEEDLE"*) runtime_supervisor_count=$((runtime_supervisor_count + 1)) ;; esac
-        case "$process_line" in *"$HOST_DAEMON_NEEDLE"*) host_daemon_count=$((host_daemon_count + 1)) ;; esac
-        case "$process_line" in *"$SING_BOX_NEEDLE"*) sing_box_count=$((sing_box_count + 1)) ;; esac
-      done
-      printf "%s %s %s %s" \
-        "$watchdog_count" "$runtime_supervisor_count" "$host_daemon_count" "$sing_box_count"
-    }}
-    process_snapshot=""
-  ' 2>/dev/null
+  "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -s <<'STAGE4_PROCESS_COUNT'
+watchdog_count=0
+runtime_supervisor_count=0
+host_daemon_count=0
+sing_box_count=0
+readable_processes=0
+
+for process_dir in /proc/[0-9]*; do
+  cmdline_path="$process_dir/cmdline"
+  [ -r "$cmdline_path" ] || continue
+  process_args="$("$BB_BIN" tr '\\000' '\\n' < "$cmdline_path" 2>/dev/null)" || continue
+  readable_processes=$((readable_processes + 1))
+  process_args="
+$process_args
+"
+  case "$process_args" in *"
+$WATCHDOG_NEEDLE
+"*) watchdog_count=$((watchdog_count + 1)) ;; esac
+  case "$process_args" in *"
+$RUNTIME_SUPERVISOR_NEEDLE
+"*) runtime_supervisor_count=$((runtime_supervisor_count + 1)) ;; esac
+  case "$process_args" in *"
+$HOST_DAEMON_NEEDLE
+"*) host_daemon_count=$((host_daemon_count + 1)) ;; esac
+  case "$process_args" in *"
+$SING_BOX_NEEDLE
+"*) sing_box_count=$((sing_box_count + 1)) ;; esac
+  process_args=''
+done
+
+[ "$readable_processes" -gt 0 ] || exit 26
+printf "%s %s %s %s" \
+  "$watchdog_count" "$runtime_supervisor_count" "$host_daemon_count" "$sing_box_count"
+STAGE4_PROCESS_COUNT
 )" || exit 21
 set -- $process_counts
 [ "$#" -eq 4 ] || exit 22
