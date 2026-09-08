@@ -65,3 +65,53 @@ runner, changes labels, changes udev rules, or invokes ADB.
 Use GitHub's canonical read-only phone observation command to prove the full
 path. These host facilities never replace Controller release, intent, lock,
 and postcondition contracts.
+
+## Existing Windows proxy for the WSL runner
+
+Controller #169 reproduced TLS termination using Git under the existing runner
+identity on the direct WSL path. The same Git with the existing Windows proxy
+passed the bounded comparison. The interactive shell already uses this proxy;
+systemd does not inherit the shell startup script.
+
+`wsl/mobile-proxy-phone-runner-proxy.conf` adds only a startup preparation command
+and an EnvironmentFile to the existing runner service. The root-owned helper
+resolves the current private IPv4 default gateway at each service start and
+atomically writes a root-only runtime environment for the existing mixed proxy
+on port 17890. It refuses missing/ambiguous/invalid routes. It never falls back
+to an unconfigured direct path. Lowercase and uppercase HTTP/HTTPS/SOCKS proxy
+variables agree; loopback traffic remains local. Existing ExecStart, service
+identity, USB permissions, TLS verification and .NET settings are preserved.
+
+This is an opt-in infrastructure change, not observation or automatic recovery.
+Install only from an accepted immutable Controller revision after verifying the
+existing Windows proxy owner, endpoint and route. The installer does not restart:
+
+```bash
+sudo bash infra/runner-host/wsl/install-runner-proxy.sh --install
+```
+
+After confirming the runner is idle, one controlled restart of the existing
+service activates the environment. Verify the actual Listener environment and
+fresh session, then real checkout/action/artifact jobs and the governed phone
+preflight. Do not treat service liveness or successful short probes as acceptance.
+No global Git configuration change is required: Git inherits the proxy environment.
+
+Rollback from the same revision removes only its exact matching added helper and
+drop-in; it refuses to overwrite/remove another revision. It reloads systemd but
+does not restart the service:
+
+```bash
+sudo bash infra/runner-host/wsl/install-runner-proxy.sh --rollback
+```
+
+An idle controlled restart then restores the previous service environment. The
+unused root-only file in `/run` disappears at reboot and is not referenced after
+rollback. The original service and all other drop-ins remain intact.
+
+The existing Windows edge-platform lifecycle is owner-logon based and manages
+remote tunnels. This change does not start/reconfigure that platform, change its
+selector, provision a VM, or claim unattended pre-logon availability. A `direct`
+selector label may identify a remote tunnel with direct VM egress, not local
+Windows direct internet. If that upstream is unavailable the runner's proxy
+connections fail; the installation does not bypass it or acquire provider/recovery
+authority. Independent Windows/USB lifecycle acceptance remains in Stage 4.

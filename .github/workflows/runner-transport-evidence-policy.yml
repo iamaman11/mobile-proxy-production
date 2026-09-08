@@ -29,6 +29,13 @@ jobs:
             .github/controller/tests/test_runner_transport_evidence.py
           python3 .github/controller/tests/test_runner_transport_evidence.py
 
+      - name: Test service-scoped WSL proxy environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n infra/runner-host/wsl/install-runner-proxy.sh
+          python3 -B .github/controller/tests/test_runner_proxy_environment.py
+
       - name: Prove transport evidence and no-remediation boundary
         shell: bash
         run: |
