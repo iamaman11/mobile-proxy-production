@@ -8,6 +8,7 @@
         "deploy-product-release",
         "verify-product-release",
         "observe-phone-release",
+        "observe-phone-operational",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release"

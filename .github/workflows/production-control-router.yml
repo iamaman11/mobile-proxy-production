@@ -194,6 +194,29 @@ jobs:
       source_comment_url: ${{ github.event.comment.html_url }}
     secrets: inherit
 
+  observe-phone-operational:
+    name: Route independent Stage 4 phone operational observation
+    needs: route
+    if: >-
+      needs.route.outputs.handler == 'workflow_call' &&
+      needs.route.outputs.route_id == 'observe-phone-operational' &&
+      needs.route.outputs.operation == 'observe-phone-operational' &&
+      needs.route.outputs.operation_class == 'OBSERVE' &&
+      needs.route.outputs.read_only == 'true' &&
+      needs.route.outputs.destructive == 'false'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/phone-operational-observation.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      target: ${{ needs.route.outputs.target }}
+      release_tag: ${{ needs.route.outputs.release_tag }}
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+    secrets: inherit
+
   reconcile-phone-release:
     name: Route target-read-only Stage 4 phone Product Release reconcile
     needs: route
