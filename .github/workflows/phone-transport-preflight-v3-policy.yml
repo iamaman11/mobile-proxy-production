@@ -78,7 +78,6 @@ jobs:
           required_script = (
               'phone-transport-preflight.v3',
               '"phone_failure_phase": phone_failure_phase.value',
-              '"workflow_execution": "success"',
               '"automatic_recovery_performed": False',
               '_probe_root_stdout_contract',
               '_probe_root_stderr_exit_contract',
@@ -86,6 +85,8 @@ jobs:
           missing = [item for item in required_script if item not in script]
           if missing:
               raise SystemExit('phone transport v3 script contract missing: ' + ', '.join(missing))
+          if '"workflow_execution": "success"' in script:
+              raise SystemExit('pre-terminal artifact must not claim final workflow success')
 
           required_workflow = (
               "value.get('schema') != 'phone-transport-preflight.v3'",
@@ -93,6 +94,7 @@ jobs:
               "classification != 'NOT_READY' and phone_failure_phase != 'NONE'",
               'uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
               'if-no-files-found: error',
+              'Record workflow and phone readiness semantics',
               'workflow_execution=success',
               'phone_readiness=',
               'automatic_recovery_performed=false',
@@ -100,6 +102,9 @@ jobs:
           missing = [item for item in required_workflow if item not in workflow]
           if missing:
               raise SystemExit('phone transport v3 workflow contract missing: ' + ', '.join(missing))
+
+          if workflow.index('Preserve mandatory bounded transport evidence') > workflow.index('Record workflow and phone readiness semantics'):
+              raise SystemExit('workflow success semantics must be recorded only after mandatory artifact upload')
 
           combined = (script + '\n' + workflow).lower()
           forbidden_recovery = (
