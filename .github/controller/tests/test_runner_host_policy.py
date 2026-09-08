@@ -8,6 +8,9 @@ WINDOWS_INSTALLER = ROOT / "infra/runner-host/windows/install-mobile-proxy-usb-b
 WATCHDOG = ROOT / "infra/runner-host/wsl/runner-transport-health.sh"
 UNIT = ROOT / "infra/runner-host/wsl/mobile-proxy-runner-transport-health.service"
 TIMER = ROOT / "infra/runner-host/wsl/mobile-proxy-runner-transport-health.timer"
+ANDROID_USB_DROPIN = ROOT / "infra/runner-host/wsl/mobile-proxy-phone-runner-android-usb-permissions.conf"
+ANDROID_USB_INSTALLER = ROOT / "infra/runner-host/wsl/install-runner-android-usb-permissions.sh"
+
 
 def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     script = WINDOWS.read_text(encoding="utf-8").lower()
@@ -126,6 +129,7 @@ def test_watchdog_is_bounded_and_never_reconfigures_runner_or_phone() -> None:
     for forbidden in ("config.sh", "registration", "usbipd", "adb ", "adb\n", "curl ", "iptables"):
         assert forbidden not in script.lower()
 
+
 def test_watchdog_runs_as_a_root_owned_timer_with_hardening() -> None:
     unit = UNIT.read_text(encoding="utf-8")
     timer = TIMER.read_text(encoding="utf-8")
@@ -133,3 +137,46 @@ def test_watchdog_runs_as_a_root_owned_timer_with_hardening() -> None:
     assert "ProtectSystem=strict" in unit
     assert "OnUnitActiveSec=1min" in timer
     assert "Persistent=true" in timer
+
+
+def test_android_usb_permission_dropin_is_runner_service_scoped() -> None:
+    dropin = ANDROID_USB_DROPIN.read_text(encoding="utf-8")
+    assert dropin == "[Service]\nSupplementaryGroups=plugdev\n"
+
+
+def test_android_usb_permission_installer_is_least_privilege_and_bounded() -> None:
+    script = ANDROID_USB_INSTALLER.read_text(encoding="utf-8")
+    lower = script.lower()
+    assert 'readonly RUNNER_SERVICE="mobile-proxy-phone-runner.service"' in script
+    assert 'readonly REQUIRED_GROUP="plugdev"' in script
+    assert 'readonly ACTIVATION_TIMEOUT_SECONDS=15' in script
+    assert 'systemctl cat "${RUNNER_SERVICE}"' in script
+    assert 'systemctl show --property=User --value "${RUNNER_SERVICE}"' in script
+    assert 'runner service unexpectedly runs as root' in script
+    assert 'install -m 0644 "${SOURCE_DROPIN}" "${DROPIN_PATH}"' in script
+    assert 'systemctl daemon-reload' in script
+    assert 'systemctl restart --no-block "${RUNNER_SERVICE}"' in script
+    assert 'systemctl is-active --quiet "${RUNNER_SERVICE}"' in script
+    assert 'systemctl show --property=MainPID --value "${RUNNER_SERVICE}"' in script
+    assert '/proc/${main_pid}/status' in script
+    assert 'runner service process did not acquire required supplementary group' in script
+    for required_tool in ("awk", "cut"):
+        assert f"command -v {required_tool}" in script
+    for forbidden in (
+        "adb ",
+        "adb\n",
+        "adb.exe",
+        "udevadm",
+        "chmod",
+        "chown",
+        "setfacl",
+        "usermod",
+        "gpasswd",
+        "usbipd",
+        "config.sh",
+        "systemctl enable",
+        "systemctl disable",
+    ):
+        assert forbidden not in lower
+    for usb_identifier in ("idvendor", "idproduct", "busid", "serial="):
+        assert usb_identifier not in lower
