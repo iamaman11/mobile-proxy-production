@@ -101,11 +101,6 @@ def _payload(
         "timing_ms": timings,
         "transport": transport,
         "safety": safety,
-        "execution_semantics": {
-            "workflow_execution": "success",
-            "phone_readiness": classification,
-            "automatic_recovery_performed": False,
-        },
     }
 
 
@@ -147,9 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     phone_failure_phase = PhoneFailurePhase.NONE
     try:
         _timed(timings, "adb_tooling", _adb)
-
-        safety["phone_access_performed"] = True
         _timed(timings, "registered_device_state", lambda: _require_device(serial))
+        safety["phone_access_performed"] = True
         _timed(timings, "root_stdout_contract", lambda: _probe_root_stdout_contract(serial))
         _timed(
             timings,
