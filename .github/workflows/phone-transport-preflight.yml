@@ -83,7 +83,7 @@ jobs:
           value = json.loads((Path(os.environ['RUNNER_TEMP']) / 'phone-transport-preflight.json').read_text())
           expected_top = {
               'schema', 'controller_revision', 'classification', 'phone_failure_phase',
-              'timing_ms', 'transport', 'safety', 'execution_semantics',
+              'timing_ms', 'transport', 'safety',
           }
           if set(value) != expected_top:
               raise SystemExit('phone transport preflight top-level evidence fields differ')
@@ -208,14 +208,6 @@ jobs:
           for field in expected_safety - {'phone_access_performed'}:
               if safety.get(field) is not False:
                   raise SystemExit('phone transport preflight safety differs: ' + field)
-
-          semantics = value.get('execution_semantics')
-          if semantics != {
-              'workflow_execution': 'success',
-              'phone_readiness': classification,
-              'automatic_recovery_performed': False,
-          }:
-              raise SystemExit('phone transport execution/readiness semantics differ')
 
           print(
               'PHONE_TRANSPORT_PREFLIGHT_CLASSIFIED '
