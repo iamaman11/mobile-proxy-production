@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
 
 from android_target import DispatchResult, dispatch_install_once
@@ -31,6 +32,27 @@ class PhoneTargetUnavailable(RuntimeError):
 
 class PhoneTargetMutationOutcomeUnknown(PhoneTargetUnavailable):
     pass
+
+
+class PhoneFailurePhase(str, Enum):
+    NONE = "NONE"
+    ADB_TOOLING_UNAVAILABLE = "ADB_TOOLING_UNAVAILABLE"
+    ADB_TRANSPORT_TIMEOUT = "ADB_TRANSPORT_TIMEOUT"
+    REGISTERED_DEVICE_NOT_DEVICE = "REGISTERED_DEVICE_NOT_DEVICE"
+    ROOT_SHELL_SPAWN_FAILED = "ROOT_SHELL_SPAWN_FAILED"
+    ROOT_SCRIPT_TIMEOUT = "ROOT_SCRIPT_TIMEOUT"
+    ROOT_SCRIPT_OUTPUT_TRUNCATED = "ROOT_SCRIPT_OUTPUT_TRUNCATED"
+    ROOT_SCRIPT_PROTOCOL_MISMATCH = "ROOT_SCRIPT_PROTOCOL_MISMATCH"
+    ROOT_SCRIPT_NONZERO = "ROOT_SCRIPT_NONZERO"
+    UNKNOWN = "UNKNOWN"
+
+
+class PhoneTargetDiagnosticFailure(PhoneTargetUnavailable):
+    """Bounded machine-readable failure for read-only phone transport diagnostics."""
+
+    def __init__(self, phase: PhoneFailurePhase, message: str) -> None:
+        super().__init__(message)
+        self.phase = phase
 
 
 @dataclass(frozen=True)
@@ -59,10 +81,14 @@ class RuntimeObservation:
         return asdict(self)
 
 
+def _diagnostic_failure(phase: PhoneFailurePhase, message: str) -> PhoneTargetDiagnosticFailure:
+    return PhoneTargetDiagnosticFailure(phase, message)
+
+
 def _adb() -> str:
     value = shutil.which("adb")
     if value is None:
-        raise PhoneTargetUnavailable("ADB tooling is unavailable")
+        raise _diagnostic_failure(PhoneFailurePhase.ADB_TOOLING_UNAVAILABLE, "ADB tooling is unavailable")
     return value
 
 
@@ -78,15 +104,26 @@ def _run(
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise PhoneTargetUnavailable("phone target transport unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _diagnostic_failure(
+            PhoneFailurePhase.ADB_TRANSPORT_TIMEOUT,
+            "phone target transport unavailable",
+        ) from exc
+    except OSError as exc:
+        raise _diagnostic_failure(
+            PhoneFailurePhase.UNKNOWN,
+            "phone target transport unavailable",
+        ) from exc
 
 
 def _require_device(serial: str) -> str:
     adb = _adb()
     state = _run([adb, "-s", serial, "get-state"], timeout=15)
     if state.returncode != 0 or state.stdout.strip() != "device":
-        raise PhoneTargetUnavailable("registered phone target is not in device state")
+        raise _diagnostic_failure(
+            PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE,
+            "registered phone target is not in device state",
+        )
     return adb
 
 
@@ -211,8 +248,22 @@ def _run_root_script(serial: str, script: bytes, *, timeout: int = 30) -> RootSc
     )
 
 
-def _probe_root_capability(serial: str) -> None:
-    success = _run_root_script(
+def _root_transport_failure_phase(result: RootScriptResult) -> PhoneFailurePhase | None:
+    if result.status == "spawn_error":
+        return PhoneFailurePhase.ROOT_SHELL_SPAWN_FAILED
+    if result.status == "timeout":
+        return PhoneFailurePhase.ROOT_SCRIPT_TIMEOUT
+    if result.stdout_truncated or result.stderr_truncated:
+        return PhoneFailurePhase.ROOT_SCRIPT_OUTPUT_TRUNCATED
+    if result.status == "transport_error":
+        return PhoneFailurePhase.UNKNOWN
+    if result.status != "completed":
+        return PhoneFailurePhase.UNKNOWN
+    return None
+
+
+def _probe_root_stdout_contract(serial: str) -> None:
+    result = _run_root_script(
         serial,
         (
             b"set -eu\n"
@@ -225,25 +276,36 @@ def _probe_root_capability(serial: str) -> None:
             b"printf 'tools=ok\\n'\n"
         ),
     )
-    if (
-        success.status != "completed"
-        or success.returncode != 0
-        or success.stdout != b"root=0\ngrammar=ok\ntools=ok\n"
-        or success.stderr != b""
-    ):
-        raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
+    failure_phase = _root_transport_failure_phase(result)
+    if failure_phase is not None:
+        raise _diagnostic_failure(failure_phase, _ROOT_CAPABILITY_UNAVAILABLE)
+    if result.returncode != 0:
+        raise _diagnostic_failure(PhoneFailurePhase.ROOT_SCRIPT_NONZERO, _ROOT_CAPABILITY_UNAVAILABLE)
+    if result.stdout != b"root=0\ngrammar=ok\ntools=ok\n" or result.stderr != b"":
+        raise _diagnostic_failure(
+            PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH,
+            _ROOT_CAPABILITY_UNAVAILABLE,
+        )
 
-    nonzero = _run_root_script(
+
+def _probe_root_stderr_exit_contract(serial: str) -> None:
+    result = _run_root_script(
         serial,
         b"printf 'stderr=ok\\n' >&2\nexit 23\n",
     )
-    if (
-        nonzero.status != "completed"
-        or nonzero.returncode != 23
-        or nonzero.stdout != b""
-        or nonzero.stderr != b"stderr=ok\n"
-    ):
-        raise PhoneTargetUnavailable(_ROOT_CAPABILITY_UNAVAILABLE)
+    failure_phase = _root_transport_failure_phase(result)
+    if failure_phase is not None:
+        raise _diagnostic_failure(failure_phase, _ROOT_CAPABILITY_UNAVAILABLE)
+    if result.returncode != 23 or result.stdout != b"" or result.stderr != b"stderr=ok\n":
+        raise _diagnostic_failure(
+            PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH,
+            _ROOT_CAPABILITY_UNAVAILABLE,
+        )
+
+
+def _probe_root_capability(serial: str) -> None:
+    _probe_root_stdout_contract(serial)
+    _probe_root_stderr_exit_contract(serial)
 
 
 def _safe_release_id(value: str) -> str:
