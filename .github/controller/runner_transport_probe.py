@@ -207,12 +207,26 @@ def collect_runner_runtime(
     return runner_state, environment_presence
 
 
-def _parse_watchdog_projection(path: Path, *, now_epoch: int) -> dict[str, object] | None:
+def _parse_watchdog_projection(
+    path: Path,
+    *,
+    now_epoch: int,
+    expected_owner_uid: int = 0,
+) -> dict[str, object] | None:
+    if type(expected_owner_uid) is not int or expected_owner_uid < 0:
+        return None
     try:
+        parent = path.parent.lstat()
         info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_PROJECTION_BYTES:
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != expected_owner_uid or parent.st_mode & 0o022:
             return None
-        if info.st_mode & 0o022:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != expected_owner_uid
+            or info.st_size <= 0
+            or info.st_size > _MAX_PROJECTION_BYTES
+            or info.st_mode & 0o022
+        ):
             return None
         value = json.loads(path.read_text(encoding="ascii"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -249,10 +263,15 @@ def collect_watchdog(
     runner: CommandRunner = _run,
     projection_path: Path = WATCHDOG_PROJECTION,
     now_epoch: int | None = None,
+    expected_projection_owner_uid: int = 0,
 ) -> dict[str, object]:
     now = int(time.time()) if now_epoch is None else now_epoch
     timer_state = _systemctl_value(WATCHDOG_TIMER, "ActiveState", runner)
-    projection = _parse_watchdog_projection(projection_path, now_epoch=now)
+    projection = _parse_watchdog_projection(
+        projection_path,
+        now_epoch=now,
+        expected_owner_uid=expected_projection_owner_uid,
+    )
     result: dict[str, object] = {
         "timer_state": "ACTIVE" if timer_state == "active" else ("INACTIVE" if timer_state else "UNKNOWN"),
         "state_readable": projection is not None,
