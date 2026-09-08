@@ -30,7 +30,7 @@ if ($PSCmdlet.ShouldProcess($Destination, 'Install versioned USB bridge script')
     Copy-Item -LiteralPath $source -Destination $Destination -Force
 }
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-    '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $Destination
+    '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Destination
 )
 if ($PSCmdlet.ShouldProcess($TaskName, 'Update and activate existing owner-interactive bridge task')) {
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest

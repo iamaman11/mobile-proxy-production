@@ -28,6 +28,8 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "exception text are deliberately never persisted" in script
     assert "exception.gettype().name" in script
     assert "scriptlinenumber" in script
+    assert "write-bridgeevent 'bridge_started'" in script
+    assert script.count("write-bridgeevent 'bridge_started'") == 1
     for category in ("inventory_unavailable", "bind_failed", "attach_failed", "wsl_unavailable", "unexpected_local_error"):
         assert category in script
     assert "attach --wsl --distribution" not in script
@@ -73,6 +75,9 @@ def test_windows_installer_updates_only_existing_named_task() -> None:
     assert "New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest" in script
     assert "New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME" in script
     assert "Set-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Trigger $trigger" in script
+    assert "-WindowStyle Hidden" in script
+    assert "-LogonType S4U" not in script
+    assert "-LogonType ServiceAccount" not in script
     assert "-NonInteractive" not in script
     assert "usbipd-win\\usbipd.exe" in script
     assert "Initial allowlisted USBIPD bind failed." in script
