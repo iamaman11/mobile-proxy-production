@@ -211,6 +211,7 @@ jobs:
 
           failure_code = value.get('failure_code')
           failure_phase = value.get('failure_phase')
+          phone_failure_phase = value.get('phone_failure_phase')
           if classification == 'UNKNOWN':
               if failure_code not in {
                   'RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE',
@@ -224,6 +225,8 @@ jobs:
                   f'failure_code={failure_code}',
               ]
               if failure_phase is not None:
+                  if failure_code != 'RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE':
+                      raise SystemExit('Stage 4 runtime failure phase has incompatible failure code')
                   if failure_phase not in {
                       'busybox_selected',
                       'process_count_start',
@@ -234,8 +237,24 @@ jobs:
                   }:
                       raise SystemExit('Stage 4 operational UNKNOWN failure phase differs')
                   fields.append(f'failure_phase={failure_phase}')
+              if phone_failure_phase is not None:
+                  if failure_code != 'PHONE_TARGET_UNAVAILABLE':
+                      raise SystemExit('Stage 4 phone target failure phase has incompatible failure code')
+                  if phone_failure_phase not in {
+                      'ADB_TOOLING_UNAVAILABLE',
+                      'ADB_TRANSPORT_TIMEOUT',
+                      'REGISTERED_DEVICE_NOT_DEVICE',
+                      'ROOT_SHELL_SPAWN_FAILED',
+                      'ROOT_SCRIPT_TIMEOUT',
+                      'ROOT_SCRIPT_OUTPUT_TRUNCATED',
+                      'ROOT_SCRIPT_PROTOCOL_MISMATCH',
+                      'ROOT_SCRIPT_NONZERO',
+                      'UNKNOWN',
+                  }:
+                      raise SystemExit('Stage 4 phone target failure phase differs')
+                  fields.append(f'phone_failure_phase={phone_failure_phase}')
           else:
-              if failure_code is not None or failure_phase is not None:
+              if failure_code is not None or failure_phase is not None or phone_failure_phase is not None:
                   raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
               fields = [
                   'STAGE4_PHONE_OPERATIONAL_CLASSIFIED',
