@@ -67,7 +67,7 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
-def test_runtime_process_count_uses_one_android_toybox_snapshot() -> None:
+def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
 
@@ -79,21 +79,24 @@ def test_runtime_process_count_uses_one_android_toybox_snapshot() -> None:
         + module._HEALTH_TRANSPORT_TIMEOUT_SECONDS
         + 3
     )
-    assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" sh -c' in script
-    assert b'[ -x /system/bin/ps ] || exit 27' in script
     process_block = script.split(b"stage4_phase=process_count_start", 1)[1].split(
         b"stage4_phase=process_count_done", 1
     )[0]
-    assert b"/proc/[0-9]*/cmdline" not in process_block
-    assert b"pgrep -f" not in process_block
-    assert b'"$BB_BIN" ps -o args' not in process_block
-    assert process_block.count(b'/system/bin/ps -A -w -o CMDLINE') == 1
-    assert b"while IFS= read -r process_line" in process_block
+    assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" sh -s <<\'STAGE4_PROCESS_COUNT\'' in process_block
+    assert b"/system/bin/ps" not in process_block
+    assert b"pgrep" not in process_block
+    assert b" sh -c" not in process_block
+    assert b" ps " not in process_block
+    assert process_block.count(b"for process_dir in /proc/[0-9]*") == 1
+    assert b'cmdline_path="$process_dir/cmdline"' in process_block
+    assert b'"$BB_BIN" tr \'\\000\' \'\\n\'' in process_block
+    assert b"readable_processes=0" in process_block
+    assert b'[ "$readable_processes" -gt 0 ] || exit 26' in process_block
     for needle in (
-        b'*"$WATCHDOG_NEEDLE"*',
-        b'*"$RUNTIME_SUPERVISOR_NEEDLE"*',
-        b'*"$HOST_DAEMON_NEEDLE"*',
-        b'*"$SING_BOX_NEEDLE"*',
+        b'case "$process_args" in *"\n$WATCHDOG_NEEDLE\n"*',
+        b'case "$process_args" in *"\n$RUNTIME_SUPERVISOR_NEEDLE\n"*',
+        b'case "$process_args" in *"\n$HOST_DAEMON_NEEDLE\n"*',
+        b'case "$process_args" in *"\n$SING_BOX_NEEDLE\n"*',
     ):
         assert needle in process_block
     assert b"process_ids_recorded" not in script
