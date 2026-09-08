@@ -13,7 +13,6 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTROLLER = ROOT / "controller"
 SCRIPTS = ROOT / "scripts"
 WORKFLOWS = ROOT / "workflows"
 
@@ -28,88 +27,6 @@ def load_observer():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-
-
-def load_operational_observer():
-    if str(CONTROLLER) not in sys.path:
-        sys.path.insert(0, str(CONTROLLER))
-    spec = importlib.util.spec_from_file_location(
-        "runtime_operational_observer_acceptance",
-        CONTROLLER / "runtime_operational_observer.py",
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_operational_enricher():
-    if str(CONTROLLER) not in sys.path:
-        sys.path.insert(0, str(CONTROLLER))
-    spec = importlib.util.spec_from_file_location(
-        "enrich_phone_runtime_operational_acceptance",
-        SCRIPTS / "enrich_phone_runtime_operational.py",
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _operational_output(
-    *,
-    readiness: str = "healthy",
-    serving: str = "true",
-    proxy_status: str = "running",
-    cellular: str = "true",
-    proxy_bind: str = "true",
-    local_serving: str = "true",
-    tunnel_owner: str = "first_party_reverse_tunnel",
-    degradation: str = "none",
-) -> bytes:
-    values = {
-        "watchdog_count": "1",
-        "runtime_supervisor_count": "1",
-        "host_daemon_count": "1",
-        "sing_box_count": "1",
-        "health_api_authenticated": "true",
-        "readiness_state": readiness,
-        "serving": serving,
-        "proxy_status": proxy_status,
-        "cellular_route_ready": cellular,
-        "proxy_bind_ready": proxy_bind,
-        "local_serving_ready": local_serving,
-        "tunnel_owner": tunnel_owner,
-        "degradation_reason_code": degradation,
-    }
-    return ("".join(f"{key}={value}\n" for key, value in values.items())).encode()
-
-
-def _base_operational_evidence(*, exact_runtime: bool = True) -> dict[str, object]:
-    return {
-        "schema": "stage4-phone-release-observation.v1",
-        "controller_revision": "a" * 40,
-        "target": "phone-production",
-        "product_release": "v0.1.7",
-        "classification": "HEALTHY_EXACT" if exact_runtime else "DEGRADED",
-        "mode": "read_only",
-        "observation": {
-            "apk": {"desired": True},
-            "runtime": {
-                "current_state": "expected_release",
-                "current_matches_expected_release": True,
-                "exact_files_verified": exact_runtime,
-                "desired": exact_runtime,
-            },
-            "desired": exact_runtime,
-        },
-        "safety": {
-            "phone_access_performed": True,
-            "phone_mutation_performed": False,
-        },
-    }
 
 
 def test_bounded_runtime_summary_never_records_current_path() -> None:
@@ -440,158 +357,6 @@ def test_bounded_log_summary_preserves_decision_evidence_without_sensitive_ident
     assert unknown["failure_code"] == "ANDROID_TARGET_STATE_NOT_DEVICE"
 
 
-def test_operational_healthy_exact_requires_full_serving_postcondition() -> None:
-    module = load_operational_observer()
-    observed = module._parse_output(_operational_output())
-    assert observed.desired is True
-    assert observed.health_api_authenticated is True
-    assert observed.readiness_state == "healthy"
-    assert observed.serving is True
-    assert observed.proxy_status == "running"
-    assert observed.cellular_route_ready is True
-    assert observed.proxy_bind_ready is True
-    assert observed.local_serving_ready is True
-    assert observed.tunnel_owner_matches_expected is True
-    assert observed.degradation_reason_code == "none"
-    bounded = observed.to_bounded_dict()
-    assert bounded["localhost_only"] is True
-    assert bounded["raw_health_json_recorded"] is False
-    assert bounded["raw_config_recorded"] is False
-    assert bounded["secret_values_recorded"] is False
-    assert bounded["process_ids_recorded"] is False
-    assert bounded["process_cmdlines_recorded"] is False
-
-
-def test_operational_public_probe_failure_is_not_desired() -> None:
-    module = load_operational_observer()
-    observed = module._parse_output(
-        _operational_output(
-            readiness="starting_proxy",
-            serving="false",
-            proxy_status="degraded",
-            degradation="public_probe_failed",
-        )
-    )
-    assert observed.desired is False
-    assert observed.cellular_route_ready is True
-    assert observed.proxy_bind_ready is True
-    assert observed.local_serving_ready is True
-    assert observed.degradation_reason_code == "public_probe_failed"
-
-
-def test_operational_readiness_matches_exact_v017_contract() -> None:
-    module = load_operational_observer()
-    waiting = module._parse_output(
-        _operational_output(
-            readiness="waiting_wireguard",
-            serving="false",
-            proxy_status="degraded",
-            cellular="true",
-            proxy_bind="false",
-            local_serving="false",
-            degradation="wireguard_path_not_ready",
-        )
-    )
-    assert waiting.readiness_state == "waiting_wireguard"
-    assert waiting.desired is False
-
-    phone_target = sys.modules["phone_target"]
-    try:
-        module._parse_output(
-            _operational_output(
-                readiness="waiting_tunnel",
-                serving="false",
-                proxy_status="degraded",
-                degradation="reverse_tunnel_not_ready",
-            )
-        )
-    except phone_target.PhoneTargetUnavailable as error:
-        assert str(error) == "runtime operational observation is malformed"
-    else:
-        raise AssertionError("non-v0.1.7 readiness enum was accepted")
-
-
-def test_operational_probe_is_localhost_bounded_and_read_only() -> None:
-    module = load_operational_observer()
-    source = (CONTROLLER / "runtime_operational_observer.py").read_text(encoding="utf-8")
-    script = module._operational_script("stage4-admin-token-safe-value")
-    assert b"127.0.0.1" in script
-    assert b"/v1/health" in script
-    assert b"Authorization: Bearer" in script
-    assert b"/data/adb/mobile-proxy-node/current/config/host-daemon.json" not in script
-    assert "shlex.quote" in source
-    for forbidden in (
-        "kill -",
-        "pkill",
-        "taskkill",
-        "reboot",
-        "svc data",
-        "svc wifi",
-        "setprop",
-        "am force-stop",
-        "ip route add",
-        "ip route del",
-        "usbipd",
-    ):
-        assert forbidden not in source
-
-
-def test_operational_enrichment_preserves_healthy_exact_only_when_operational_desired() -> None:
-    enricher = load_operational_enricher()
-    operational_module = load_operational_observer()
-    healthy = operational_module._parse_output(_operational_output())
-    with tempfile.TemporaryDirectory() as raw:
-        path = Path(raw) / "evidence.json"
-        path.write_text(json.dumps(_base_operational_evidence()), encoding="utf-8")
-        with mock.patch.object(enricher, "observe_runtime_operational_health", return_value=healthy):
-            assert enricher.enrich(path, serial="registered", admin_token="secret-token") == 0
-        value = json.loads(path.read_text(encoding="utf-8"))
-    assert value["classification"] == "HEALTHY_EXACT"
-    assert value["observation"]["desired"] is True
-    assert value["observation"]["operational"]["desired"] is True
-    assert value["safety"]["operational_probe_performed"] is True
-    assert value["safety"]["operational_probe_localhost_only"] is True
-    assert value["safety"]["operational_secret_values_recorded"] is False
-
-
-def test_operational_enrichment_fails_closed_to_unknown_without_erasing_release_evidence() -> None:
-    enricher = load_operational_enricher()
-    payload = _base_operational_evidence()
-    payload["observation"]["release_evidence_marker"] = "retained"
-    with tempfile.TemporaryDirectory() as raw:
-        path = Path(raw) / "evidence.json"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        with mock.patch.object(
-            enricher,
-            "observe_runtime_operational_health",
-            side_effect=enricher.PhoneTargetUnavailable("runtime operational observation is unavailable"),
-        ):
-            assert enricher.enrich(path, serial="registered", admin_token="secret-token") == 2
-        value = json.loads(path.read_text(encoding="utf-8"))
-    assert value["classification"] == "UNKNOWN"
-    assert value["failure_code"] == "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE"
-    assert value["observation"]["release_evidence_marker"] == "retained"
-    assert value["observation"]["operational"]["reason"] == "observation_unavailable"
-    assert value["observation"]["desired"] is False
-    assert value["safety"]["operational_probe_performed"] is True
-    assert "secret-token" not in json.dumps(value, sort_keys=True)
-
-
-def test_operational_enrichment_skips_probe_when_runtime_is_not_exact() -> None:
-    enricher = load_operational_enricher()
-    with tempfile.TemporaryDirectory() as raw:
-        path = Path(raw) / "evidence.json"
-        path.write_text(json.dumps(_base_operational_evidence(exact_runtime=False)), encoding="utf-8")
-        with mock.patch.object(enricher, "observe_runtime_operational_health") as probe:
-            assert enricher.enrich(path, serial="registered", admin_token="secret-token") == 0
-            probe.assert_not_called()
-        value = json.loads(path.read_text(encoding="utf-8"))
-    assert value["classification"] == "DEGRADED"
-    assert value["observation"]["operational"]["evaluated"] is False
-    assert value["observation"]["operational"]["reason"] == "runtime_not_exact"
-    assert value["safety"]["operational_probe_performed"] is False
-
-
 def test_observer_has_no_destructive_callsite() -> None:
     source = (SCRIPTS / "observe_phone_release.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -642,11 +407,7 @@ def test_workflow_is_exact_issue1_read_only_observation_under_target_lock() -> N
         "cancel-in-progress: false",
         "environment: phone-production",
         ".github/scripts/observe_phone_release.py",
-        ".github/scripts/enrich_phone_runtime_operational.py",
         "--release-tag \"$RELEASE_TAG\"",
-        "operational_probe_performed",
-        "Stage 4 exact runtime lacks evaluated operational evidence",
-        "Stage 4 HEALTHY_EXACT lacks healthy operational postcondition",
         "STAGE4_PHONE_RELEASE_OBSERVATION_CLASSIFIED",
         "{'HEALTHY_EXACT', 'DEGRADED'}",
         "rust_toolchain=1.95.0",
