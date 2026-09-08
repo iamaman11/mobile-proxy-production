@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -13,16 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT.parent / "scripts"
 sys.path.insert(0, str(ROOT))
 
-import android_target as ANDROID  # noqa: E402
-import phone_transport_readiness as READINESS  # noqa: E402
 from phone_target import PhoneTargetUnavailable  # noqa: E402
 
-SERIAL = "registered-device-1"
+SERIAL = "registered-production-target"
 
 
 def load_preflight():
     spec = importlib.util.spec_from_file_location(
-        "phone_transport_preflight_acceptance",
+        "phone_transport_preflight_s43_acceptance",
         SCRIPTS / "phone_transport_preflight.py",
     )
     assert spec is not None and spec.loader is not None
@@ -32,89 +29,27 @@ def load_preflight():
     return module
 
 
-def _completed() -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess([], 0, "", "")
-
-
-def test_readiness_returns_bounded_registered_target_leaf_without_root_probe() -> None:
-    with (
-        mock.patch.object(READINESS, "_adb", return_value="/usr/bin/adb"),
-        mock.patch.object(READINESS, "_ensure_adb_server"),
-        mock.patch.object(READINESS, "_registered_target_state", return_value="no_permissions"),
-        mock.patch.object(READINESS, "_require_device") as strict_state,
-        mock.patch.object(READINESS, "_probe_root_capability") as root_probe,
-    ):
-        result = READINESS.probe_registered_phone_transport(SERIAL)
-
-    assert result.ready is False
-    assert result.failure_phase == "registered_device_state"
-    assert result.failure_code == "REGISTERED_DEVICE_NOT_DEVICE"
-    assert result.target_state == "no_permissions"
-    assert "registered_device_state" in result.timing_ms
-    strict_state.assert_not_called()
-    root_probe.assert_not_called()
-
-
-def test_readiness_requires_strict_get_state_then_existing_root_contract() -> None:
-    with (
-        mock.patch.object(READINESS, "_adb", return_value="/usr/bin/adb"),
-        mock.patch.object(READINESS, "_ensure_adb_server"),
-        mock.patch.object(READINESS, "_registered_target_state", return_value="device"),
-        mock.patch.object(READINESS, "_require_device", return_value="/usr/bin/adb") as strict_state,
-        mock.patch.object(READINESS, "_probe_root_capability") as root_probe,
-    ):
-        result = READINESS.probe_registered_phone_transport(SERIAL)
-
-    assert result.ready is True
-    assert result.failure_phase is None
-    assert result.failure_code is None
-    assert result.target_state is None
-    strict_state.assert_called_once_with(SERIAL)
-    root_probe.assert_called_once_with(SERIAL)
-
-
-def test_readiness_distinguishes_transport_timeout_without_raw_error() -> None:
-    timeout = subprocess.TimeoutExpired(["adb", "devices"], 15)
-    inventory_error = ANDROID.AndroidObservationUnavailable("Android read-only observation transport failed")
-    inventory_error.__cause__ = timeout
-
-    with (
-        mock.patch.object(READINESS, "_adb", return_value="/usr/bin/adb"),
-        mock.patch.object(READINESS, "_ensure_adb_server"),
-        mock.patch.object(READINESS, "_registered_target_state", side_effect=inventory_error),
-    ):
-        result = READINESS.probe_registered_phone_transport(SERIAL)
-
-    assert result.ready is False
-    assert result.failure_phase == "registered_device_state"
-    assert result.failure_code == "ADB_TRANSPORT_TIMEOUT"
-    assert result.target_state is None
-
-
-def test_readiness_root_failure_is_one_safe_leaf() -> None:
-    with (
-        mock.patch.object(READINESS, "_adb", return_value="/usr/bin/adb"),
-        mock.patch.object(READINESS, "_ensure_adb_server"),
-        mock.patch.object(READINESS, "_registered_target_state", return_value="device"),
-        mock.patch.object(READINESS, "_require_device", return_value="/usr/bin/adb"),
-        mock.patch.object(
-            READINESS,
-            "_probe_root_capability",
-            side_effect=PhoneTargetUnavailable("rooted runtime capability unavailable"),
-        ),
-    ):
-        result = READINESS.probe_registered_phone_transport(SERIAL)
-
-    assert result.ready is False
-    assert result.failure_phase == "root_contract"
-    assert result.failure_code == "ROOT_CONTRACT_FAILED"
-    assert result.target_state is None
-
-
-def _run_preflight_with(readiness: READINESS.PhoneTransportReadiness) -> dict[str, object]:
-    module = load_preflight()
+def _run(module, *, device_effect=None, root_effect=None):
     with tempfile.TemporaryDirectory() as raw:
         output = Path(raw) / "preflight.json"
+        events: list[str] = []
+
+        def require_device(serial: str):
+            events.append("registered_device_state")
+            if device_effect is not None:
+                if isinstance(device_effect, BaseException):
+                    raise device_effect
+                return device_effect(serial)
+            return "/usr/bin/adb"
+
+        def probe_root(serial: str):
+            events.append("root_contract")
+            if root_effect is not None:
+                if isinstance(root_effect, BaseException):
+                    raise root_effect
+                return root_effect(serial)
+            return None
+
         with (
             mock.patch.dict(
                 module.os.environ,
@@ -122,8 +57,9 @@ def _run_preflight_with(readiness: READINESS.PhoneTransportReadiness) -> dict[st
                 clear=False,
             ),
             mock.patch.object(module, "collect_runner_transport_evidence", return_value={}),
-            mock.patch.object(module, "probe_registered_phone_transport", return_value=readiness),
             mock.patch.object(module, "classify_preflight", return_value="READY"),
+            mock.patch.object(module, "_require_device", side_effect=require_device),
+            mock.patch.object(module, "_probe_root_capability", side_effect=probe_root),
         ):
             rc = module.main(
                 [
@@ -135,65 +71,52 @@ def _run_preflight_with(readiness: READINESS.PhoneTransportReadiness) -> dict[st
                     datetime.now(timezone.utc).isoformat(),
                 ]
             )
-        assert rc == 0
-        return json.loads(output.read_text(encoding="utf-8"))
+        return rc, json.loads(output.read_text(encoding="utf-8")), events
 
 
-def test_preflight_artifact_publishes_only_bounded_target_failure_evidence() -> None:
-    payload = _run_preflight_with(
-        READINESS.PhoneTransportReadiness(
-            ready=False,
-            timing_ms={"registered_device_state": 7},
-            failure_phase="registered_device_state",
-            failure_code="REGISTERED_DEVICE_NOT_DEVICE",
-            target_state="no_permissions",
-        )
-    )
+def test_preflight_keeps_exact_s43_success_order_and_contract() -> None:
+    module = load_preflight()
+    rc, payload, events = _run(module)
 
-    assert payload["classification"] == "NOT_READY"
-    assert payload["failure_phase"] == "registered_device_state"
-    assert payload["failure_code"] == "REGISTERED_DEVICE_NOT_DEVICE"
-    assert payload["target_state"] == "no_permissions"
-    assert payload["safety"]["phone_access_performed"] is False
-    encoded = json.dumps(payload, sort_keys=True)
-    assert SERIAL not in encoded
-    for forbidden in ("stderr", "stdout", "cmdline", "device_identifier"):
-        assert forbidden not in encoded.lower()
-
-
-def test_preflight_marks_phone_access_when_root_contract_was_attempted() -> None:
-    payload = _run_preflight_with(
-        READINESS.PhoneTransportReadiness(
-            ready=False,
-            timing_ms={"strict_get_state": 2, "root_contract": 3},
-            failure_phase="root_contract",
-            failure_code="ROOT_CONTRACT_FAILED",
-        )
-    )
-
-    assert payload["classification"] == "NOT_READY"
-    assert payload["failure_phase"] == "root_contract"
-    assert payload["failure_code"] == "ROOT_CONTRACT_FAILED"
-    assert "target_state" not in payload
-    assert payload["safety"]["phone_access_performed"] is True
-
-
-def test_ready_preflight_has_no_failure_leaf() -> None:
-    payload = _run_preflight_with(
-        READINESS.PhoneTransportReadiness(
-            ready=True,
-            timing_ms={
-                "adb_tooling": 1,
-                "adb_server": 1,
-                "registered_device_state": 1,
-                "strict_get_state": 1,
-                "root_contract": 1,
-            },
-        )
-    )
-
+    assert rc == 0
+    assert events == ["registered_device_state", "root_contract"]
     assert payload["classification"] == "READY"
     assert "failure_phase" not in payload
-    assert "failure_code" not in payload
-    assert "target_state" not in payload
     assert payload["safety"]["phone_access_performed"] is True
+
+
+def test_preflight_device_failure_adds_only_safe_phase_without_root_attempt() -> None:
+    module = load_preflight()
+    rc, payload, events = _run(
+        module,
+        device_effect=PhoneTargetUnavailable("registered phone target is not in device state"),
+    )
+
+    assert rc == 0
+    assert events == ["registered_device_state"]
+    assert payload["classification"] == "NOT_READY"
+    assert payload["failure_phase"] == "registered_device_state"
+    assert payload["failure_class"] == "PhoneTargetUnavailable"
+    assert payload["safety"]["phone_access_performed"] is False
+
+
+def test_preflight_root_failure_preserves_s43_device_success_then_reports_root_phase() -> None:
+    module = load_preflight()
+    rc, payload, events = _run(
+        module,
+        root_effect=PhoneTargetUnavailable("rooted runtime capability unavailable"),
+    )
+
+    assert rc == 0
+    assert events == ["registered_device_state", "root_contract"]
+    assert payload["classification"] == "NOT_READY"
+    assert payload["failure_phase"] == "root_contract"
+    assert payload["safety"]["phone_access_performed"] is True
+
+
+def test_preflight_does_not_introduce_second_adb_target_path() -> None:
+    source = (SCRIPTS / "phone_transport_preflight.py").read_text(encoding="utf-8")
+    assert "phone_transport_readiness" not in source
+    assert "_registered_target_state" not in source
+    assert "_ensure_adb_server" not in source
+    assert source.index("_require_device(serial)") < source.index("_probe_root_capability(serial)")
