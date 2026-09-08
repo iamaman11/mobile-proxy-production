@@ -67,6 +67,23 @@ def test_runtime_health_probe_phase_markers_are_allowlisted_and_ordered() -> Non
     assert set(module._PHASE_SEQUENCE) == module._ALLOWED_PHASES
 
 
+def test_runtime_process_count_is_single_pass_and_independently_bounded() -> None:
+    module = load_operational_observer()
+    script = module._operational_script("stage4-admin-token-safe-value")
+
+    assert module._PROCESS_COUNT_TIMEOUT_SECONDS == 3
+    assert script.count(b"for cmdfile in /proc/[0-9]*/cmdline") == 1
+    assert b'"$BB_BIN" timeout -t 3 "$BB_BIN" sh -c' in script
+    assert script.index(b"stage4_phase=process_count_start") < script.index(
+        b"for cmdfile in /proc/[0-9]*/cmdline"
+    )
+    assert script.index(b"for cmdfile in /proc/[0-9]*/cmdline") < script.index(
+        b"stage4_phase=process_count_done"
+    )
+    assert b"process_ids_recorded" not in script
+    assert b"process_cmdlines_recorded" not in script
+
+
 def test_runtime_health_outer_timeout_retains_only_last_allowlisted_phase() -> None:
     module = load_operational_observer()
     module.phone_target._probe_root_capability = lambda serial: None
@@ -74,8 +91,9 @@ def test_runtime_health_outer_timeout_retains_only_last_allowlisted_phase() -> N
         status="timeout",
         returncode=None,
         stdout=(
-            b"stage4_phase=process_count_done\n"
             b"stage4_phase=busybox_selected\n"
+            b"stage4_phase=process_count_start\n"
+            b"stage4_phase=process_count_done\n"
             b"stage4_phase=health_transport_start\n"
         ),
         stderr=b"",
@@ -90,13 +108,34 @@ def test_runtime_health_outer_timeout_retains_only_last_allowlisted_phase() -> N
         raise AssertionError("outer timeout must fail closed with bounded phase evidence")
 
 
+def test_runtime_process_count_failure_retains_started_phase() -> None:
+    module = load_operational_observer()
+    module.phone_target._probe_root_capability = lambda serial: None
+    module.phone_target._run_root_script = lambda serial, script, timeout: module.phone_target.RootScriptResult(
+        status="completed",
+        returncode=21,
+        stdout=(
+            b"stage4_phase=busybox_selected\n"
+            b"stage4_phase=process_count_start\n"
+        ),
+        stderr=b"",
+    )
+
+    try:
+        module.observe_runtime_operational_health("registered-phone", admin_token="safe-token")
+    except module.RuntimeOperationalObservationUnavailable as exc:
+        assert exc.last_phase == "process_count_start"
+    else:
+        raise AssertionError("bounded process-count failure must fail closed")
+
+
 def test_runtime_health_phase_parser_rejects_unallowlisted_or_out_of_order_markers() -> None:
     module = load_operational_observer()
 
     for raw in (
         b"stage4_phase=secret_dump\n",
-        b"stage4_phase=busybox_selected\n",
-        b"stage4_phase=process_count_done\nstage4_phase=health_transport_start\n",
+        b"stage4_phase=process_count_start\n",
+        b"stage4_phase=busybox_selected\nstage4_phase=process_count_done\n",
     ):
         try:
             module._split_phase_markers(raw)
