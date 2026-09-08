@@ -1,0 +1,197 @@
+name: Stage 4 runner transport observation
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+      source_comment_created_at:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    name: Observe self-hosted runner transport once
+    if: >-
+      inputs.command == '/observe-runner-transport' &&
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    concurrency:
+      group: production-runner-transport-observation
+      cancel-in-progress: false
+    outputs:
+      artifact_name: ${{ steps.select-core-artifact.outputs.artifact_name }}
+      artifact_upload_retry_observed: ${{ steps.select-core-artifact.outputs.artifact_upload_retry_observed }}
+      core_sha256: ${{ steps.core-digest.outputs.core_sha256 }}
+    steps:
+      - name: Check out exact Controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify immutable Issue 1 command provenance
+        shell: bash
+        env:
+          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$SOURCE_COMMENT_URL" = "https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-$SOURCE_COMMENT_ID"
+
+      - name: Run bounded runner transport observer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/observe_runner_transport.py \
+            --controller-revision "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/runner-transport-observation-core.json"
+
+      - name: Record core evidence digest
+        id: core-digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(sha256sum "$RUNNER_TEMP/runner-transport-observation-core.json" | cut -d' ' -f1)"
+          test "${#digest}" -eq 64
+          echo "core_sha256=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve primary core transport evidence
+        id: core-artifact-primary
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runner-transport-observation-core-${{ github.run_id }}-${{ github.run_attempt }}-primary
+          path: ${{ runner.temp }}/runner-transport-observation-core.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retry same core evidence transfer once
+        id: core-artifact-retry
+        if: steps.core-artifact-primary.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runner-transport-observation-core-${{ github.run_id }}-${{ github.run_attempt }}-retry
+          path: ${{ runner.temp }}/runner-transport-observation-core.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Select mandatory core artifact lineage
+        id: select-core-artifact
+        if: always()
+        shell: bash
+        env:
+          PRIMARY_OUTCOME: ${{ steps.core-artifact-primary.outcome }}
+          RETRY_OUTCOME: ${{ steps.core-artifact-retry.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRIMARY_OUTCOME" == success ]]; then
+            echo "artifact_name=runner-transport-observation-core-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-primary" >> "$GITHUB_OUTPUT"
+            echo "artifact_upload_retry_observed=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$PRIMARY_OUTCOME" == failure && "$RETRY_OUTCOME" == success ]]; then
+            echo "artifact_name=runner-transport-observation-core-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-retry" >> "$GITHUB_OUTPUT"
+            echo "artifact_upload_retry_observed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "RUNNER_TRANSPORT_CORE_ARTIFACT_UNAVAILABLE"
+            exit 1
+          fi
+
+  finalize:
+    name: Verify artifact round-trip and finalize bounded evidence
+    needs: observe
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out exact Controller revision for finalization
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Hosted download of exact self-hosted core artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.observe.outputs.artifact_name }}
+          path: ${{ runner.temp }}/runner-transport-core
+
+      - name: Read current run timing metadata without publishing raw job data
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            > "$RUNNER_TEMP/runner-transport-jobs.json"
+          test -s "$RUNNER_TEMP/runner-transport-jobs.json"
+
+      - name: Finalize bounded timing and artifact round-trip evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/finalize_runner_transport_observation.py \
+            --core "$RUNNER_TEMP/runner-transport-core/runner-transport-observation-core.json" \
+            --jobs "$RUNNER_TEMP/runner-transport-jobs.json" \
+            --output "$RUNNER_TEMP/runner-transport-observation-final.json" \
+            --expected-core-sha256 "${{ needs.observe.outputs.core_sha256 }}" \
+            --source-comment-created-at "${{ inputs.source_comment_created_at }}" \
+            --artifact-upload-retry-observed "${{ needs.observe.outputs.artifact_upload_retry_observed }}"
+
+      - name: Preserve mandatory final runner transport evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runner-transport-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-transport-observation-final.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record bounded final classification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          value = json.loads((Path(os.environ['RUNNER_TEMP']) / 'runner-transport-observation-final.json').read_text())
+          classification = value['classification']
+          failure_domain = value['failure_domain']
+          retry = value['transport']['artifact_round_trip']['upload_retry_observed']
+          if classification not in {'HEALTHY', 'TRANSPORT_DEGRADED', 'TRANSPORT_UNAVAILABLE'}:
+              raise SystemExit('runner transport final classification differs')
+          if failure_domain not in {'UNKNOWN', 'RUNNER_SERVICE', 'DNS_RESOLUTION', 'TLS_VALIDATION'}:
+              raise SystemExit('runner transport final failure domain differs')
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          with summary.open('a', encoding='utf-8') as handle:
+              handle.write(f'classification={classification}\n')
+              handle.write(f'failure_domain={failure_domain}\n')
+              handle.write(f'artifact_upload_retry_observed={str(retry).lower()}\n')
+              handle.write('phone_access_performed=false\n')
+              handle.write('automatic_recovery_performed=false\n')
+          print(f'RUNNER_TRANSPORT_FINAL classification={classification} failure_domain={failure_domain}')
+          PY

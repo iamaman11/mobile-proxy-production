@@ -39,6 +39,15 @@ jobs:
             .github/controller/tests/test_runner_transport_observer.py
           python3 .github/controller/tests/test_runner_transport_observer.py
 
+      - name: Compile and test runner transport artifact finalization
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            .github/scripts/finalize_runner_transport_observation.py \
+            .github/controller/tests/test_runner_transport_finalizer.py
+          python3 .github/controller/tests/test_runner_transport_finalizer.py
+
       - name: Test service-scoped WSL proxy environment
         shell: bash
         run: |
@@ -59,6 +68,8 @@ jobs:
           workflow = Path('.github/workflows/phone-transport-preflight.yml').read_text(encoding='utf-8')
           observer = Path('.github/scripts/observe_runner_transport.py').read_text(encoding='utf-8')
           probe = Path('.github/controller/runner_transport_probe.py').read_text(encoding='utf-8')
+          finalizer = Path('.github/scripts/finalize_runner_transport_observation.py').read_text(encoding='utf-8')
+          observer_workflow = Path('.github/workflows/runner-transport-observation.yml').read_text(encoding='utf-8')
           observer_policy = json.loads(Path('.github/production/runner-transport-policy.json').read_text(encoding='utf-8'))
 
           for required in (
@@ -161,12 +172,56 @@ jobs:
               'RUNNER_SERVICE = "mobile-proxy-phone-runner.service"',
               'WATCHDOG_TIMER = "mobile-proxy-runner-transport-health.timer"',
               'systemctl', 'show', '--retry', '0', '--proto', '=https',
-              'service_environment_observed', 'expected_local_poll_cancellation',
+              'service_environment_observed',
           ):
-              if required not in probe and required != 'expected_local_poll_cancellation':
+              if required not in probe:
                   raise SystemExit('runner transport probe invariant missing: ' + required)
 
-          combined = '\n'.join((owner, adapter, workflow, observer, probe)).lower()
+          for required in (
+              'ISSUE_COMMENT_CREATED_AT_TO_ACTIONS_JOB_STARTED_AT',
+              'ACTIONS_JOB_STARTED_AT_TO_CHECKOUT_STEP_STARTED_AT',
+              'ACTIONS_CHECKOUT_STEP_TIMESTAMPS',
+              'BROKER_ASSIGNMENT_TIMESTAMP_UNAVAILABLE',
+              'ARTIFACT_UPLOAD_RETRY',
+              'core_digest_verified',
+              'TRANSPORT_UNAVAILABLE',
+          ):
+              if required not in finalizer:
+                  raise SystemExit('runner transport finalizer invariant missing: ' + required)
+
+          for required in (
+              "inputs.command == '/observe-runner-transport'",
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-runner-transport-observation',
+              'cancel-in-progress: false',
+              'Run bounded runner transport observer',
+              '.github/scripts/observe_runner_transport.py',
+              'Preserve primary core transport evidence',
+              'Retry same core evidence transfer once',
+              'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
+              'hosted download',
+              '.github/scripts/finalize_runner_transport_observation.py',
+              'Preserve mandatory final runner transport evidence',
+          ):
+              if required.lower() not in observer_workflow.lower():
+                  raise SystemExit('runner transport workflow invariant missing: ' + required)
+          if observer_workflow.count('.github/scripts/observe_runner_transport.py') != 1:
+              raise SystemExit('runner transport observer may execute more than once')
+          if observer_workflow.count('continue-on-error: true') != 2:
+              raise SystemExit('runner transport transfer retry boundary differs')
+
+          observer_workflow_lower = observer_workflow.lower()
+          workflow_forbidden = (
+              'workflow_dispatch:', 'issue_comment:', 'android_production_serial',
+              'environment: phone-production', 'secrets:', 'adb ', 'systemctl restart',
+              'service restart', 'recover-runner-transport', 'ip route add', 'ip route replace',
+              '--insecure', 'curl -k',
+          )
+          present = [item for item in workflow_forbidden if item in observer_workflow_lower]
+          if present:
+              raise SystemExit('runner transport workflow gained forbidden surface: ' + ', '.join(present))
+
+          combined = '\n'.join((owner, adapter, workflow, observer, probe, finalizer)).lower()
           forbidden = (
               'systemctl restart',
               'service restart',

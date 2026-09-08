@@ -37,6 +37,8 @@ jobs:
             .github/scripts/observe_phone_operational.py \
             .github/scripts/reconcile_phone_release.py \
             .github/scripts/phone_transport_preflight.py \
+            .github/scripts/observe_runner_transport.py \
+            .github/scripts/finalize_runner_transport_observation.py \
             .github/scripts/prepare_quarantine_recovery.py \
             .github/scripts/run_quarantine_recovery.py
           python3 - <<'PY'
@@ -137,6 +139,7 @@ jobs:
               "needs.route.outputs.route_id == 'reconcile-phone-release'",
               "needs.route.outputs.operation_class == 'RECONCILE'",
               "needs.route.outputs.route_id == 'phone-transport-preflight'",
+              "needs.route.outputs.route_id == 'observe-runner-transport'",
               'source_comment_created_at: $' + '{{ github.event.comment.created_at }}',
               "needs.route.outputs.route_id == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'recover-quarantined-product-release'",
@@ -146,6 +149,7 @@ jobs:
               'uses: ./.github/workflows/phone-operational-observation.yml',
               'uses: ./.github/workflows/phone-release-reconcile.yml',
               'uses: ./.github/workflows/phone-transport-preflight.yml',
+              'uses: ./.github/workflows/runner-transport-observation.yml',
               'uses: ./.github/workflows/release-deployment.yml',
               'uses: ./.github/workflows/quarantined-release-recovery.yml',
           )
@@ -200,6 +204,7 @@ jobs:
               'observe-phone-operational',
               'reconcile-phone-release',
               'phone-transport-preflight',
+              'observe-runner-transport',
               'deploy-product-release',
               'runner-android-build-tools-bootstrap',
               'recover-quarantined-product-release',
@@ -343,6 +348,30 @@ jobs:
               or transport_preflight.get('pattern') != r'^/phone-transport-preflight$'
           ):
               raise SystemExit('Stage 4 phone transport preflight route safety contract differs')
+
+          runner_transport = next((item for item in active if item.get('id') == 'observe-runner-transport'), None)
+          if runner_transport is None:
+              raise SystemExit('Stage 4 runner transport observation route is missing')
+          if (
+              runner_transport.get('handler') != 'workflow_call'
+              or runner_transport.get('operation') != 'observe-runner-transport'
+              or runner_transport.get('operation_class') != 'DIAGNOSTIC'
+              or runner_transport.get('read_only') is not True
+              or runner_transport.get('destructive') is not False
+              or runner_transport.get('requires_phone') is not False
+              or runner_transport.get('requires_vm') is not False
+              or runner_transport.get('requires_release') is not False
+              or runner_transport.get('allowed_targets') != []
+              or runner_transport.get('physical_domains') != []
+              or runner_transport.get('concurrency_domain') != 'production-runner-transport-observation'
+              or runner_transport.get('authority_policy') != 'private-issue1-owner+controller-main-exact+stage4-runner-transport-read-only'
+              or runner_transport.get('target_capability_policy') != 'runner-transport-read-only'
+              or runner_transport.get('evidence_policy') != 'mandatory-bounded-runner-transport-observation-artifact-round-trip'
+              or runner_transport.get('workflow') != '.github/workflows/runner-transport-observation.yml'
+              or runner_transport.get('ref_policy') != 'controller-event-sha-exact'
+              or runner_transport.get('pattern') != r'^/observe-runner-transport$'
+          ):
+              raise SystemExit('Stage 4 runner transport observation route safety contract differs')
 
           if targets['phone-production'].get('active') is not True:
               raise SystemExit('phone target is not active')
@@ -630,6 +659,7 @@ jobs:
           print('STAGE4_PHONE_OPERATIONAL_OBSERVATION_BOUNDARY_OK')
           print('STAGE4_PHONE_RECONCILE_BOUNDARY_OK')
           print('STAGE4_PHONE_TRANSPORT_PREFLIGHT_BOUNDARY_OK')
+          print('STAGE4_RUNNER_TRANSPORT_OBSERVATION_BOUNDARY_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
           print('STAGE3_QUARANTINE_RECOVERY_BOUNDARY_OK')
           print('VM_TARGET_DEFERRED_OK')

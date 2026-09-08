@@ -81,6 +81,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "observe-phone-operational",
         "reconcile-phone-release",
         "phone-transport-preflight",
+        "observe-runner-transport",
         "deploy-product-release",
         "runner-android-build-tools-bootstrap",
         "recover-quarantined-product-release",
@@ -318,6 +319,57 @@ def test_phone_transport_preflight_route_is_exact_read_only_and_bounded() -> Non
         assert forbidden not in source
 
 
+def test_runner_transport_observer_route_is_exact_no_argument_and_phone_independent() -> None:
+    route = accepted("/observe-runner-transport")
+    assert route.route_id == "observe-runner-transport"
+    assert route.handler == "workflow_call"
+    assert route.workflow == ".github/workflows/runner-transport-observation.yml"
+    assert route.ref == "main"
+    assert route.operation == "observe-runner-transport"
+    assert route.operation_class == "DIAGNOSTIC"
+    assert route.read_only is True and route.destructive is False
+    assert route.concurrency_domain == "production-runner-transport-observation"
+    assert route.idempotency_policy == "single-run-attempt"
+    assert route.ref_policy == "controller-event-sha-exact"
+    assert route.arguments_json == "{}"
+    refused("/observe-runner-transport extra")
+    refused("/observe-runner-transport phone-production")
+    refused("/observe-runner-transport v0.1.7")
+    refused("/observe-runner-transport\n/deploy phone-production v0.1.7")
+    refused("/observe-runner-transport", run_attempt=2)
+
+    source = (WORKFLOWS / "runner-transport-observation.yml").read_text(encoding="utf-8")
+    for required in (
+        "workflow_call:",
+        "inputs.command == '/observe-runner-transport'",
+        "runs-on: [self-hosted, Linux, X64, android-production]",
+        "group: production-runner-transport-observation",
+        "cancel-in-progress: false",
+        "Run bounded runner transport observer",
+        ".github/scripts/observe_runner_transport.py",
+        "continue-on-error: true",
+        "Retry same core evidence transfer once",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        ".github/scripts/finalize_runner_transport_observation.py",
+        "runner-transport-observation-final.json",
+    ):
+        assert required in source
+    assert source.count(".github/scripts/observe_runner_transport.py") == 1
+    for forbidden in (
+        "workflow_dispatch:",
+        "issue_comment:",
+        "ANDROID_PRODUCTION_SERIAL",
+        "environment: phone-production",
+        "secrets:",
+        "adb ",
+        "systemctl restart",
+        "recover-runner-transport",
+        "ip route add",
+        "ip route replace",
+    ):
+        assert forbidden not in source
+
+
 def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
     dispatcher = load_dispatcher()
     workflow, ref, inputs = dispatcher.build_dispatch("observe-public-deployment-projection", "{}")
@@ -328,6 +380,7 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
         ("observe-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
         ("observe-phone-operational", '{"release":"v0.1.7","target":"phone-production"}'),
         ("reconcile-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
+        ("observe-runner-transport", '{}'),
         ("deploy-product-release", '{"release":"v0.1.4","target":"phone-production"}'),
         ("recover-quarantined-product-release", '{"quarantined_request_id":"req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7","release":"v0.1.7","target":"phone-production"}'),
     ):
@@ -533,11 +586,13 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "needs.route.outputs.route_id == 'observe-phone-release'",
         "needs.route.outputs.route_id == 'observe-phone-operational'",
         "needs.route.outputs.route_id == 'reconcile-phone-release'",
+        "needs.route.outputs.route_id == 'observe-runner-transport'",
         "needs.route.outputs.operation_class == 'RECONCILE'",
         "needs.route.outputs.read_only == 'false'",
         "./.github/workflows/phone-release-observation.yml",
         "./.github/workflows/phone-operational-observation.yml",
         "./.github/workflows/phone-release-reconcile.yml",
+        "./.github/workflows/runner-transport-observation.yml",
         "./.github/workflows/release-deployment.yml",
         "./.github/workflows/production-runner-android-build-tools-bootstrap.yml",
         "./.github/workflows/quarantined-release-recovery.yml",
