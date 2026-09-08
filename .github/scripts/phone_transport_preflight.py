@@ -12,7 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "controller"))
 
-from phone_target import PhoneTargetUnavailable, _probe_root_capability, _require_device
+from phone_target import PhoneTargetUnavailable
+from phone_transport_readiness import probe_registered_phone_transport
 from runner_transport_evidence import classify_preflight, collect_runner_transport_evidence
 
 
@@ -45,6 +46,37 @@ def _base_safety() -> dict[str, bool]:
     }
 
 
+def _write_not_ready(
+    *,
+    output: Path,
+    controller_revision: str,
+    timings: dict[str, int],
+    transport: dict[str, object],
+    safety: dict[str, bool],
+    failure_phase: str,
+    failure_code: str,
+    target_state: str | None = None,
+) -> int:
+    payload: dict[str, object] = {
+        "schema": "phone-transport-preflight.v2",
+        "controller_revision": controller_revision,
+        "classification": "NOT_READY",
+        "failure_phase": failure_phase,
+        "failure_code": failure_code,
+        "timing_ms": timings,
+        "transport": transport,
+        "safety": safety,
+    }
+    if target_state is not None:
+        payload["target_state"] = target_state
+    _write(output, payload)
+    suffix = f" failure_phase={failure_phase} failure_code={failure_code}"
+    if target_state is not None:
+        suffix += f" target_state={target_state}"
+    print("PHONE_TRANSPORT_PREFLIGHT classification=NOT_READY" + suffix)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -67,57 +99,71 @@ def main(argv: list[str] | None = None) -> int:
         if assignment_latency_ms < 0:
             raise PhoneTargetUnavailable("command provenance clock differs")
         transport["runner_assignment_latency_ms"] = assignment_latency_ms
-
-        runner_temp = os.environ.get("RUNNER_TEMP", "")
-        transport.update(
-            collect_runner_transport_evidence(
-                runner_temp=Path(runner_temp) if runner_temp else Path("."),
-                assignment_latency_ms=assignment_latency_ms,
-            )
-        )
-
-        serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
-        if not serial:
-            raise PhoneTargetUnavailable("registered production phone binding is unavailable")
-        phase = time.monotonic()
-        _require_device(serial)
-        timings["registered_device_state"] = int((time.monotonic() - phase) * 1000)
-        safety["phone_access_performed"] = True
-        phase = time.monotonic()
-        _probe_root_capability(serial)
-        timings["root_capability"] = int((time.monotonic() - phase) * 1000)
+    except PhoneTargetUnavailable:
         timings["total"] = int((time.monotonic() - started) * 1000)
+        return _write_not_ready(
+            output=args.output,
+            controller_revision=args.controller_revision,
+            timings=timings,
+            transport=transport,
+            safety=safety,
+            failure_phase="command_provenance",
+            failure_code="COMMAND_PROVENANCE_INVALID",
+        )
 
-        classification = classify_preflight(phone_ready=True, transport=transport)
-        _write(
-            args.output,
-            {
-                "schema": "phone-transport-preflight.v2",
-                "controller_revision": args.controller_revision,
-                "classification": classification,
-                "timing_ms": timings,
-                "transport": transport,
-                "safety": safety,
-            },
+    runner_temp = os.environ.get("RUNNER_TEMP", "")
+    transport.update(
+        collect_runner_transport_evidence(
+            runner_temp=Path(runner_temp) if runner_temp else Path("."),
+            assignment_latency_ms=assignment_latency_ms,
         )
-        print(f"PHONE_TRANSPORT_PREFLIGHT classification={classification}")
-        return 0
-    except PhoneTargetUnavailable as exc:
+    )
+
+    serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
+    if not serial:
         timings["total"] = int((time.monotonic() - started) * 1000)
-        _write(
-            args.output,
-            {
-                "schema": "phone-transport-preflight.v2",
-                "controller_revision": args.controller_revision,
-                "classification": "NOT_READY",
-                "failure_class": exc.__class__.__name__,
-                "timing_ms": timings,
-                "transport": transport,
-                "safety": safety,
-            },
+        return _write_not_ready(
+            output=args.output,
+            controller_revision=args.controller_revision,
+            timings=timings,
+            transport=transport,
+            safety=safety,
+            failure_phase="target_binding",
+            failure_code="TARGET_BINDING_UNAVAILABLE",
         )
-        print("PHONE_TRANSPORT_PREFLIGHT classification=NOT_READY")
-        return 0
+
+    readiness = probe_registered_phone_transport(serial)
+    timings.update(readiness.timing_ms)
+    if not readiness.ready:
+        timings["total"] = int((time.monotonic() - started) * 1000)
+        assert readiness.failure_phase is not None and readiness.failure_code is not None
+        return _write_not_ready(
+            output=args.output,
+            controller_revision=args.controller_revision,
+            timings=timings,
+            transport=transport,
+            safety=safety,
+            failure_phase=readiness.failure_phase,
+            failure_code=readiness.failure_code,
+            target_state=readiness.target_state,
+        )
+
+    safety["phone_access_performed"] = True
+    timings["total"] = int((time.monotonic() - started) * 1000)
+    classification = classify_preflight(phone_ready=True, transport=transport)
+    _write(
+        args.output,
+        {
+            "schema": "phone-transport-preflight.v2",
+            "controller_revision": args.controller_revision,
+            "classification": classification,
+            "timing_ms": timings,
+            "transport": transport,
+            "safety": safety,
+        },
+    )
+    print(f"PHONE_TRANSPORT_PREFLIGHT classification={classification}")
+    return 0
 
 
 if __name__ == "__main__":
