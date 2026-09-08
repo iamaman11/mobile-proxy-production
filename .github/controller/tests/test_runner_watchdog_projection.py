@@ -1,16 +1,46 @@
 from __future__ import annotations
 
+import importlib.util
+import json
+import os
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 WSL = ROOT / "infra" / "runner-host" / "wsl"
 CONTROLLER = ROOT / ".github" / "controller"
+SCRIPTS = ROOT / ".github" / "scripts"
 
 
 def _shell_function_body(source: str, name: str) -> str:
     marker = f"{name}() {{"
     assert marker in source
     return source.split(marker, 1)[1].split("\n}\n", 1)[0]
+
+
+def _load_projection_diagnostic():
+    path = SCRIPTS / "diagnose_runner_watchdog_projection.py"
+    spec = importlib.util.spec_from_file_location("diagnose_runner_watchdog_projection_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_projection(path: Path, **overrides: object) -> None:
+    value: dict[str, object] = {
+        "schema": "runner-transport-health-projection.v1",
+        "observed_at_epoch": 900,
+        "expires_at_epoch": 1100,
+        "decision": "HEALTHY",
+        "cooldown_active": False,
+        "restart_budget_remaining": 3,
+        "post_restart_grace_active": False,
+        "restart_count_window": 0,
+    }
+    value.update(overrides)
+    path.write_text(json.dumps(value) + "\n", encoding="ascii")
+    path.chmod(0o644)
 
 
 def test_watchdog_keeps_private_governor_state_and_publishes_only_projection() -> None:
@@ -169,6 +199,85 @@ def test_runner_observer_reads_only_bounded_projection_and_owns_no_restart_thres
         "WATCHDOG_MAX_RESTARTS",
         "WATCHDOG_POST_RESTART_GRACE_SECONDS",
         "systemctl restart",
+    )
+    present = [item for item in forbidden if item in source]
+    assert present == []
+
+
+def test_projection_diagnostic_reports_trusted_projection_without_raw_values() -> None:
+    diagnostic = _load_projection_diagnostic()
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        projection = directory / "observation.json"
+        _write_projection(projection)
+        reason, value = diagnostic.diagnose_projection(
+            projection,
+            now_epoch=1000,
+            expected_owner_uid=os.getuid(),
+        )
+    assert reason == "NONE"
+    assert value is not None
+    assert value["decision"] == "HEALTHY"
+
+
+def test_projection_diagnostic_distinguishes_stale_from_trust_and_shape_failures() -> None:
+    diagnostic = _load_projection_diagnostic()
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        projection = directory / "observation.json"
+
+        _write_projection(projection, expires_at_epoch=950)
+        reason, value = diagnostic.diagnose_projection(
+            projection,
+            now_epoch=1000,
+            expected_owner_uid=os.getuid(),
+        )
+        assert (reason, value) == ("PROJECTION_STALE", None)
+
+        _write_projection(projection)
+        projection.chmod(0o666)
+        reason, value = diagnostic.diagnose_projection(
+            projection,
+            now_epoch=1000,
+            expected_owner_uid=os.getuid(),
+        )
+        assert (reason, value) == ("FILE_MODE_INVALID", None)
+
+        _write_projection(projection)
+        payload = json.loads(projection.read_text(encoding="ascii"))
+        payload["unexpected"] = True
+        projection.write_text(json.dumps(payload) + "\n", encoding="ascii")
+        projection.chmod(0o644)
+        reason, value = diagnostic.diagnose_projection(
+            projection,
+            now_epoch=1000,
+            expected_owner_uid=os.getuid(),
+        )
+        assert (reason, value) == ("FIELDS_INVALID", None)
+
+
+def test_projection_diagnostic_is_read_only_and_bounded() -> None:
+    source = (SCRIPTS / "diagnose_runner_watchdog_projection.py").read_text(encoding="utf-8")
+    required = (
+        "projection_rejection=",
+        "projection_trusted=",
+        "watchdog_decision=",
+        "PARSER_INTERNAL_MISMATCH",
+        "PROJECTION_STALE",
+        "PARENT_OWNER_INVALID",
+        "FILE_MODE_INVALID",
+    )
+    missing = [item for item in required if item not in source]
+    assert missing == []
+    forbidden = (
+        "subprocess",
+        "systemctl",
+        "journalctl",
+        "/var/lib/mobile-proxy-runner-health/state",
+        "systemctl restart",
+        "systemctl start",
+        "systemctl stop",
+        "adb ",
     )
     present = [item for item in forbidden if item in source]
     assert present == []
