@@ -386,10 +386,10 @@ def test_observation_validator_rejects_raw_url_in_artifact() -> None:
 
 
 def test_observer_sources_have_no_phone_recovery_or_network_mutation_surface() -> None:
-    combined = "\n".join(
+    combined = "\n".join((
         (CONTROLLER / "runner_transport_probe.py").read_text(encoding="utf-8").lower(),
         (SCRIPTS / "observe_runner_transport.py").read_text(encoding="utf-8").lower(),
-    )
+    ))
     forbidden = (
         "adb ", "adb-", "systemctl restart", "service restart", "svc.sh restart",
         "config.sh remove", "ip route add", "ip route replace", "resolv.conf", "iptables",
