@@ -54,9 +54,12 @@ jobs:
               'artifact_transport_error',
               'DIAGNOSTIC_EVIDENCE_UNAVAILABLE',
               'DIAGNOSTIC_WINDOW_TRUNCATED',
+              'SESSION_WINDOW_UNRESOLVED',
               'TRANSPORT_DEGRADED',
               'MAX_DIAGNOSTIC_BYTES',
               '_safe_recent_paths',
+              'replace(" ", "T")',
+              'if not window_unresolved:',
           ):
               if required not in owner:
                   raise SystemExit('runner transport evidence owner invariant missing: ' + required)
@@ -86,6 +89,8 @@ jobs:
               "transport.get('assignment_normal_slo_ms') != 20000",
               "transport.get('assignment_bounded_slo_ms') != 60000",
               'artifact_transport_error',
+              'SESSION_WINDOW_UNRESOLVED',
+              'runner transport session-window resolution evidence differs',
               'raw_runner_log_recorded',
               'raw_transport_url_recorded',
           ):

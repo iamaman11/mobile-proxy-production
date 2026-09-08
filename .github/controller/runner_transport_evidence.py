@@ -10,7 +10,7 @@ REPEATED_ERROR_THRESHOLD = 2
 MAX_WORKER_LOGS = 32
 MAX_DIAGNOSTIC_BYTES = 16 * 1024 * 1024
 
-_TIMESTAMP_RE = re.compile(r"(?P<value>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
+_TIMESTAMP_RE = re.compile(r"(?P<value>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
 _RUNNER_VERSION_RE = re.compile(
     r"(?:current\s+runner\s+version|runner\s+version)\s*:\s*['\"]?(?P<version>\d+\.\d+\.\d+)",
     re.IGNORECASE,
@@ -50,7 +50,8 @@ def _parse_timestamp(line: str) -> datetime | None:
     if match is None:
         return None
     try:
-        return datetime.fromisoformat(match.group("value").replace("Z", "+00:00")).astimezone(timezone.utc)
+        normalized = match.group("value").replace(" ", "T").replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -231,30 +232,35 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
     evidence["last_successful_session_establishment_at_utc"] = _format_timestamp(last_success)
     evidence["diagnostics_truncated"] = truncated
 
+    window_unresolved = session_started is None
     workers: list[Path] = []
-    for candidate in _safe_recent_paths(diag, "Worker_*.log"):
-        if len(workers) >= MAX_WORKER_LOGS:
-            evidence["diagnostics_truncated"] = True
-            break
-        started = _first_timestamp(candidate)
-        if session_started is not None and started is not None and started < session_started:
-            continue
-        workers.append(candidate)
+    if not window_unresolved:
+        for candidate in _safe_recent_paths(diag, "Worker_*.log"):
+            started = _first_timestamp(candidate)
+            if started is None:
+                window_unresolved = True
+                continue
+            if started < session_started:
+                continue
+            if len(workers) >= MAX_WORKER_LOGS:
+                evidence["diagnostics_truncated"] = True
+                break
+            workers.append(candidate)
 
     for worker in reversed(workers):
         if remaining <= 0:
             evidence["diagnostics_truncated"] = True
             break
-        used, truncated, version, _ = _scan_file(
+        used, worker_truncated, worker_version, _ = _scan_file(
             worker,
             remaining_bytes=remaining,
             counters=counters,
             listener=False,
         )
         remaining -= used
-        if evidence["runner_version"] is None and version is not None:
-            evidence["runner_version"] = version
-        if truncated:
+        if evidence["runner_version"] is None and worker_version is not None:
+            evidence["runner_version"] = worker_version
+        if worker_truncated:
             evidence["diagnostics_truncated"] = True
             break
         evidence["worker_files_scanned"] = int(evidence["worker_files_scanned"]) + 1
@@ -263,6 +269,8 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
     failure_classes = sorted(
         value for key, value in _FAILURE_CLASS_BY_COUNTER.items() if counters.get(key, 0) > 0
     )
+    if window_unresolved:
+        failure_classes.append("SESSION_WINDOW_UNRESOLVED")
     if bool(evidence["diagnostics_truncated"]):
         failure_classes.append("DIAGNOSTIC_WINDOW_TRUNCATED")
     if evidence["runner_version"] is None:
@@ -280,6 +288,7 @@ def collect_runner_transport_evidence(*, runner_temp: Path, assignment_latency_m
     evidence["transport_degraded"] = bool(
         evidence["assignment_slo_exceeded"]
         or repeated
+        or window_unresolved
         or evidence["diagnostics_truncated"]
         or evidence["runner_version"] is None
         or evidence["last_successful_session_establishment_at_utc"] is None

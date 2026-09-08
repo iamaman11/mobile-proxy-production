@@ -21,11 +21,22 @@ def _layout(root: Path) -> tuple[Path, Path]:
 
 def _listener(diag: Path, *extra: str) -> None:
     lines = [
-        "[2026-09-07T22:00:00.0000000Z INFO Runner] Runner version: '2.337.0'",
-        "[2026-09-07T22:00:01.0000000Z INFO Runner] Listening for Jobs",
+        "[RUNNER 2026-09-07 22:00:00Z INFO Runner] Runner version: '2.337.0'",
+        "[RUNNER 2026-09-07 22:00:01Z INFO Terminal] WRITE LINE: 2026-09-07 22:00:01Z: Listening for Jobs",
         *extra,
     ]
     (diag / "Runner_20260907-220000-utc.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _worker(diag: Path, name: str, *lines: str) -> None:
+    (diag / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_runner_timestamp_parser_accepts_real_space_and_iso_t_formats() -> None:
+    actual = evidence._parse_timestamp("[RUNNER 2026-09-07 22:00:00Z INFO Runner] message")
+    iso = evidence._parse_timestamp("[2026-09-07T22:00:00.123456Z INFO Runner] message")
+    assert actual is not None and actual.isoformat() == "2026-09-07T22:00:00+00:00"
+    assert iso is not None and iso.isoformat() == "2026-09-07T22:00:00.123456+00:00"
 
 
 def test_ready_session_has_bounded_identity_and_zero_errors() -> None:
@@ -63,8 +74,8 @@ def test_repeated_broker_tls_eof_is_counted_without_raw_log_content() -> None:
         runner_temp, diag = _layout(Path(raw))
         _listener(
             diag,
-            "[2026-09-07T22:01:00.0000000Z ERR BrokerServer] SSL connection could not be established; unexpected EOF; retrying with backoff https://example.invalid/?token=secret-one",
-            "[2026-09-07T22:01:02.0000000Z ERR BrokerServer] zero bytes from the transport stream; retrying with backoff token=secret-two",
+            "[RUNNER 2026-09-07 22:01:00Z ERR BrokerServer] SSL connection could not be established; unexpected EOF; retrying with backoff https://example.invalid/?token=secret-one",
+            "[RUNNER 2026-09-07 22:01:02Z ERR BrokerServer] zero bytes from the transport stream; retrying with backoff token=secret-two",
         )
         value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
         counters = value["error_counters"]
@@ -86,14 +97,11 @@ def test_worker_action_download_and_artifact_reset_are_classified() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runner_temp, diag = _layout(Path(raw))
         _listener(diag)
-        (diag / "Worker_20260907-220100-utc.log").write_text(
-            "\n".join(
-                (
-                    "[2026-09-07T22:01:00.0000000Z ERR Worker] Failed to resolve action download info. Error: The SSL connection could not be established",
-                    "[2026-09-07T22:01:02.0000000Z ERR Worker] Failed to CreateArtifact: Unable to make request: ECONNRESET",
-                )
-            ) + "\n",
-            encoding="utf-8",
+        _worker(
+            diag,
+            "Worker_20260907-220100-utc.log",
+            "[WORKER 2026-09-07 22:01:00Z ERR Worker] Failed to resolve action download info. Error: The SSL connection could not be established",
+            "[WORKER 2026-09-07 22:01:02Z ERR Worker] Failed to CreateArtifact: Unable to make request: ECONNRESET",
         )
         value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
         counters = value["error_counters"]
@@ -105,6 +113,43 @@ def test_worker_action_download_and_artifact_reset_are_classified() -> None:
         assert value["worker_files_scanned"] == 1
         assert value["transport_degraded"] is True
         assert {"ACTION_DOWNLOAD_TRANSPORT", "ARTIFACT_TRANSPORT", "TLS_ERROR", "CONNECTION_RESET"}.issubset(set(value["failure_classes"]))
+
+
+def test_workers_before_current_listener_session_are_excluded() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runner_temp, diag = _layout(Path(raw))
+        _listener(diag)
+        _worker(
+            diag,
+            "Worker_20260907-210000-utc.log",
+            "[WORKER 2026-09-07 21:00:00Z ERR Worker] Failed to CreateArtifact: Unable to make request: ECONNRESET",
+        )
+        _worker(
+            diag,
+            "Worker_20260907-220100-utc.log",
+            "[WORKER 2026-09-07 22:01:00Z INFO Worker] healthy current-session worker",
+        )
+        value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
+        assert value["worker_files_scanned"] == 1
+        assert value["error_counters"]["artifact_transport_error"] == 0
+        assert value["error_counters"]["connection_reset"] == 0
+
+
+def test_unresolved_listener_window_does_not_scan_historical_workers() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runner_temp, diag = _layout(Path(raw))
+        (diag / "Runner_unknown.log").write_text("Runner version: '2.337.0'\nListening for Jobs\n", encoding="utf-8")
+        _worker(
+            diag,
+            "Worker_20260907-210000-utc.log",
+            "[WORKER 2026-09-07 21:00:00Z ERR Worker] Failed to CreateArtifact: Unable to make request: ECONNRESET",
+        )
+        value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=5_000)
+        assert value["listener_session_started_at_utc"] is None
+        assert value["worker_files_scanned"] == 0
+        assert value["error_counters"]["artifact_transport_error"] == 0
+        assert "SESSION_WINDOW_UNRESOLVED" in value["failure_classes"]
+        assert value["transport_degraded"] is True
 
 
 def test_missing_diagnostics_fail_degraded_not_ready_by_default() -> None:
@@ -125,7 +170,7 @@ def test_bounded_diagnostic_window_marks_truncation_degraded() -> None:
     try:
         with tempfile.TemporaryDirectory() as raw:
             runner_temp, diag = _layout(Path(raw))
-            _listener(diag, "[2026-09-07T22:01:00.0000000Z INFO Runner] " + "x" * 512)
+            _listener(diag, "[RUNNER 2026-09-07 22:01:00Z INFO Runner] " + "x" * 512)
             value = evidence.collect_runner_transport_evidence(runner_temp=runner_temp, assignment_latency_ms=1_000)
             assert value["diagnostics_truncated"] is True
             assert value["transport_degraded"] is True
