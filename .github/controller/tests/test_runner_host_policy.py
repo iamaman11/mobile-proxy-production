@@ -155,11 +155,13 @@ def test_android_usb_permission_installer_is_least_privilege_and_bounded() -> No
     assert 'runner service unexpectedly runs as root' in script
     assert 'install -m 0644 "${SOURCE_DROPIN}" "${DROPIN_PATH}"' in script
     assert 'systemctl daemon-reload' in script
-    assert 'systemctl restart "${RUNNER_SERVICE}"' in script
+    assert 'systemctl restart --no-block "${RUNNER_SERVICE}"' in script
     assert 'systemctl is-active --quiet "${RUNNER_SERVICE}"' in script
     assert 'systemctl show --property=MainPID --value "${RUNNER_SERVICE}"' in script
     assert '/proc/${main_pid}/status' in script
     assert 'runner service process did not acquire required supplementary group' in script
+    for required_tool in ("awk", "cut"):
+        assert f"command -v {required_tool}" in script
     for forbidden in (
         "adb ",
         "adb\n",
@@ -176,5 +178,5 @@ def test_android_usb_permission_installer_is_least_privilege_and_bounded() -> No
         "systemctl disable",
     ):
         assert forbidden not in lower
-    for identifier in ("vid", "pid", "busid", "serial"):
-        assert identifier not in lower
+    for usb_identifier in ("idvendor", "idproduct", "busid", "serial="):
+        assert usb_identifier not in lower
