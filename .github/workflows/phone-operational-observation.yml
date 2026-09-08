@@ -1,0 +1,221 @@
+name: Stage 4 phone operational observation
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      MOBILE_PROXY_ADMIN_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  admit:
+    name: Admit exact Issue 1 Stage 4 operational observation without phone access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact Controller comment-event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate sole-ingress provenance and immutable Stage 4 identity
+        env:
+          COMMAND: ${{ inputs.command }}
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_ISSUE_NUMBER: ${{ inputs.source_issue_number }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          SOURCE_ACTOR: ${{ inputs.source_actor }}
+          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
+          EXPECTED_OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          if os.environ['COMMAND'] != '/observe-phone-operational phone-production v0.1.7':
+              raise SystemExit('Stage 4 operational command differs from exact Issue #1 contract')
+          if os.environ['TARGET'] != 'phone-production' or os.environ['RELEASE_TAG'] != 'v0.1.7':
+              raise SystemExit('Stage 4 operational identity differs')
+          if os.environ['SOURCE_ISSUE_NUMBER'] != '1':
+              raise SystemExit('Stage 4 operational source Issue differs')
+          if os.environ['SOURCE_ACTOR'] != os.environ['EXPECTED_OWNER']:
+              raise SystemExit('Stage 4 operational source actor differs')
+          try:
+              comment_id = int(os.environ['SOURCE_COMMENT_ID'])
+          except ValueError as exc:
+              raise SystemExit('Stage 4 operational source comment id is invalid') from exc
+          if comment_id <= 0:
+              raise SystemExit('Stage 4 operational source comment id is invalid')
+          expected_url = (
+              'https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-'
+              + str(comment_id)
+          )
+          if os.environ['SOURCE_COMMENT_URL'] != expected_url:
+              raise SystemExit('Stage 4 operational source comment URL differs')
+
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag='v0.1.7', target='phone-production')
+          if admitted.identity.tag != 'v0.1.7' or admitted.identity.immutable is not True:
+              raise SystemExit('Stage 4 operational Release admission differs')
+          print(
+              'STAGE4_PHONE_OPERATIONAL_ADMISSION_ACCEPTED '
+              'target=phone-production release=v0.1.7 phone_access=false'
+          )
+          PY
+
+  observe-phone:
+    name: Observe phone-local runtime health read-only
+    needs: admit
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    env:
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+    steps:
+      - name: Check out exact Controller comment-event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Observe bounded phone operational state
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/observe_phone_operational.py \
+            --target "$TARGET" \
+            --release-tag "$RELEASE_TAG" \
+            --controller-revision "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/stage4-phone-operational-observation.json"
+
+      - name: Preserve mandatory bounded operational evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stage4-phone-operational-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage4-phone-operational-observation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Validate bounded operational result and separation invariants
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'stage4-phone-operational-observation.json'
+          if not path.is_file():
+              raise SystemExit('Stage 4 operational evidence is unavailable')
+          text = path.read_text(encoding='utf-8')
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          admin_token = os.environ.get('MOBILE_PROXY_ADMIN_TOKEN', '')
+          if serial and serial in text:
+              raise SystemExit('Stage 4 operational evidence exposed target identifier')
+          if admin_token and admin_token in text:
+              raise SystemExit('Stage 4 operational evidence exposed secret')
+
+          value = json.loads(text)
+          if value.get('schema') != 'stage4-phone-operational-observation.v1':
+              raise SystemExit('Stage 4 operational schema differs')
+          classification = value.get('classification')
+          if classification not in {'READY', 'DEGRADED', 'UNKNOWN'}:
+              raise SystemExit('Stage 4 operational classification differs')
+          if value.get('target') != 'phone-production' or value.get('release_tag') != 'v0.1.7':
+              raise SystemExit('Stage 4 operational identity differs')
+          observation = value.get('observation')
+          if not isinstance(observation, dict) or not isinstance(observation.get('desired'), bool):
+              raise SystemExit('Stage 4 operational observation is malformed')
+          safety = value.get('safety')
+          if not isinstance(safety, dict) or safety.get('phone_access_performed') is not True:
+              raise SystemExit('Stage 4 operational phone-access evidence differs')
+          if safety.get('exact_phone_release_state_observed') is not False:
+              raise SystemExit('Stage 4 operational observer crossed Release-state boundary')
+          for field in (
+              'phone_mutation_performed',
+              'deployment_created',
+              'deployment_intent_created',
+              'provider_access_performed',
+              'provider_mutation_performed',
+              'raw_health_json_recorded',
+              'raw_config_recorded',
+              'secret_values_recorded',
+              'process_ids_recorded',
+              'process_cmdlines_recorded',
+          ):
+              if safety.get(field) is not False:
+                  raise SystemExit(f'Stage 4 operational safety field differs: {field}')
+          if safety.get('localhost_only') is not True:
+              raise SystemExit('Stage 4 operational probe is not localhost-only')
+
+          if classification == 'UNKNOWN':
+              if value.get('failure_code') not in {
+                  'RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE',
+                  'PHONE_TARGET_UNAVAILABLE',
+              }:
+                  raise SystemExit('Stage 4 operational UNKNOWN lacks bounded failure code')
+          elif 'failure_code' in value or 'failure_phase' in value:
+              raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
+
+          print(
+              'STAGE4_PHONE_OPERATIONAL_CLASSIFIED '
+              f"workflow_execution=success phone_operational_state={classification} "
+              'phone_mutation=false provider_access=false exact_release_state_observed=false'
+          )
+          PY
+
+      - name: Require mandatory artifact transport success
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test '${{ steps.evidence_upload.outcome }}' = 'success'
