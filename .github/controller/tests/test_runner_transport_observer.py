@@ -94,11 +94,11 @@ def _environment() -> dict[str, object]:
     }
 
 
-def _watchdog() -> dict[str, object]:
+def _watchdog(decision: str = "HEALTHY") -> dict[str, object]:
     return {
         "timer_state": "ACTIVE",
         "state_readable": True,
-        "decision": "UNKNOWN",
+        "decision": decision,
         "cooldown_active": False,
         "restart_budget_remaining": 3,
         "post_restart_grace_active": False,
@@ -117,6 +117,26 @@ def _active(result: str = "SUCCESS", *, retry: bool = False) -> dict[str, object
             ]
         roles.append({"role": destination["role"], "attempts": attempts, "final_result": attempts[-1]["result"]})
     return {"roles": roles, "retry_observed": retry, "budget_exhausted": False}
+
+
+def _projection(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema": "runner-transport-health-projection.v1",
+        "observed_at_epoch": 900,
+        "expires_at_epoch": 1100,
+        "decision": "HEALTHY",
+        "cooldown_active": False,
+        "restart_budget_remaining": 3,
+        "post_restart_grace_active": False,
+        "restart_count_window": 0,
+    }
+    value.update(overrides)
+    return value
+
+
+def _write_projection(path: Path, **overrides: object) -> None:
+    path.write_text(json.dumps(_projection(**overrides)) + "\n", encoding="ascii")
+    path.chmod(0o644)
 
 
 def test_policy_is_exact_bounded_and_has_no_wildcard_destination() -> None:
@@ -220,14 +240,14 @@ def test_actual_service_environment_is_reduced_to_presence_only() -> None:
         assert "another-secret" not in rendered
 
 
-def test_watchdog_unreadable_state_is_unknown_without_action() -> None:
+def test_watchdog_missing_projection_is_unknown_without_action() -> None:
     def fake_runner(command, timeout, environment):
         return 0, "active\n"
 
     with tempfile.TemporaryDirectory() as raw:
         result = probe.collect_watchdog(
             runner=fake_runner,
-            state_path=Path(raw) / "missing",
+            projection_path=Path(raw) / "missing.json",
             now_epoch=1000,
         )
     assert result["timer_state"] == "ACTIVE"
@@ -236,18 +256,57 @@ def test_watchdog_unreadable_state_is_unknown_without_action() -> None:
     assert result["cooldown_active"] is None
 
 
-def test_watchdog_rate_limit_is_read_only_derived_state() -> None:
+def test_watchdog_fresh_projection_is_consumed_without_rederiving_policy() -> None:
     def fake_runner(command, timeout, environment):
         return 0, "active\n"
 
     with tempfile.TemporaryDirectory() as raw:
-        state = Path(raw) / "state"
-        state.write_text("last_restart=950\nwindow_started=500\nrestarts=3\n", encoding="ascii")
-        result = probe.collect_watchdog(runner=fake_runner, state_path=state, now_epoch=1000)
-    assert result["decision"] == "RATE_LIMITED"
-    assert result["restart_budget_remaining"] == 0
-    assert result["cooldown_active"] is True
-    assert result["post_restart_grace_active"] is True
+        path = Path(raw) / "observation.json"
+        _write_projection(
+            path,
+            decision="RATE_LIMITED",
+            cooldown_active=True,
+            restart_budget_remaining=0,
+            post_restart_grace_active=True,
+            restart_count_window=3,
+        )
+        result = probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)
+    assert result == {
+        "timer_state": "ACTIVE",
+        "state_readable": True,
+        "decision": "RATE_LIMITED",
+        "cooldown_active": True,
+        "restart_budget_remaining": 0,
+        "post_restart_grace_active": True,
+        "restart_count_window": 3,
+    }
+
+
+def test_watchdog_stale_or_future_projection_is_unavailable() -> None:
+    def fake_runner(command, timeout, environment):
+        return 0, "active\n"
+
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "observation.json"
+        _write_projection(path, observed_at_epoch=700, expires_at_epoch=800)
+        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        _write_projection(path, observed_at_epoch=1200, expires_at_epoch=1300)
+        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+
+
+def test_watchdog_projection_is_strict_and_not_world_writable() -> None:
+    def fake_runner(command, timeout, environment):
+        return 0, "active\n"
+
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "observation.json"
+        _write_projection(path, decision="INVALID")
+        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        _write_projection(path, extra="x")
+        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        _write_projection(path)
+        path.chmod(0o666)
+        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
 
 
 def test_expected_local_poll_cancellation_is_explicit_context_not_transport_error() -> None:
@@ -273,7 +332,7 @@ def test_expected_local_poll_cancellation_is_explicit_context_not_transport_erro
     assert observed["error_counters"]["transport_error_lines"] == 0
 
 
-def test_healthy_requires_complete_current_session_and_zero_retries() -> None:
+def test_healthy_requires_complete_current_session_zero_retries_and_healthy_watchdog() -> None:
     observer = _load_observer()
     legacy = _healthy_legacy()
     saved = (
@@ -302,6 +361,37 @@ def test_healthy_requires_complete_current_session_and_zero_retries() -> None:
             observer.collect_watchdog,
             observer.run_active_probes,
         ) = saved
+
+
+def test_unknown_watchdog_decision_cannot_be_healthy() -> None:
+    observer = _load_observer()
+    legacy = _healthy_legacy()
+    session = observer._session_view(legacy, now=observer._utc_now())
+    classification, limitations = observer._classification(
+        runner=_runner(),
+        session=session,
+        transport={"error_counters": legacy["error_counters"]},
+        environment_presence=_environment(),
+        watchdog=_watchdog("UNKNOWN"),
+        active=_active(),
+    )
+    assert classification == "TRANSPORT_UNAVAILABLE"
+    assert "WATCHDOG_DECISION_UNKNOWN" in limitations
+
+
+def test_restart_eligible_watchdog_is_degraded_not_unavailable() -> None:
+    observer = _load_observer()
+    legacy = _healthy_legacy()
+    session = observer._session_view(legacy, now=observer._utc_now())
+    classification, _ = observer._classification(
+        runner=_runner(),
+        session=session,
+        transport={"error_counters": legacy["error_counters"]},
+        environment_presence=_environment(),
+        watchdog=_watchdog("RESTART_ELIGIBLE"),
+        active=_active(),
+    )
+    assert classification == "TRANSPORT_DEGRADED"
 
 
 def test_incomplete_session_cannot_be_healthy() -> None:
@@ -394,6 +484,8 @@ def test_observer_sources_have_no_phone_recovery_or_network_mutation_surface() -
         "adb ", "adb-", "systemctl restart", "service restart", "svc.sh restart",
         "config.sh remove", "ip route add", "ip route replace", "resolv.conf", "iptables",
         "nft add", "netsh ", "deployment intent", "recover-runner-transport",
+        "/var/lib/mobile-proxy-runner-health/state", "watchdog_cooldown_seconds",
+        "watchdog_window_seconds", "watchdog_max_restarts", "watchdog_post_restart_grace_seconds",
     )
     present = [item for item in forbidden if item in combined]
     assert present == []
