@@ -1,0 +1,38 @@
+{
+  "active_probe_budget_seconds": 120,
+  "attempt_timeout_seconds": 10,
+  "classifications": [
+    "HEALTHY",
+    "TRANSPORT_DEGRADED",
+    "TRANSPORT_UNAVAILABLE"
+  ],
+  "destinations": [
+    {
+      "role": "GITHUB_API",
+      "url": "https://api.github.com/"
+    },
+    {
+      "role": "REPOSITORY_TRANSPORT",
+      "url": "https://github.com/"
+    },
+    {
+      "role": "ACTION_DOWNLOAD",
+      "url": "https://codeload.github.com/"
+    },
+    {
+      "role": "ACTIONS_RESULTS",
+      "url": "https://results-receiver.actions.githubusercontent.com/"
+    }
+  ],
+  "failure_domains": [
+    "UNKNOWN",
+    "RUNNER_SERVICE",
+    "DNS_RESOLUTION",
+    "TLS_VALIDATION"
+  ],
+  "max_concurrency": 2,
+  "max_destinations": 5,
+  "max_attempts_per_destination": 3,
+  "schema": "runner-transport-policy.v1",
+  "tls_verification_required": true
+}
