@@ -7,6 +7,12 @@ WSL = ROOT / "infra" / "runner-host" / "wsl"
 CONTROLLER = ROOT / ".github" / "controller"
 
 
+def _shell_function_body(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    assert marker in source
+    return source.split(marker, 1)[1].split("\n}\n", 1)[0]
+
+
 def test_watchdog_keeps_private_governor_state_and_publishes_only_projection() -> None:
     source = (WSL / "runner-transport-health.sh").read_text(encoding="utf-8")
     required = (
@@ -55,18 +61,95 @@ def test_systemd_owns_ephemeral_readable_projection_directory_without_relaxing_p
     assert missing == []
 
 
-def test_installer_preserves_private_state_and_does_not_run_recovery_service_directly() -> None:
+def test_installer_has_explicit_safe_convergence_and_exact_verify_modes() -> None:
     source = (WSL / "install-runner-transport-health.sh").read_text(encoding="utf-8")
-    assert "install -d -m 0700 /var/lib/mobile-proxy-runner-health" in source
-    assert "systemctl daemon-reload" in source
-    assert "systemctl enable --now mobile-proxy-runner-transport-health.timer" in source
+    required = (
+        "--install' || \"$1\" == '--converge' || \"$1\" == '--verify'",
+        "RUNNER_TRANSPORT_HEALTH_INSTALL_REQUIRES_ROOT",
+        "RUNNER_TRANSPORT_HEALTH_DIRECTORY_OWNER_INVALID",
+        "RUNNER_TRANSPORT_HEALTH_DIRECTORY_MODE_INVALID",
+        "RUNNER_TRANSPORT_HEALTH_EXISTING_FILE_OWNER_INVALID",
+        "RUNNER_TRANSPORT_HEALTH_EXISTING_FILE_MODE_INVALID",
+        "cmp -s \"$SCRIPT_SOURCE\" \"$SCRIPT_TARGET\"",
+        "cmp -s \"$SERVICE_SOURCE\" \"$SERVICE_TARGET\"",
+        "cmp -s \"$TIMER_SOURCE\" \"$TIMER_TARGET\"",
+        "install -d -o root -g root -m 0700 \"$STATE_DIR\"",
+        "temporary=\"$(mktemp",
+        "install -o root -g root -m \"$mode\" \"$source\" \"$temporary\"",
+        "mv -f -- \"$temporary\" \"$target\"",
+        "systemctl daemon-reload",
+        "runner_restart_performed=false",
+        "phone_access=false",
+        "provider_access=false",
+        "network_configuration_changed=false",
+    )
+    missing = [item for item in required if item not in source]
+    assert missing == []
     for forbidden in (
         "systemctl restart mobile-proxy-phone-runner.service",
         "systemctl restart mobile-proxy-runner-transport-health.service",
         "systemctl start mobile-proxy-runner-transport-health.service",
+        "systemctl stop mobile-proxy-runner-transport-health.timer",
+        "systemctl restart mobile-proxy-runner-transport-health.timer",
         "chmod -R",
     ):
         assert forbidden not in source
+
+
+def test_stage4_converge_mode_preserves_existing_active_timer_without_activation() -> None:
+    source = (WSL / "install-runner-transport-health.sh").read_text(encoding="utf-8")
+    body = _shell_function_body(source, "converge_existing")
+    required = (
+        'systemctl is-active --quiet "$RUNNER_SERVICE"',
+        'systemctl is-enabled --quiet "$TIMER"',
+        'systemctl is-active --quiet "$TIMER"',
+        'systemctl is-active --quiet "$HEALTH_SERVICE"',
+        "RUNNER_TRANSPORT_HEALTH_SERVICE_BUSY",
+        "install_versioned_files",
+        "RUNNER_TRANSPORT_HEALTH_TIMER_ENABLEMENT_CHANGED",
+        "RUNNER_TRANSPORT_HEALTH_TIMER_ACTIVITY_CHANGED",
+        "timer_activation_changed=false",
+        "runner_restart_performed=false",
+    )
+    missing = [item for item in required if item not in body]
+    assert missing == []
+    forbidden = (
+        "enable --now",
+        "systemctl start",
+        "systemctl stop",
+        "systemctl restart",
+    )
+    present = [item for item in forbidden if item in body]
+    assert present == []
+
+
+def test_verify_mode_is_read_only_and_requires_exact_active_runtime_contract() -> None:
+    source = (WSL / "install-runner-transport-health.sh").read_text(encoding="utf-8")
+    body = _shell_function_body(source, "verify_runtime_contract")
+    required = (
+        "require_exact_installed_files",
+        'systemctl is-active --quiet "$RUNNER_SERVICE"',
+        'systemctl is-enabled --quiet "$TIMER"',
+        'systemctl is-active --quiet "$TIMER"',
+        'systemctl cat "$HEALTH_SERVICE"',
+        'systemctl cat "$TIMER"',
+        "runner_transport_health_installation=exact",
+        "runner_transport_health_timer=active",
+        "runner_restart_performed=false",
+    )
+    missing = [item for item in required if item not in body]
+    assert missing == []
+    forbidden = (
+        "install ",
+        "mv ",
+        "daemon-reload",
+        "enable --now",
+        "systemctl start",
+        "systemctl stop",
+        "systemctl restart",
+    )
+    present = [item for item in forbidden if item in body]
+    assert present == []
 
 
 def test_runner_observer_reads_only_bounded_projection_and_owns_no_restart_thresholds() -> None:
