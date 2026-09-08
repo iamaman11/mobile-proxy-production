@@ -160,7 +160,7 @@ export BB_BIN WATCHDOG_NEEDLE RUNTIME_SUPERVISOR_NEEDLE HOST_DAEMON_NEEDLE SING_
 printf '{_PHASE_PREFIX}process_count_start\\n'
 process_counts="$(
   "$BB_BIN" timeout -t {_PROCESS_COUNT_TIMEOUT_SECONDS} "$BB_BIN" sh -c '
-    count_cmdline_matches() {
+    count_cmdline_matches() {{
       needle="$1"
       count="$(
         "$BB_BIN" grep -F -l "$needle" /proc/[0-9]*/cmdline 2>/dev/null |
@@ -168,7 +168,7 @@ process_counts="$(
       )"
       case "$count" in ''|*[!0-9]*) exit 24 ;; esac
       printf "%s" "$count"
-    }
+    }}
 
     watchdog_count="$(count_cmdline_matches "$WATCHDOG_NEEDLE")" || exit 25
     runtime_supervisor_count="$(count_cmdline_matches "$RUNTIME_SUPERVISOR_NEEDLE")" || exit 25
