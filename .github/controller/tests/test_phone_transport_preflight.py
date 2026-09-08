@@ -108,14 +108,18 @@ def test_ready_keeps_exact_s43_probe_order_and_v3_contract() -> None:
         "root_stdout_contract",
         "root_stderr_exit_contract",
     ]
+    assert set(payload) == {
+        "schema",
+        "controller_revision",
+        "classification",
+        "phone_failure_phase",
+        "timing_ms",
+        "transport",
+        "safety",
+    }
     assert payload["schema"] == "phone-transport-preflight.v3"
     assert payload["classification"] == "READY"
     assert payload["phone_failure_phase"] == "NONE"
-    assert payload["execution_semantics"] == {
-        "workflow_execution": "success",
-        "phone_readiness": "READY",
-        "automatic_recovery_performed": False,
-    }
     assert payload["safety"]["phone_access_performed"] is True
     assert payload["safety"]["automatic_recovery_performed"] is False
     assert set(payload["timing_ms"]) == {
@@ -142,24 +146,24 @@ def test_transport_degraded_is_phone_ready_with_no_phone_failure() -> None:
 def test_every_typed_phone_failure_yields_not_ready_and_stops_later_probes() -> None:
     module = load_preflight()
     cases = (
-        (PhoneFailurePhase.ADB_TOOLING_UNAVAILABLE, 1),
-        (PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE, 2),
-        (PhoneFailurePhase.ADB_TRANSPORT_TIMEOUT, 3),
-        (PhoneFailurePhase.ROOT_SHELL_SPAWN_FAILED, 3),
-        (PhoneFailurePhase.ROOT_SCRIPT_TIMEOUT, 3),
-        (PhoneFailurePhase.ROOT_SCRIPT_OUTPUT_TRUNCATED, 3),
-        (PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH, 3),
-        (PhoneFailurePhase.ROOT_SCRIPT_NONZERO, 3),
-        (PhoneFailurePhase.UNKNOWN, 3),
+        (PhoneFailurePhase.ADB_TOOLING_UNAVAILABLE, 1, False),
+        (PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE, 2, False),
+        (PhoneFailurePhase.ADB_TRANSPORT_TIMEOUT, 3, True),
+        (PhoneFailurePhase.ROOT_SHELL_SPAWN_FAILED, 3, True),
+        (PhoneFailurePhase.ROOT_SCRIPT_TIMEOUT, 3, True),
+        (PhoneFailurePhase.ROOT_SCRIPT_OUTPUT_TRUNCATED, 3, True),
+        (PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH, 3, True),
+        (PhoneFailurePhase.ROOT_SCRIPT_NONZERO, 3, True),
+        (PhoneFailurePhase.UNKNOWN, 3, True),
     )
-    for phase, expected_events in cases:
+    for phase, expected_events, phone_access in cases:
         rc, payload, events = _run(module, failure_phase=phase, degraded=True)
         assert rc == 0
         assert len(events) == expected_events
         assert payload["classification"] == "NOT_READY"
         assert payload["phone_failure_phase"] == phase.value
         assert payload["transport"]["transport_degraded"] is True
-        assert payload["execution_semantics"]["phone_readiness"] == "NOT_READY"
+        assert payload["safety"]["phone_access_performed"] is phone_access
 
 
 def test_stderr_contract_failure_is_protocol_mismatch_after_positive_probe() -> None:
@@ -215,6 +219,7 @@ def test_stderr_contract_failure_is_protocol_mismatch_after_positive_probe() -> 
         payload = json.loads(output.read_text(encoding="utf-8"))
         assert events[-1] == "root_stderr_exit_contract"
         assert payload["phone_failure_phase"] == "ROOT_SCRIPT_PROTOCOL_MISMATCH"
+        assert payload["safety"]["phone_access_performed"] is True
 
 
 def test_artifact_never_contains_raw_identifier_output_url_or_secret_values() -> None:
