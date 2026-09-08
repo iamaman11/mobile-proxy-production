@@ -4,7 +4,7 @@ This directory owns only the host-side dependencies of the existing private
 GitHub Actions runner. It deliberately does not own a phone release, ADB
 server lifecycle, USB device identity, runner registration, or deployment.
 
-There are two small supervisors.
+There are two small supervisors plus one service-scoped permission contract.
 
 * `windows/mobile-proxy-usb-bridge.ps1` runs as the existing owner-logon
   Scheduled Task. It owns one allowlisted USBIPD device and preserves its
@@ -14,9 +14,16 @@ There are two small supervisors.
   the existing runner and local diagnostic logs. It restarts that existing
   service only after a five-minute listener outage with three recent
   broker-TLS failures, a fifteen-minute cooldown, and a three-per-hour limit.
+* `wsl/mobile-proxy-phone-runner-android-usb-permissions.conf` is a systemd
+  drop-in for the existing production runner service. It grants only the
+  supplementary `plugdev` group needed to write an already-udev-managed
+  `root:plugdev` Android USB device node. It does not add a global user-group
+  membership, device-specific rule, permissive `0666` mode, or ADB behavior.
 
-Windows owns USB. WSL owns the outbound GitHub runner session. A normal GitHub
-job owns the per-job ADB server and all device observation or mutation.
+Windows owns USB. WSL owns the outbound GitHub runner session and the
+service-scoped Linux device permission required for that runner to use the
+already attached device. A normal GitHub job owns the per-job ADB server and
+all device observation or mutation.
 
 The bridge uses the current usbipd-win 5.x command contract: the distribution
 is the optional value of `--wsl`, not a `--distribution` flag. Every 15 seconds
@@ -43,12 +50,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra\runner-host\wind
 ```bash
 cd /home/bose/projects/mobile-proxy-production
 sudo ./infra/runner-host/wsl/install-runner-transport-health.sh
+sudo ./infra/runner-host/wsl/install-runner-android-usb-permissions.sh
 ```
 
 The Windows installer updates only the named `MobileProxyUsbBridge` task and
 its versioned script, preserving its existing owner-interactive principal. The
-Linux installer adds only a separate health timer and state directory; it does
-not modify `mobile-proxy-phone-runner.service`.
+transport-health installer adds only a separate health timer and state
+directory; it does not modify `mobile-proxy-phone-runner.service`. The Android
+USB permission installer adds only a systemd drop-in to that already existing
+runner service, reloads systemd, and performs one bounded restart of the same
+service so the supplementary group is active. It never re-registers the
+runner, changes labels, changes udev rules, or invokes ADB.
 
 Use GitHub's canonical read-only phone observation command to prove the full
 path. These host facilities never replace Controller release, intent, lock,
