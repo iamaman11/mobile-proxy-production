@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -139,6 +140,15 @@ def _write_projection(path: Path, **overrides: object) -> None:
     path.chmod(0o644)
 
 
+def _collect_test_watchdog(*, runner, path: Path, now_epoch: int = 1000) -> dict[str, object]:
+    return probe.collect_watchdog(
+        runner=runner,
+        projection_path=path,
+        now_epoch=now_epoch,
+        expected_projection_owner_uid=os.getuid(),
+    )
+
+
 def test_policy_is_exact_bounded_and_has_no_wildcard_destination() -> None:
     value = _policy()
     assert value["active_probe_budget_seconds"] == 120
@@ -245,11 +255,7 @@ def test_watchdog_missing_projection_is_unknown_without_action() -> None:
         return 0, "active\n"
 
     with tempfile.TemporaryDirectory() as raw:
-        result = probe.collect_watchdog(
-            runner=fake_runner,
-            projection_path=Path(raw) / "missing.json",
-            now_epoch=1000,
-        )
+        result = _collect_test_watchdog(runner=fake_runner, path=Path(raw) / "missing.json")
     assert result["timer_state"] == "ACTIVE"
     assert result["state_readable"] is False
     assert result["decision"] == "UNKNOWN"
@@ -270,7 +276,7 @@ def test_watchdog_fresh_projection_is_consumed_without_rederiving_policy() -> No
             post_restart_grace_active=True,
             restart_count_window=3,
         )
-        result = probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)
+        result = _collect_test_watchdog(runner=fake_runner, path=path)
     assert result == {
         "timer_state": "ACTIVE",
         "state_readable": True,
@@ -289,9 +295,9 @@ def test_watchdog_stale_or_future_projection_is_unavailable() -> None:
     with tempfile.TemporaryDirectory() as raw:
         path = Path(raw) / "observation.json"
         _write_projection(path, observed_at_epoch=700, expires_at_epoch=800)
-        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is False
         _write_projection(path, observed_at_epoch=1200, expires_at_epoch=1300)
-        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is False
 
 
 def test_watchdog_projection_is_strict_and_not_world_writable() -> None:
@@ -301,12 +307,44 @@ def test_watchdog_projection_is_strict_and_not_world_writable() -> None:
     with tempfile.TemporaryDirectory() as raw:
         path = Path(raw) / "observation.json"
         _write_projection(path, decision="INVALID")
-        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is False
         _write_projection(path, extra="x")
-        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is False
         _write_projection(path)
         path.chmod(0o666)
-        assert probe.collect_watchdog(runner=fake_runner, projection_path=path, now_epoch=1000)["state_readable"] is False
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is False
+
+
+def test_watchdog_projection_requires_trusted_owner_and_parent_directory() -> None:
+    def fake_runner(command, timeout, environment):
+        return 0, "active\n"
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        path = root / "observation.json"
+        _write_projection(path)
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is True
+
+        wrong_owner = probe.collect_watchdog(
+            runner=fake_runner,
+            projection_path=path,
+            now_epoch=1000,
+            expected_projection_owner_uid=os.getuid() + 1,
+        )
+        assert wrong_owner["state_readable"] is False
+
+        root.chmod(0o777)
+        assert _collect_test_watchdog(runner=fake_runner, path=path)["state_readable"] is False
+        root.chmod(0o700)
+
+        real_parent = root / "real"
+        real_parent.mkdir()
+        real_path = real_parent / "observation.json"
+        _write_projection(real_path)
+        linked_parent = root / "linked"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        linked = _collect_test_watchdog(runner=fake_runner, path=linked_parent / "observation.json")
+        assert linked["state_readable"] is False
 
 
 def test_expected_local_poll_cancellation_is_explicit_context_not_transport_error() -> None:
