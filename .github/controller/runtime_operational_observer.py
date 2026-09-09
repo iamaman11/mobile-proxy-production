@@ -252,28 +252,34 @@ host_daemon_count=0
 sing_box_count=0
 readable_processes=0
 
+IFS= read -r -d '' process_arg </dev/null
+[ "$?" -eq 1 ] || exit 27
+process_arg=''
+
 for process_dir in /proc/[0-9]*; do
   cmdline_path="$process_dir/cmdline"
   [ -r "$cmdline_path" ] || continue
-  process_args="$("$BB_BIN" tr '\\000' '\\n' < "$cmdline_path" 2>/dev/null)" || continue
+  exec 3<"$cmdline_path" 2>/dev/null || continue
   readable_processes=$((readable_processes + 1))
-  process_args="
-$process_args
-"
-  case "$process_args" in *"
-$WATCHDOG_NEEDLE
-"*) watchdog_count=$((watchdog_count + 1)) ;; esac
-  case "$process_args" in *"
-$RUNTIME_SUPERVISOR_NEEDLE
-"*) runtime_supervisor_count=$((runtime_supervisor_count + 1)) ;; esac
-  case "$process_args" in *"
-$HOST_DAEMON_NEEDLE
-"*) host_daemon_count=$((host_daemon_count + 1)) ;; esac
-  case "$process_args" in *"
-$SING_BOX_NEEDLE
-"*) sing_box_count=$((sing_box_count + 1)) ;; esac
-  process_args=''
+  watchdog_match=0
+  runtime_supervisor_match=0
+  host_daemon_match=0
+  sing_box_match=0
+  while IFS= read -r -d '' process_arg <&3; do
+    case "$process_arg" in
+      "$WATCHDOG_NEEDLE") watchdog_match=1 ;;
+      "$RUNTIME_SUPERVISOR_NEEDLE") runtime_supervisor_match=1 ;;
+      "$HOST_DAEMON_NEEDLE") host_daemon_match=1 ;;
+      "$SING_BOX_NEEDLE") sing_box_match=1 ;;
+    esac
+  done
+  exec 3<&-
+  watchdog_count=$((watchdog_count + watchdog_match))
+  runtime_supervisor_count=$((runtime_supervisor_count + runtime_supervisor_match))
+  host_daemon_count=$((host_daemon_count + host_daemon_match))
+  sing_box_count=$((sing_box_count + sing_box_match))
 done
+process_arg=''
 
 [ "$readable_processes" -gt 0 ] || exit 26
 printf "%s %s %s %s" \
