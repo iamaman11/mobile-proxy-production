@@ -186,6 +186,35 @@ def test_ambiguous_restart_transport_stops_without_inferred_dispatch() -> None:
         module.phone_target._run_root_script = original
 
 
+def test_post_observation_prefers_latest_valid_snapshot_over_stale_transport_error() -> None:
+    module = load_module()
+    original_observer = module.observe_runtime_operational_health
+    original_monotonic = module.time.monotonic
+    original_sleep = module.time.sleep
+    original_bound = module._POST_OBSERVATION_BOUND_SECONDS
+    snapshot = operational(module, local_ready=False)
+    sequence: list[object] = [module.PhoneTargetUnavailable("transient"), snapshot]
+    ticks = iter((0.0, 0.0, 1.0))
+
+    def observe(serial: str, *, admin_token: str):
+        item = sequence.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    try:
+        module.observe_runtime_operational_health = observe
+        module.time.monotonic = lambda: next(ticks)
+        module.time.sleep = lambda seconds: None
+        module._POST_OBSERVATION_BOUND_SECONDS = 1
+        assert module._observe_post_operational("registered-phone", admin_token="token") is snapshot
+    finally:
+        module.observe_runtime_operational_health = original_observer
+        module.time.monotonic = original_monotonic
+        module.time.sleep = original_sleep
+        module._POST_OBSERVATION_BOUND_SECONDS = original_bound
+
+
 def test_workflow_is_single_ingress_fixed_restart_and_phone_serialized() -> None:
     source = (WORKFLOWS / "stage4-runtime-restart-exercise.yml").read_text(encoding="utf-8")
     for required in (
