@@ -182,7 +182,7 @@
       "evidence_policy": "LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION",
       "handler": "workflow_call",
       "id": "exercise-runtime-recovery",
-      "idempotency_policy": "single-semantic-command-attempt+no-automatic-retry",
+      "idempotency_policy": "single-run-attempt+single-semantic-command-attempt+no-automatic-retry",
       "operation": "exercise-runtime-recovery",
       "operation_class": "RECOVER",
       "pattern": "^/exercise-runtime-recovery (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
@@ -198,7 +198,7 @@
       "requires_vm": false,
       "semantic_identity_policy": "source-comment-id+command-arguments",
       "target_capability_policy": "phone-production-fixed-runtime-recovery-exercise",
-      "workflow": ".github/workflows/phone-runtime-recovery.yml"
+      "workflow": ".github/workflows/stage4-runtime-recovery-exercise.yml"
     },
     {
       "allowed_targets": [
