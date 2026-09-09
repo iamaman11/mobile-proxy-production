@@ -174,6 +174,47 @@
           "type": "semver"
         }
       ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-mismatch-read-only",
+      "concurrency_domain": "production-target-phone-production",
+      "destructive": false,
+      "dispatch_inputs": {
+        "release_tag": "release",
+        "target": "target"
+      },
+      "enabled": true,
+      "evidence_policy": "mandatory-bounded-runtime-mismatch-detector-artifact",
+      "handler": "dispatch_workflow",
+      "id": "exercise-runtime-mismatch",
+      "idempotency_policy": "single-run-attempt",
+      "operation": "exercise-runtime-mismatch",
+      "operation_class": "DIAGNOSTIC",
+      "pattern": "^/exercise-runtime-mismatch (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
+      "physical_domains": [],
+      "read_only": true,
+      "recovery_policy": "fail-closed-without-recovery-side-effect",
+      "ref": "main",
+      "ref_policy": "controller-main-exact",
+      "requires_phone": true,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "command-arguments",
+      "target_capability_policy": "phone-production-fixed-runtime-mismatch-observation",
+      "workflow": ".github/workflows/stage4-runtime-mismatch-exercise.yml"
+    },
+    {
+      "allowed_targets": [
+        "phone-production"
+      ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-recovery-exercise",
       "concurrency_domain": "production-target-phone-production",
       "destructive": true,
