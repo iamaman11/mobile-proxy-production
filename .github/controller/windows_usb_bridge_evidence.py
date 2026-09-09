@@ -11,7 +11,7 @@ DEFAULT_BRIDGE_LOG_PATH = Path(
 _MAX_LOG_BYTES = 65536
 _MAX_EVENT_AGE_SECONDS = 60
 _MAX_FUTURE_SKEW_SECONDS = 5
-_PREFIX = "mobile-proxy-usb-bridge "
+_OWNER = "mobile-proxy-usb-bridge"
 
 _FAILURE_CATEGORIES = frozenset(
     {
@@ -129,19 +129,11 @@ def collect_host_usb_bridge_evidence(
     lines = [line for line in raw.splitlines()[-200:] if line]
     if not lines:
         return _invalid()
-    line = lines[-1]
-
-    try:
-        timestamp_text, owner, message = line.split(" ", 2)
-    except ValueError:
-        return _invalid()
-    if not owner or not message:
-        return _invalid()
 
     # PowerShell's UTC universal sortable format is two whitespace-separated
-    # date/time tokens, so recover the timestamp without retaining the raw line.
-    parts = line.split(" ", 3)
-    if len(parts) != 4 or parts[2] != _PREFIX.strip():
+    # date/time tokens. Reduce only the newest complete event and retain no raw line.
+    parts = lines[-1].split(" ", 3)
+    if len(parts) != 4 or parts[2] != _OWNER:
         return _invalid()
     timestamp_text = f"{parts[0]} {parts[1]}"
     message = parts[3]
