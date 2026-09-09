@@ -442,6 +442,30 @@ def test_release_metadata_recovers_from_transient_server_failure() -> None:
         resolver.time.sleep = original_sleep
 
 
+def test_release_metadata_uses_actions_token_when_available() -> None:
+    url = "https://api.github.com/repos/iamaman11/mobile-proxy/releases/tags/v0.1.7"
+    original = resolver.urllib.request.urlopen
+    previous = resolver.os.environ.get("GITHUB_TOKEN")
+    seen: list[str | None] = []
+
+    def fake_urlopen(request, timeout=0):
+        assert timeout == 30
+        seen.append(request.get_header("Authorization"))
+        return io.BytesIO(json.dumps({"id": 1}).encode("utf-8"))
+
+    resolver.urllib.request.urlopen = fake_urlopen
+    resolver.os.environ["GITHUB_TOKEN"] = "bounded-actions-token"
+    try:
+        assert resolver._request_json(url) == {"id": 1}
+        assert seen == ["Bearer bounded-actions-token"]
+    finally:
+        resolver.urllib.request.urlopen = original
+        if previous is None:
+            resolver.os.environ.pop("GITHUB_TOKEN", None)
+        else:
+            resolver.os.environ["GITHUB_TOKEN"] = previous
+
+
 def test_release_metadata_non_transient_http_failure_is_not_retried() -> None:
     url = "https://api.github.com/repos/iamaman11/mobile-proxy/releases/tags/v0.1.7"
     calls = 0
