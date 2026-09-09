@@ -22,7 +22,7 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
     assert "& $usbipdexecutable bind --busid $busid" not in script
     assert "& $usbipdexecutable state 2>&1" in script
     assert "convertfrom-json -erroraction stop" in script
-    assert "if (-not (test-approvedusbdeviceattached))" in script
+    assert "if (test-approvedusbdeviceattached)" in script
     assert "$rawattach = @(& $usbipdexecutable attach --wsl $distro --busid $busid 2>&1)" in script
     assert "$attachexitcode = $lastexitcode" in script
     assert "--auto-attach" not in script
@@ -40,12 +40,45 @@ def test_windows_bridge_has_one_allowlisted_usbipd_ownership_boundary() -> None:
         assert forbidden not in script
 
 
+def test_windows_bridge_recovers_only_exact_windows_adb_5037_conflict_once() -> None:
+    script = WINDOWS.read_text(encoding="utf-8").lower()
+    assert "$windowsadbport = 5037" in script
+    assert "$windowsadbstoptimeoutseconds = 5" in script
+    assert "function get-exactwindowsadblistenerprocessid" in script
+    assert "get-nettcpconnection -localport $windowsadbport -state listen -erroraction stop" in script
+    assert "sort-object -unique" in script
+    assert "get-process -id $ownerpid -erroraction stop" in script
+    assert "if ($owner.processname -ne 'adb')" in script
+    assert "function stop-exactwindowsadblisteneronce" in script
+    assert "stop-process -id $ownerpid -force -erroraction stop" in script
+    assert script.count("stop-process -id $ownerpid -force -erroraction stop") == 1
+    assert "$windowsadbrecoveryattempted = $false" in script
+    assert "$windowsadbrecoveryattempted = $true" in script
+    assert "elseif ($attachresult -eq 'windows_device_busy' -and -not $windowsadbrecoveryattempted)" in script
+    assert "stop-exactwindowsadblisteneronce -ownerpid ([int]$ownerpid)" in script
+    assert script.index("$windowsadbrecoveryattempted = $true") < script.index(
+        "stop-exactwindowsadblisteneronce -ownerpid ([int]$ownerpid)"
+    )
+    assert "write-bridgeevent 'allowlisted_usb_attached_to_wsl'" in script
+    assert "write-bridgeevent 'windows_adb" not in script
+    for forbidden in (
+        "stop-process -name",
+        "get-process -name",
+        "taskkill",
+        "adb kill-server",
+        "adb start-server",
+        "& adb",
+        "usbipd.exe detach",
+    ):
+        assert forbidden not in script
+
+
 def test_windows_bridge_reduces_attach_output_to_bounded_categories() -> None:
     script = WINDOWS.read_text(encoding="utf-8").lower()
     assert "function get-usbipdattachfailurecategory" in script
     assert "$attachfailurecategory = get-usbipdattachfailurecategory -outputlines $rawattach" in script
     assert '$rawattach = $null' in script
-    assert 'throw "usbipd attach failed:$attachfailurecategory"' in script
+    assert "return $attachfailurecategory" in script
     assert "write-bridgeevent $rawattach" not in script
     assert "add-content -literalpath $logpath -value $rawattach" not in script
     for category in (
