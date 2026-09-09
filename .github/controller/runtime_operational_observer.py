@@ -297,7 +297,7 @@ if [ "$health_api_authenticated" = true ]; then
   }}
   extract_bool() {{
     key="$1"
-    value="$(printf '%s' "$health_raw" | sed -n "s/.*\\\"$key\\\"[[:space:]]*:[[:space:]]*\\(true\\|false\\|null\\).*/\\1/p" | head -n1)"
+    value="$(printf '%s' "$health_raw" | sed -n "s/.*\\\"$key\\\"[[:space:]]*:[[:space:]]*\\([a-z][a-z]*\\).*/\\1/p" | head -n1)"
     case "$value" in true|false) printf '%s' "$value" ;; *) printf 'unknown' ;; esac
   }}
   readiness_state="$(extract_string readiness_state)"
