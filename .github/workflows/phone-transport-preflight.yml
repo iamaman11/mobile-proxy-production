@@ -83,11 +83,11 @@ jobs:
           value = json.loads((Path(os.environ['RUNNER_TEMP']) / 'phone-transport-preflight.json').read_text())
           expected_top = {
               'schema', 'controller_revision', 'classification', 'phone_failure_phase',
-              'timing_ms', 'transport', 'safety',
+              'timing_ms', 'transport', 'host_usb_bridge', 'safety',
           }
           if set(value) != expected_top:
               raise SystemExit('phone transport preflight top-level evidence fields differ')
-          if value.get('schema') != 'phone-transport-preflight.v3':
+          if value.get('schema') != 'phone-transport-preflight.v4':
               raise SystemExit('phone transport preflight schema differs')
 
           classification = value.get('classification')
@@ -194,6 +194,56 @@ jobs:
               if (session_started is None) != unresolved:
                   raise SystemExit('runner transport session-window resolution evidence differs')
 
+          bridge = value.get('host_usb_bridge')
+          expected_bridge = {'classification', 'failure_category', 'freshness', 'age_seconds'}
+          if not isinstance(bridge, dict) or set(bridge) != expected_bridge:
+              raise SystemExit('phone transport USB bridge evidence fields differ')
+          allowed_bridge_classifications = {
+              'NOT_EVALUATED', 'EVIDENCE_UNAVAILABLE', 'EVIDENCE_INVALID', 'EVIDENCE_STALE',
+              'USB_DEVICE_NOT_PRESENT', 'ATTACH_SUCCEEDED', 'BRIDGE_STARTED', 'BRIDGE_FAILURE',
+          }
+          bridge_classification = bridge.get('classification')
+          if bridge_classification not in allowed_bridge_classifications:
+              raise SystemExit('phone transport USB bridge classification differs')
+          allowed_bridge_failures = {
+              'attach_distro_missing', 'attach_distro_not_running', 'attach_distro_not_wsl2',
+              'attach_failed', 'attach_firewall_blocked', 'attach_host_address_unavailable',
+              'attach_kernel_not_usbip_capable', 'attach_networking_mode_unsupported',
+              'attach_unknown', 'attach_usbip_client_attach_failed', 'attach_usbip_client_unavailable',
+              'attach_usbipd_not_local_drive', 'attach_usbipd_service_unavailable',
+              'attach_vhci_unavailable', 'attach_windows_device_busy', 'attach_wsl2_unavailable',
+              'attach_wsl_support_missing', 'attach_wsl_support_mount_failed', 'bind_failed',
+              'inventory_unavailable', 'state_unavailable', 'unexpected_local_error', 'wsl_unavailable',
+          }
+          bridge_failure = bridge.get('failure_category')
+          if bridge_classification == 'BRIDGE_FAILURE':
+              if bridge_failure not in allowed_bridge_failures:
+                  raise SystemExit('phone transport USB bridge failure category differs')
+          elif bridge_failure is not None:
+              raise SystemExit('non-failure USB bridge evidence contains failure category')
+
+          freshness = bridge.get('freshness')
+          age = bridge.get('age_seconds')
+          fresh_classes = {'USB_DEVICE_NOT_PRESENT', 'ATTACH_SUCCEEDED', 'BRIDGE_STARTED', 'BRIDGE_FAILURE'}
+          if bridge_classification in fresh_classes:
+              if freshness != 'FRESH' or not isinstance(age, int) or isinstance(age, bool) or not 0 <= age <= 60:
+                  raise SystemExit('fresh USB bridge evidence contract differs')
+          elif bridge_classification == 'EVIDENCE_STALE':
+              if freshness != 'STALE' or not isinstance(age, int) or isinstance(age, bool) or age <= 60:
+                  raise SystemExit('stale USB bridge evidence contract differs')
+          elif bridge_classification in {'EVIDENCE_UNAVAILABLE', 'EVIDENCE_INVALID'}:
+              if freshness != 'UNKNOWN' or age is not None:
+                  raise SystemExit('unknown USB bridge evidence contract differs')
+          elif bridge_classification == 'NOT_EVALUATED':
+              if freshness != 'NOT_EVALUATED' or age is not None:
+                  raise SystemExit('not-evaluated USB bridge evidence contract differs')
+
+          if phone_failure_phase == 'REGISTERED_DEVICE_NOT_DEVICE':
+              if bridge_classification == 'NOT_EVALUATED':
+                  raise SystemExit('registered-device failure lacks bounded USB bridge evidence')
+          elif bridge_classification != 'NOT_EVALUATED':
+              raise SystemExit('USB bridge evidence escaped its registered-device failure domain')
+
           safety = value.get('safety')
           expected_safety = {
               'phone_access_performed', 'phone_mutation_performed', 'provider_access_performed',
@@ -211,7 +261,8 @@ jobs:
 
           print(
               'PHONE_TRANSPORT_PREFLIGHT_CLASSIFIED '
-              f'classification={classification} phone_failure_phase={phone_failure_phase}'
+              f'classification={classification} phone_failure_phase={phone_failure_phase} '
+              f'host_usb_bridge={bridge_classification}'
           )
           PY
 

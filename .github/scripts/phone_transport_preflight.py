@@ -22,6 +22,10 @@ from phone_target import (  # noqa: E402
     _require_device,
 )
 from runner_transport_evidence import classify_preflight, collect_runner_transport_evidence  # noqa: E402
+from windows_usb_bridge_evidence import (  # noqa: E402
+    collect_host_usb_bridge_evidence,
+    not_evaluated_host_usb_bridge_evidence,
+)
 
 
 _T = TypeVar("_T")
@@ -82,6 +86,7 @@ def _payload(
     phone_failure_phase: PhoneFailurePhase,
     timings: dict[str, int | None],
     transport: dict[str, object],
+    host_usb_bridge: dict[str, object],
     safety: dict[str, bool],
 ) -> dict[str, object]:
     if classification == "NOT_READY":
@@ -93,13 +98,21 @@ def _payload(
     else:
         raise AssertionError("phone transport classification differs")
 
+    bridge_classification = host_usb_bridge.get("classification")
+    if phone_failure_phase is PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE:
+        if bridge_classification == "NOT_EVALUATED":
+            raise AssertionError("registered-device failure requires bounded USB bridge evidence")
+    elif bridge_classification != "NOT_EVALUATED":
+        raise AssertionError("USB bridge evidence is evaluated only for registered-device failure")
+
     return {
-        "schema": "phone-transport-preflight.v3",
+        "schema": "phone-transport-preflight.v4",
         "controller_revision": controller_revision,
         "classification": classification,
         "phone_failure_phase": phone_failure_phase.value,
         "timing_ms": timings,
         "transport": transport,
+        "host_usb_bridge": host_usb_bridge,
         "safety": safety,
     }
 
@@ -120,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         "artifact_upload_required": True,
         "runner_assignment_latency_ms": None,
     }
+    host_usb_bridge = not_evaluated_host_usb_bridge_evidence()
 
     created_at = _parse_created_at(args.source_comment_created_at)
     assignment_latency_ms = int((datetime.now(timezone.utc) - created_at).total_seconds() * 1000)
@@ -152,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     except PhoneTargetDiagnosticFailure as exc:
         phone_failure_phase = exc.phase
+        if phone_failure_phase is PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE:
+            host_usb_bridge = collect_host_usb_bridge_evidence()
 
     timings["total"] = int((time.monotonic() - started) * 1000)
     if phone_failure_phase is PhoneFailurePhase.NONE:
@@ -165,12 +181,14 @@ def main(argv: list[str] | None = None) -> int:
         phone_failure_phase=phone_failure_phase,
         timings=timings,
         transport=transport,
+        host_usb_bridge=host_usb_bridge,
         safety=safety,
     )
     _write(args.output, value)
     print(
         "PHONE_TRANSPORT_PREFLIGHT "
-        f"classification={classification} phone_failure_phase={phone_failure_phase.value}"
+        f"classification={classification} phone_failure_phase={phone_failure_phase.value} "
+        f"host_usb_bridge={host_usb_bridge['classification']}"
     )
     return 0
 

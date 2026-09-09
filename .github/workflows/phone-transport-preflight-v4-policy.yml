@@ -1,4 +1,4 @@
-name: Phone transport preflight v3 policy
+name: Phone transport preflight v4 policy
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-phone-transport-preflight-v3:
-    name: Validate typed bounded phone transport preflight v3
+  validate-phone-transport-preflight-v4:
+    name: Validate typed bounded phone transport preflight v4
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -26,11 +26,13 @@ jobs:
           python3 -m py_compile \
             .github/controller/phone_target.py \
             .github/controller/runner_transport_evidence.py \
+            .github/controller/windows_usb_bridge_evidence.py \
             .github/scripts/phone_transport_preflight.py \
             .github/controller/tests/test_phone_target.py \
             .github/controller/tests/test_phone_transport_failure_contract.py \
             .github/controller/tests/test_phone_transport_preflight.py \
-            .github/controller/tests/test_runner_transport_evidence.py
+            .github/controller/tests/test_runner_transport_evidence.py \
+            .github/controller/tests/test_windows_usb_bridge_evidence.py
 
       - name: Run typed transport and S4.3 regression tests
         shell: bash
@@ -40,6 +42,7 @@ jobs:
           python3 .github/controller/tests/test_phone_transport_preflight.py
           python3 .github/controller/tests/test_phone_target.py
           python3 .github/controller/tests/test_runner_transport_evidence.py
+          python3 .github/controller/tests/test_windows_usb_bridge_evidence.py
 
       - name: Enforce preflight safety and canonical transport policy
         shell: bash
@@ -49,6 +52,8 @@ jobs:
           from pathlib import Path
 
           controller = Path('.github/controller/phone_target.py').read_text(encoding='utf-8')
+          runner = Path('.github/controller/runner_transport_evidence.py').read_text(encoding='utf-8')
+          bridge = Path('.github/controller/windows_usb_bridge_evidence.py').read_text(encoding='utf-8')
           script = Path('.github/scripts/phone_transport_preflight.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/phone-transport-preflight.yml').read_text(encoding='utf-8')
 
@@ -75,21 +80,46 @@ jobs:
           if missing:
               raise SystemExit('typed phone transport contract missing: ' + ', '.join(missing))
 
+          required_bridge = (
+              'DEFAULT_BRIDGE_LOG_PATH',
+              '/mnt/c/ProgramData/MobileProxy/usb-bridge/mobile-proxy-usb-bridge.log',
+              '_MAX_LOG_BYTES = 65536',
+              '_MAX_EVENT_AGE_SECONDS = 60',
+              'def collect_host_usb_bridge_evidence(',
+              '"classification": "NOT_EVALUATED"',
+              '"classification": "EVIDENCE_UNAVAILABLE"',
+              '"classification": "EVIDENCE_INVALID"',
+              '"classification": "EVIDENCE_STALE"',
+              '"USB_DEVICE_NOT_PRESENT"',
+              '"ATTACH_SUCCEEDED"',
+              '"BRIDGE_STARTED"',
+              '"BRIDGE_FAILURE"',
+          )
+          missing = [item for item in required_bridge if item not in bridge]
+          if missing:
+              raise SystemExit('bounded USB bridge evidence contract missing: ' + ', '.join(missing))
+
           required_script = (
-              'phone-transport-preflight.v3',
+              'phone-transport-preflight.v4',
               '"phone_failure_phase": phone_failure_phase.value',
+              '"host_usb_bridge": host_usb_bridge',
+              'collect_host_usb_bridge_evidence()',
+              'PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE',
               '"automatic_recovery_performed": False',
               '_probe_root_stdout_contract',
               '_probe_root_stderr_exit_contract',
           )
           missing = [item for item in required_script if item not in script]
           if missing:
-              raise SystemExit('phone transport v3 script contract missing: ' + ', '.join(missing))
+              raise SystemExit('phone transport v4 script contract missing: ' + ', '.join(missing))
           if '"workflow_execution": "success"' in script:
               raise SystemExit('pre-terminal artifact must not claim final workflow success')
 
           required_workflow = (
-              "value.get('schema') != 'phone-transport-preflight.v3'",
+              "value.get('schema') != 'phone-transport-preflight.v4'",
+              "'timing_ms', 'transport', 'host_usb_bridge', 'safety'",
+              "phone_failure_phase == 'REGISTERED_DEVICE_NOT_DEVICE'",
+              "bridge_classification == 'NOT_EVALUATED'",
               "classification == 'NOT_READY' and phone_failure_phase == 'NONE'",
               "classification != 'NOT_READY' and phone_failure_phase != 'NONE'",
               'uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
@@ -101,12 +131,12 @@ jobs:
           )
           missing = [item for item in required_workflow if item not in workflow]
           if missing:
-              raise SystemExit('phone transport v3 workflow contract missing: ' + ', '.join(missing))
+              raise SystemExit('phone transport v4 workflow contract missing: ' + ', '.join(missing))
 
           if workflow.index('Preserve mandatory bounded transport evidence') > workflow.index('Record workflow and phone readiness semantics'):
               raise SystemExit('workflow success semantics must be recorded only after mandatory artifact upload')
 
-          combined = (script + '\n' + workflow).lower()
+          combined = (script + '\n' + bridge + '\n' + workflow).lower()
           forbidden_recovery = (
               'start-server',
               'kill-server',
@@ -115,12 +145,17 @@ jobs:
               'wsl --shutdown',
               'usbipd attach',
               'usbipd detach',
+              'usbipd bind',
+              'start-scheduledtask',
+              'stop-scheduledtask',
               '/deploy',
               '/retry-deploy',
           )
           present = [item for item in forbidden_recovery if item in combined]
           if present:
               raise SystemExit('preflight gained forbidden recovery/mutation surface: ' + ', '.join(present))
+          if 'subprocess' in bridge or 'os.system' in bridge or 'popen' in bridge.lower():
+              raise SystemExit('USB bridge evidence adapter gained command-execution surface')
 
           forbidden_payload_fields = (
               '"serial":',
@@ -131,15 +166,21 @@ jobs:
               '"token":',
               '"url":',
               '"raw_runner_log":',
+              '"raw_bridge_log":',
+              '"bridge_log":',
+              '"bridge_path":',
+              '"exception_type":',
+              '"line_number":',
           )
-          present = [item for item in forbidden_payload_fields if item in script]
+          payload_source = script + '\n' + bridge
+          present = [item for item in forbidden_payload_fields if item in payload_source]
           if present:
-              raise SystemExit('preflight script gained forbidden raw evidence field: ' + ', '.join(present))
+              raise SystemExit('preflight gained forbidden raw evidence field: ' + ', '.join(present))
 
           if controller.count('command = [adb, "-s", serial, "shell", "-T", "su", "0"]') != 1:
               raise SystemExit('canonical root argv must have exactly one owner')
-          if 'phone_transport_readiness' in controller + script:
+          if 'phone_transport_readiness' in controller + runner + script:
               raise SystemExit('duplicate phone transport readiness adapter returned')
 
-          print('PHONE_TRANSPORT_PREFLIGHT_V3_POLICY_OK')
+          print('PHONE_TRANSPORT_PREFLIGHT_V4_POLICY_OK')
           PY

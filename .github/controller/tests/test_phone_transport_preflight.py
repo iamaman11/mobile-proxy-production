@@ -19,7 +19,7 @@ SERIAL = "registered-production-target-secret"
 
 def load_preflight():
     spec = importlib.util.spec_from_file_location(
-        "phone_transport_preflight_v3_acceptance",
+        "phone_transport_preflight_v4_acceptance",
         SCRIPTS / "phone_transport_preflight.py",
     )
     assert spec is not None and spec.loader is not None
@@ -68,6 +68,12 @@ def _run(module, *, failure_phase: PhoneFailurePhase = PhoneFailurePhase.NONE, d
             "failure_classes": ["TLS_ERROR"] if degraded else [],
             "error_counters": {"tls_error": 1 if degraded else 0},
         }
+        bridge = {
+            "classification": "USB_DEVICE_NOT_PRESENT",
+            "failure_category": None,
+            "freshness": "FRESH",
+            "age_seconds": 7,
+        }
         with (
             mock.patch.dict(
                 module.os.environ,
@@ -75,6 +81,7 @@ def _run(module, *, failure_phase: PhoneFailurePhase = PhoneFailurePhase.NONE, d
                 clear=False,
             ),
             mock.patch.object(module, "collect_runner_transport_evidence", return_value=transport),
+            mock.patch.object(module, "collect_host_usb_bridge_evidence", return_value=bridge),
             mock.patch.object(module, "_adb", side_effect=step("adb_tooling")),
             mock.patch.object(module, "_require_device", side_effect=step("registered_device_state")),
             mock.patch.object(module, "_probe_root_stdout_contract", side_effect=step("root_stdout_contract")),
@@ -97,7 +104,7 @@ def _run(module, *, failure_phase: PhoneFailurePhase = PhoneFailurePhase.NONE, d
         return rc, json.loads(output.read_text(encoding="utf-8")), events
 
 
-def test_ready_keeps_exact_s43_probe_order_and_v3_contract() -> None:
+def test_ready_keeps_exact_s43_probe_order_and_v4_contract() -> None:
     module = load_preflight()
     rc, payload, events = _run(module)
 
@@ -115,11 +122,18 @@ def test_ready_keeps_exact_s43_probe_order_and_v3_contract() -> None:
         "phone_failure_phase",
         "timing_ms",
         "transport",
+        "host_usb_bridge",
         "safety",
     }
-    assert payload["schema"] == "phone-transport-preflight.v3"
+    assert payload["schema"] == "phone-transport-preflight.v4"
     assert payload["classification"] == "READY"
     assert payload["phone_failure_phase"] == "NONE"
+    assert payload["host_usb_bridge"] == {
+        "classification": "NOT_EVALUATED",
+        "failure_category": None,
+        "freshness": "NOT_EVALUATED",
+        "age_seconds": None,
+    }
     assert payload["safety"]["phone_access_performed"] is True
     assert payload["safety"]["automatic_recovery_performed"] is False
     assert set(payload["timing_ms"]) == {
@@ -140,6 +154,7 @@ def test_transport_degraded_is_phone_ready_with_no_phone_failure() -> None:
     assert len(events) == 4
     assert payload["classification"] == "TRANSPORT_DEGRADED"
     assert payload["phone_failure_phase"] == "NONE"
+    assert payload["host_usb_bridge"]["classification"] == "NOT_EVALUATED"
     assert payload["transport"]["failure_classes"] == ["TLS_ERROR"]
 
 
@@ -164,6 +179,12 @@ def test_every_typed_phone_failure_yields_not_ready_and_stops_later_probes() -> 
         assert payload["phone_failure_phase"] == phase.value
         assert payload["transport"]["transport_degraded"] is True
         assert payload["safety"]["phone_access_performed"] is phone_access
+        expected_bridge = (
+            "USB_DEVICE_NOT_PRESENT"
+            if phase is PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE
+            else "NOT_EVALUATED"
+        )
+        assert payload["host_usb_bridge"]["classification"] == expected_bridge
 
 
 def test_stderr_contract_failure_is_protocol_mismatch_after_positive_probe() -> None:
@@ -219,12 +240,13 @@ def test_stderr_contract_failure_is_protocol_mismatch_after_positive_probe() -> 
         payload = json.loads(output.read_text(encoding="utf-8"))
         assert events[-1] == "root_stderr_exit_contract"
         assert payload["phone_failure_phase"] == "ROOT_SCRIPT_PROTOCOL_MISMATCH"
+        assert payload["host_usb_bridge"]["classification"] == "NOT_EVALUATED"
         assert payload["safety"]["phone_access_performed"] is True
 
 
 def test_artifact_never_contains_raw_identifier_output_url_or_secret_values() -> None:
     module = load_preflight()
-    _, payload, _ = _run(module, failure_phase=PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH, degraded=True)
+    _, payload, _ = _run(module, failure_phase=PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE, degraded=True)
     rendered = json.dumps(payload, sort_keys=True)
     for forbidden in (
         SERIAL,
@@ -233,10 +255,27 @@ def test_artifact_never_contains_raw_identifier_output_url_or_secret_values() ->
         "https://",
         "adb -s",
         "/data/adb/",
+        "/mnt/c/",
+        "ProgramData",
+        "SensitiveException",
     ):
         assert forbidden not in rendered
 
-    forbidden_keys = {"serial", "adb_argv", "stdout", "stderr", "device_path", "token", "url", "raw_runner_log"}
+    forbidden_keys = {
+        "serial",
+        "adb_argv",
+        "stdout",
+        "stderr",
+        "device_path",
+        "token",
+        "url",
+        "raw_runner_log",
+        "raw_bridge_log",
+        "bridge_log",
+        "bridge_path",
+        "exception_type",
+        "line_number",
+    }
 
     def assert_safe_keys(value) -> None:
         if isinstance(value, dict):
@@ -287,20 +326,26 @@ def test_unexpected_programming_failure_is_not_converted_to_valid_not_ready() ->
 
 def test_preflight_does_not_introduce_second_adb_target_or_recovery_path() -> None:
     source = (SCRIPTS / "phone_transport_preflight.py").read_text(encoding="utf-8")
+    bridge = (ROOT / "windows_usb_bridge_evidence.py").read_text(encoding="utf-8")
     assert "phone_transport_readiness" not in source
     assert "_registered_target_state" not in source
     assert "_ensure_adb_server" not in source
+    combined = (source + "\n" + bridge).lower()
     for forbidden in (
         "start-server",
         "kill-server",
         "restart runner",
         "systemctl restart",
         "wsl --shutdown",
+        "usbipd attach",
+        "usbipd detach",
+        "start-scheduledtask",
+        "stop-scheduledtask",
         "adb reboot",
         "/deploy",
         "/retry-deploy",
     ):
-        assert forbidden not in source.lower()
+        assert forbidden not in combined
 
 
 def main() -> int:
@@ -310,7 +355,7 @@ def main() -> int:
     )
     for test in tests:
         test()
-    print(f"PHONE_TRANSPORT_PREFLIGHT_V3_TESTS_OK count={len(tests)}")
+    print(f"PHONE_TRANSPORT_PREFLIGHT_V4_TESTS_OK count={len(tests)}")
     return 0
 
 
