@@ -55,6 +55,18 @@ def test_fixed_scenario_has_one_non_parameterized_child_termination() -> None:
     assert 'stage4_recovery=generation_changed' in script
     assert 'stage4_recovery=owner_changed' in script
     assert "while [ \"$i\" -lt 15 ]" in script
+    assert 'process_generation()' in script
+    assert 'process_parent()' in script
+    assert '/proc/$pid/stat' in script
+    assert '/proc/$pid/status' in script
+    assert "[ \"$key\" = 'PPid:' ]" in script
+    assert 'supervisor_generation="$(process_generation "$supervisor_pid")"' in script
+    assert 'host_generation="$(process_generation "$host_pid")"' in script
+    assert 'host_parent="$(process_parent "$host_pid")"' in script
+    assert '[ "$host_parent" != "$supervisor_pid" ]' in script
+    assert 'current_supervisor_generation="$(process_generation "$current_supervisor" || true)"' in script
+    assert 'current_host_generation="$(process_generation "$current_host" || true)"' in script
+    assert 'current_host_parent="$(process_parent "$current_host" || true)"' in script
     source = (SCRIPTS / "exercise_runtime_recovery.py").read_text(encoding="utf-8")
     for forbidden in ("--process", "--signal", "--pid", "dispatch_release_once", "dispatch_install_once"):
         assert forbidden not in source
