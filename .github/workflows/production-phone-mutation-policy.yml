@@ -33,10 +33,12 @@ jobs:
           workflows = Path('.github/workflows')
           workflow = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
           lifecycle_workflow = (workflows / 'stage4-runtime-recovery-exercise.yml').read_text(encoding='utf-8')
+          restart_workflow = (workflows / 'stage4-runtime-restart-exercise.yml').read_text(encoding='utf-8')
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
           runtime = Path('.github/scripts/run_phone_release_deployment.py')
           lifecycle_runtime = Path('.github/scripts/exercise_runtime_recovery.py')
+          restart_runtime = Path('.github/scripts/exercise_runtime_restart.py')
           apk_adapter_path = Path('.github/controller/android_target.py')
           composite_adapter_path = Path('.github/controller/phone_target.py')
           apk_adapter = apk_adapter_path.read_text(encoding='utf-8')
@@ -131,6 +133,49 @@ jobs:
               if lifecycle_re.fullmatch(command) is not None:
                   raise SystemExit('Stage 4 runtime recovery syntax admitted a forbidden variant')
 
+          restart_routes = [
+              item for item in registry.get('routes', [])
+              if isinstance(item, dict) and item.get('id') == 'exercise-runtime-restart' and item.get('enabled') is True
+          ]
+          if len(restart_routes) != 1:
+              raise SystemExit('exactly one enabled Stage 4 runtime restart exercise route is required')
+          restart = restart_routes[0]
+          restart_expected = {
+              'handler': 'workflow_call',
+              'workflow': '.github/workflows/stage4-runtime-restart-exercise.yml',
+              'ref': 'main',
+              'operation': 'exercise-runtime-restart',
+              'operation_class': 'RECOVER',
+              'read_only': False,
+              'destructive': True,
+              'allowed_targets': ['phone-production'],
+              'physical_domains': ['runtime'],
+              'authority_policy': 'private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-restart-exercise',
+              'semantic_identity_policy': 'source-comment-id+command-arguments',
+              'idempotency_policy': 'single-run-attempt+single-semantic-command-attempt+no-automatic-retry',
+              'concurrency_domain': 'production-target-phone-production',
+              'recovery_policy': 'UNKNOWN-no-blind-retry-owner-checkpoint-required',
+              'evidence_policy': 'LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION',
+              'target_capability_policy': 'phone-production-fixed-runtime-restart-exercise',
+          }
+          for field, expected in restart_expected.items():
+              if restart.get(field) != expected:
+                  raise SystemExit(f'Stage 4 runtime restart route contract drifted: {field}')
+          restart_pattern = r'^/exercise-runtime-restart (?P<target>phone-production) (?P<release>v0\.1\.7)$'
+          if restart.get('pattern') != restart_pattern:
+              raise SystemExit('Stage 4 runtime restart command syntax drifted')
+          restart_re = re.compile(restart_pattern)
+          if restart_re.fullmatch('/exercise-runtime-restart phone-production v0.1.7') is None:
+              raise SystemExit('Stage 4 runtime restart exact command is not admitted')
+          for command in (
+              '/exercise-runtime-restart phone-production v0.1.8',
+              '/exercise-runtime-restart vm-production v0.1.7',
+              '/exercise-runtime-restart phone-production v0.1.7 runtime-supervisor',
+              '/exercise-runtime-restart phone-production v0.1.7;echo',
+          ):
+              if restart_re.fullmatch(command) is not None:
+                  raise SystemExit('Stage 4 runtime restart syntax admitted a forbidden variant')
+
           required = (
               'runs-on: [self-hosted, Linux, X64, android-production]',
               'group: production-target-phone-production', 'cancel-in-progress: false',
@@ -172,6 +217,40 @@ jobs:
               if forbidden in lifecycle_workflow:
                   raise SystemExit('Stage 4 lifecycle workflow gained forbidden capability: ' + forbidden)
 
+          restart_required = (
+              'workflow_call:',
+              "command != '/exercise-runtime-restart phone-production v0.1.7'",
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              '.github/scripts/exercise_runtime_restart.py',
+              'stage4-runtime-restart-exercise.v1',
+              'STAGE4_RUNTIME_RESTART_ACCEPTED classification=RESTARTED',
+              'if-no-files-found: error',
+          )
+          restart_missing = [item for item in restart_required if item not in restart_workflow]
+          if restart_missing:
+              raise SystemExit('Stage 4 runtime restart workflow boundary incomplete: ' + ', '.join(restart_missing))
+          for forbidden in (
+              'workflow_dispatch:',
+              'issue_comment:',
+              'run_phone_release_deployment.py',
+              'dispatch_release_once',
+              'dispatch_install_once',
+              'systemctl restart',
+              'observe-runner-transport',
+              'phone-transport-preflight',
+              'phone-runtime-recovery.yml',
+              'service.sh',
+              'adb install',
+              'adb push',
+              '/deploy ',
+              '/retry-deploy ',
+          ):
+              if forbidden in restart_workflow:
+                  raise SystemExit('Stage 4 runtime restart workflow gained forbidden capability: ' + forbidden)
+
           lifecycle_source = lifecycle_runtime.read_text(encoding='utf-8')
           lifecycle_tree = ast.parse(lifecycle_source)
           root_mutation_calls = [
@@ -193,10 +272,38 @@ jobs:
               if forbidden in lifecycle_source:
                   raise SystemExit('Stage 4 lifecycle adapter gained forbidden generic/mutation surface: ' + forbidden)
 
+          restart_source = restart_runtime.read_text(encoding='utf-8')
+          restart_tree = ast.parse(restart_source)
+          restart_root_mutation_calls = [
+              node for node in ast.walk(restart_tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and node.func.attr == '_run_root_script'
+          ]
+          if len(restart_root_mutation_calls) != 1:
+              raise SystemExit('Stage 4 runtime restart adapter must contain exactly one root mutation callsite')
+          if restart_source.count('kill -TERM "$supervisor_pid"') != 1:
+              raise SystemExit('Stage 4 runtime restart adapter must contain exactly one fixed runtime-supervisor TERM')
+          if 'kill -TERM "$host_pid"' in restart_source or 'kill -TERM "$sing_box_pid"' in restart_source:
+              raise SystemExit('Stage 4 runtime restart adapter must not terminate child processes directly')
+          expected_starttime_source = 'printf \'%s\' "' + '$' + '{{' + '22' + '}}"'
+          if expected_starttime_source not in restart_source or 'printf \'%s\' "$22"' in restart_source:
+              raise SystemExit('Stage 4 runtime restart adapter does not encode the exact process starttime field safely')
+          for forbidden in (
+              '--process', '--signal', '--pid',
+              'dispatch_release_once', 'dispatch_install_once',
+              'subprocess.run', 'subprocess.Popen',
+              'systemctl', 'runner_transport',
+          ):
+              if forbidden in restart_source:
+                  raise SystemExit('Stage 4 runtime restart adapter gained forbidden generic/mutation surface: ' + forbidden)
+
           if workflow.count('group: production-target-phone-production') < 1:
               raise SystemExit('Product Release phone transaction lost target serialization')
           if lifecycle_workflow.count('group: production-target-phone-production') != 1:
               raise SystemExit('Stage 4 lifecycle exercise must share the exact production phone serialization domain')
+          if restart_workflow.count('group: production-target-phone-production') != 1:
+              raise SystemExit('Stage 4 runtime restart exercise must share the exact production phone serialization domain')
 
           adapter_tree = ast.parse(apk_adapter)
           install_calls = []
@@ -252,8 +359,10 @@ jobs:
               'github.event.issue.number == 1', 'github.event.comment.user.login == github.repository_owner',
               "needs.route.outputs.route_id == 'deploy-product-release'", "needs.route.outputs.operation == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'exercise-runtime-recovery'", "needs.route.outputs.operation == 'exercise-runtime-recovery'",
+              "needs.route.outputs.route_id == 'exercise-runtime-restart'", "needs.route.outputs.operation == 'exercise-runtime-restart'",
               "needs.route.outputs.destructive == 'true'", 'uses: ./.github/workflows/release-deployment.yml',
-              'uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml', 'secrets: inherit',
+              'uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml',
+              'uses: ./.github/workflows/stage4-runtime-restart-exercise.yml', 'secrets: inherit',
           )
           router_missing = [item for item in router_required if item not in router]
           if router_missing:
@@ -262,6 +371,8 @@ jobs:
               raise SystemExit('deployment bypassed the declarative command classifier')
           if "startsWith(github.event.comment.body, '/exercise-runtime-recovery ')" in router:
               raise SystemExit('lifecycle mutation bypassed the declarative command classifier')
+          if "startsWith(github.event.comment.body, '/exercise-runtime-restart ')" in router:
+              raise SystemExit('runtime restart mutation bypassed the declarative command classifier')
 
           recovery = Path('.github/controller/deployment_state_machine.py').read_text(encoding='utf-8')
           if 'def recover_unknown' not in recovery or 'raise TransitionError("recovery is strictly read-only")' not in recovery:
@@ -271,5 +382,6 @@ jobs:
           print('sole_issue_ingress=true')
           print('deployment_registry_gate=true')
           print('fixed_lifecycle_registry_gate=true')
+          print('fixed_runtime_restart_registry_gate=true')
           print('shared_phone_serialization=true')
           PY

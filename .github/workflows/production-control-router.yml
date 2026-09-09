@@ -240,6 +240,29 @@ jobs:
       source_comment_url: ${{ github.event.comment.html_url }}
     secrets: inherit
 
+  exercise-runtime-restart:
+    name: Route fixed Stage 4 phone runtime restart exercise
+    needs: route
+    if: >-
+      needs.route.outputs.handler == 'workflow_call' &&
+      needs.route.outputs.route_id == 'exercise-runtime-restart' &&
+      needs.route.outputs.operation == 'exercise-runtime-restart' &&
+      needs.route.outputs.operation_class == 'RECOVER' &&
+      needs.route.outputs.read_only == 'false' &&
+      needs.route.outputs.destructive == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/stage4-runtime-restart-exercise.yml
+    with:
+      command: ${{ github.event.comment.body }}
+      target: ${{ needs.route.outputs.target }}
+      release_tag: ${{ needs.route.outputs.release_tag }}
+      source_issue_number: ${{ github.event.issue.number }}
+      source_comment_id: ${{ github.event.comment.id }}
+      source_actor: ${{ github.event.comment.user.login }}
+      source_comment_url: ${{ github.event.comment.html_url }}
+    secrets: inherit
+
   reconcile-phone-release:
     name: Route target-read-only Stage 4 phone Product Release reconcile
     needs: route
