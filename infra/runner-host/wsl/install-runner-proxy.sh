@@ -21,6 +21,8 @@ done
 systemctl cat "$RUNNER_SERVICE" >/dev/null 2>&1 || fail 'RUNNER_PROXY_EXISTING_SERVICE_UNAVAILABLE'
 runner_user="$(systemctl show --property=User --value "$RUNNER_SERVICE")"
 [[ -n "$runner_user" && "$runner_user" != 'root' ]] || fail 'RUNNER_PROXY_SERVICE_IDENTITY_INVALID'
+runner_workdir="$(systemctl show --property=WorkingDirectory --value "$RUNNER_SERVICE")"
+[[ "$runner_workdir" == /* && -d "$runner_workdir" && ! -L "$runner_workdir" ]] || fail 'RUNNER_PROXY_WORKING_DIRECTORY_INVALID'
 
 # This revision supersedes the #195 prerequisite-unit generation. Require its
 # exact rollback before install instead of silently coexisting with stale
@@ -45,6 +47,12 @@ if [[ -e "${LIB_DIR}/${HELPER}" ]]; then
 fi
 
 if [[ "$1" == '--install' ]]; then
+  # Prove the actual runner-root .env and current route satisfy the exact helper
+  # contract before installing anything or asking for a later restart.
+  (
+    cd -- "$runner_workdir"
+    /usr/bin/python3 -I -B "${SOURCE_DIR}/${HELPER}" --check >/dev/null
+  ) || fail 'RUNNER_PROXY_PREINSTALL_CHECK_FAILED'
   install -d -o root -g root -m 0755 "$LIB_DIR" "$DROPIN_DIR"
   install -o root -g root -m 0644 "${SOURCE_DIR}/${HELPER}" "${LIB_DIR}/${HELPER}"
   install -o root -g root -m 0644 "$SOURCE_DROPIN" "$DROPIN"
@@ -54,7 +62,10 @@ else
   # Remove only the marker block owned by this revision before removing its
   # exact files. The running listener keeps its current environment until a
   # separately admitted idle restart.
-  /usr/bin/python3 -I -B "${LIB_DIR}/${HELPER}" --remove >/dev/null || fail 'RUNNER_PROXY_ENV_ROLLBACK_FAILED'
+  (
+    cd -- "$runner_workdir"
+    /usr/bin/python3 -I -B "${LIB_DIR}/${HELPER}" --remove >/dev/null
+  ) || fail 'RUNNER_PROXY_ENV_ROLLBACK_FAILED'
   /usr/bin/python3 -I -c 'from pathlib import Path; Path("/etc/systemd/system/mobile-proxy-phone-runner.service.d/40-mobile-proxy-proxy.conf").unlink(missing_ok=True); Path("/usr/local/lib/mobile-proxy-runner-proxy/prepare-runner-proxy-environment.py").unlink(missing_ok=True)'
   systemctl daemon-reload
   printf '%s\n' 'runner_proxy_config=rolled_back' 'runner_restart_performed=false'
