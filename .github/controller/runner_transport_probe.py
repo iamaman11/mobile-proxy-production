@@ -175,7 +175,7 @@ def _is_runner_listener(argv: tuple[str, ...] | None) -> bool:
     return bool(
         argv
         and Path(argv[0]).name == "Runner.Listener"
-        and argv[1:] == ("run", "--startuptype", "service")
+        and argv[1:] in (("run",), ("run", "--startuptype", "service"))
     )
 
 
