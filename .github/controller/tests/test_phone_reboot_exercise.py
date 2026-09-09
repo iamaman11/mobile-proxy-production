@@ -226,6 +226,13 @@ def test_workflow_is_single_ingress_fixed_reboot_and_phone_serialized() -> None:
         "if-no-files-found: error",
     ):
         assert required in source
+
+    github_token_line = "GITHUB_TOKEN: ${{ github.token }}"
+    assert source.count(github_token_line) == 1
+    admit_source, exercise_source = source.split("\n  exercise-phone:\n", 1)
+    assert github_token_line in admit_source
+    assert github_token_line not in exercise_source
+
     for forbidden in (
         "workflow_dispatch:",
         "issue_comment:",
