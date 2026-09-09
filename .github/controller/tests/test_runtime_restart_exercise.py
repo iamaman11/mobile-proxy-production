@@ -60,6 +60,8 @@ def test_fixed_scenario_terminates_only_supervisor_and_proves_stack_generation()
     assert 'stage4_restart=watchdog_changed' in script
     assert 'stage4_restart=ownership_changed' in script
     assert 'process_starttime()' in script
+    assert 'printf \'%s\' "${22}"' in script
+    assert 'printf \'%s\' "$22"' not in script
     assert 'process_parent()' in script
     assert 'process_generation()' in script
     assert 'while [ "$i" -lt 30 ]' in script
