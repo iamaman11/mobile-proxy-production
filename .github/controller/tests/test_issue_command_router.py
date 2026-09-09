@@ -260,7 +260,7 @@ def test_stage4_runtime_recovery_route_is_exact_destructive_and_no_retry() -> No
     route = accepted("/exercise-runtime-recovery phone-production v0.1.7")
     assert route.route_id == "exercise-runtime-recovery"
     assert route.handler == "workflow_call"
-    assert route.workflow == ".github/workflows/phone-runtime-recovery.yml"
+    assert route.workflow == ".github/workflows/stage4-runtime-recovery-exercise.yml"
     assert route.ref == "main"
     assert route.operation == "exercise-runtime-recovery"
     assert route.operation_class == "RECOVER"
@@ -270,6 +270,7 @@ def test_stage4_runtime_recovery_route_is_exact_destructive_and_no_retry() -> No
     assert route.concurrency_domain == "production-target-phone-production"
     assert route.ref_policy == "controller-event-sha-exact"
     assert "semantic" in route.idempotency_policy
+    assert "single-run-attempt" in route.idempotency_policy
     assert "UNKNOWN" in route.recovery_policy and "no-blind-retry" in route.recovery_policy
     assert route.target_capability_policy == "phone-production-fixed-runtime-recovery-exercise"
     assert json.loads(route.arguments_json) == {
@@ -635,7 +636,7 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "needs.route.outputs.read_only == 'false'",
         "./.github/workflows/phone-release-observation.yml",
         "./.github/workflows/phone-operational-observation.yml",
-        "./.github/workflows/phone-runtime-recovery.yml",
+        "./.github/workflows/stage4-runtime-recovery-exercise.yml",
         "./.github/workflows/phone-release-reconcile.yml",
         "./.github/workflows/runner-transport-observation.yml",
         "./.github/workflows/release-deployment.yml",
