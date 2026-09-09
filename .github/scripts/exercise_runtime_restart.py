@@ -228,7 +228,7 @@ process_starttime() {{
   [ -r "/proc/$pid/stat" ] || return 1
   set -- $(cat "/proc/$pid/stat")
   [ "$#" -ge 22 ] || return 1
-  printf '%s' "$22"
+  printf '%s' "${{22}}"
 }}
 
 process_parent() {{
