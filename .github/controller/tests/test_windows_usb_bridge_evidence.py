@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from windows_usb_bridge_evidence import (
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from windows_usb_bridge_evidence import (  # noqa: E402
     collect_host_usb_bridge_evidence,
     not_evaluated_host_usb_bridge_evidence,
 )
