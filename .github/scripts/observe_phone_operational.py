@@ -12,7 +12,11 @@ SCRIPTS = Path(__file__).resolve().parent
 CONTROLLER = SCRIPTS.parent / "controller"
 sys.path.insert(0, str(CONTROLLER))
 
-from phone_target import PhoneTargetUnavailable  # noqa: E402
+from phone_target import (  # noqa: E402
+    PhoneFailurePhase,
+    PhoneTargetDiagnosticFailure,
+    PhoneTargetUnavailable,
+)
 from runtime_operational_observer import (  # noqa: E402
     RuntimeOperationalObservationUnavailable,
     observe_runtime_operational_health,
@@ -37,6 +41,19 @@ _ALLOWED_FAILURE_PHASES = frozenset(
         "health_transport_start",
         "health_transport_done",
         "health_parse_done",
+    }
+)
+_ALLOWED_PHONE_FAILURE_PHASES = frozenset(
+    {
+        "ADB_TOOLING_UNAVAILABLE",
+        "ADB_TRANSPORT_TIMEOUT",
+        "REGISTERED_DEVICE_NOT_DEVICE",
+        "ROOT_SHELL_SPAWN_FAILED",
+        "ROOT_SCRIPT_TIMEOUT",
+        "ROOT_SCRIPT_OUTPUT_TRUNCATED",
+        "ROOT_SCRIPT_PROTOCOL_MISMATCH",
+        "ROOT_SCRIPT_NONZERO",
+        "UNKNOWN",
     }
 )
 
@@ -89,7 +106,16 @@ def _bounded_terminal(payload: dict[str, object]) -> str:
     if failure_phase is not None:
         if failure_phase not in _ALLOWED_FAILURE_PHASES:
             raise ValueError("phone operational failure phase is not allowlisted")
+        if failure_code != "RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE":
+            raise ValueError("runtime operational failure phase has incompatible failure code")
         fields.append(f"failure_phase={failure_phase}")
+    phone_failure_phase = payload.get("phone_failure_phase")
+    if phone_failure_phase is not None:
+        if phone_failure_phase not in _ALLOWED_PHONE_FAILURE_PHASES:
+            raise ValueError("phone target failure phase is not allowlisted")
+        if failure_code != "PHONE_TARGET_UNAVAILABLE":
+            raise ValueError("phone target failure phase has incompatible failure code")
+        fields.append(f"phone_failure_phase={phone_failure_phase}")
     fields.extend(
         (
             "phone_mutation=false",
@@ -136,6 +162,14 @@ def observe(
             base["failure_phase"] = exc.last_phase
         _write(output, base)
         return base
+    except PhoneTargetDiagnosticFailure as exc:
+        phone_failure_phase = exc.phase.value
+        if exc.phase is PhoneFailurePhase.NONE or phone_failure_phase not in _ALLOWED_PHONE_FAILURE_PHASES:
+            raise ValueError("phone target diagnostic failure phase is not allowlisted")
+        base["failure_code"] = "PHONE_TARGET_UNAVAILABLE"
+        base["phone_failure_phase"] = phone_failure_phase
+        _write(output, base)
+        return base
     except PhoneTargetUnavailable:
         base["failure_code"] = "PHONE_TARGET_UNAVAILABLE"
         _write(output, base)
@@ -149,6 +183,7 @@ def observe(
     base["observation"] = bounded
     base.pop("failure_code", None)
     base.pop("failure_phase", None)
+    base.pop("phone_failure_phase", None)
     _write(output, base)
     return base
 
