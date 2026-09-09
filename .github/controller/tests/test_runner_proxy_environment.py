@@ -213,7 +213,7 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         )
         self.assertLess(
             installer.index('"${LIB_DIR}/${HELPER}" --apply'),
-            installer.index('systemctl daemon-reload', installer.index('if ! (')),
+            installer.index('if ! systemctl daemon-reload; then'),
         )
         self.assertNotIn('/opt/mobile-proxy-production-runner', combined)
 
