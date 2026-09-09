@@ -9,6 +9,7 @@
         "verify-product-release",
         "observe-phone-release",
         "observe-phone-operational",
+        "exercise-runtime-recovery",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release"
