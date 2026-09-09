@@ -229,7 +229,7 @@ jobs:
       needs.route.outputs.destructive == 'true'
     permissions:
       contents: read
-    uses: ./.github/workflows/phone-runtime-recovery.yml
+    uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml
     with:
       command: ${{ github.event.comment.body }}
       target: ${{ needs.route.outputs.target }}
