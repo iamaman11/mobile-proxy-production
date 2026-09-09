@@ -254,6 +254,46 @@
           "type": "semver"
         }
       ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-fixed-phone-reboot-exercise",
+      "concurrency_domain": "production-target-phone-production",
+      "destructive": true,
+      "dispatch_inputs": {},
+      "enabled": true,
+      "evidence_policy": "LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION",
+      "handler": "workflow_call",
+      "id": "exercise-phone-reboot",
+      "idempotency_policy": "single-run-attempt+single-semantic-command-attempt+no-automatic-retry",
+      "operation": "exercise-phone-reboot",
+      "operation_class": "RECOVER",
+      "pattern": "^/exercise-phone-reboot (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
+      "physical_domains": [
+        "device-lifecycle"
+      ],
+      "read_only": false,
+      "recovery_policy": "UNKNOWN-no-blind-retry-owner-checkpoint-required",
+      "ref": "main",
+      "ref_policy": "controller-event-sha-exact",
+      "requires_phone": true,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "source-comment-id+command-arguments",
+      "target_capability_policy": "phone-production-fixed-phone-reboot-exercise",
+      "workflow": ".github/workflows/stage4-phone-reboot-exercise.yml"
+    },
+    {
+      "allowed_targets": [
+        "phone-production"
+      ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-target-read-only-reconcile",
       "concurrency_domain": "production-target-phone-production",
       "destructive": false,
