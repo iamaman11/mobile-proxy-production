@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import urllib.error
@@ -73,15 +74,23 @@ def _retry_read_transport(attempt: int) -> None:
     time.sleep(_READ_TRANSPORT_RETRY_DELAYS_SECONDS[attempt])
 
 
+def _github_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "mobile-proxy-production-release-resolver-v2",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _request_json(url: str) -> Mapping[str, Any]:
     for attempt in range(_READ_TRANSPORT_ATTEMPTS):
         request = urllib.request.Request(
             url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "mobile-proxy-production-release-resolver-v2",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=_github_api_headers(),
         )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
