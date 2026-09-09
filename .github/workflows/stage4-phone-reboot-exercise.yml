@@ -65,6 +65,7 @@ jobs:
       - name: Validate sole-ingress provenance and immutable Stage 4 Release
         id: release
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           COMMAND: ${{ inputs.command }}
           TARGET: ${{ inputs.target }}
           RELEASE_TAG: ${{ inputs.release_tag }}
