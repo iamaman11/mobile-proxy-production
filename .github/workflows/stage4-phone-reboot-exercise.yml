@@ -1,0 +1,350 @@
+name: Stage 4 controlled phone reboot exercise
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      source_issue_number:
+        required: true
+        type: number
+      source_comment_id:
+        required: true
+        type: number
+      source_actor:
+        required: true
+        type: string
+      source_comment_url:
+        required: true
+        type: string
+    secrets:
+      ANDROID_PRODUCTION_SERIAL:
+        required: true
+      ANDROID_TARGET_BINDING_KEY:
+        required: true
+      MOBILE_PROXY_ADMIN_TOKEN:
+        required: true
+      MOBILE_PROXY_DEVICE_TOKEN:
+        required: true
+      MOBILE_PROXY_UI_TOKEN:
+        required: true
+      MOBILE_PROXY_RELAY_USER:
+        required: true
+      MOBILE_PROXY_RELAY_PASSWORD:
+        required: true
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  admit:
+    name: Admit one exact Stage 4 phone reboot exercise without phone access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    steps:
+      - name: Check out exact Controller comment-event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate sole-ingress provenance and immutable Stage 4 Release
+        id: release
+        env:
+          COMMAND: ${{ inputs.command }}
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_ISSUE_NUMBER: ${{ inputs.source_issue_number }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          SOURCE_ACTOR: ${{ inputs.source_actor }}
+          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
+          EXPECTED_OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          command = os.environ['COMMAND']
+          target = os.environ['TARGET']
+          release_tag = os.environ['RELEASE_TAG']
+          if command != '/exercise-phone-reboot phone-production v0.1.7':
+              raise SystemExit('Stage 4 phone reboot command differs from exact Issue #1 contract')
+          if target != 'phone-production' or release_tag != 'v0.1.7':
+              raise SystemExit('Stage 4 phone reboot admission differs from phone-production@v0.1.7')
+          if os.environ['SOURCE_ISSUE_NUMBER'] != '1':
+              raise SystemExit('Stage 4 phone reboot source Issue differs')
+          if os.environ['SOURCE_ACTOR'] != os.environ['EXPECTED_OWNER']:
+              raise SystemExit('Stage 4 phone reboot source actor is not repository owner')
+          try:
+              comment_id = int(os.environ['SOURCE_COMMENT_ID'])
+          except ValueError as exc:
+              raise SystemExit('Stage 4 phone reboot source comment id is invalid') from exc
+          if comment_id <= 0:
+              raise SystemExit('Stage 4 phone reboot source comment id is invalid')
+          expected_url = (
+              'https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-'
+              + str(comment_id)
+          )
+          if os.environ['SOURCE_COMMENT_URL'] != expected_url:
+              raise SystemExit('Stage 4 phone reboot source comment URL differs')
+
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag=release_tag, target=target)
+          if admitted.identity.tag != release_tag or admitted.identity.immutable is not True:
+              raise SystemExit('Stage 4 phone reboot Product Release admission differs')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f"source_sha={admitted.identity.source_sha}\n")
+          print(
+              'STAGE4_PHONE_REBOOT_ADMISSION_ACCEPTED '
+              f"release={release_tag} source_sha={admitted.identity.source_sha} "
+              f"source_comment_id={comment_id} phone_access=false phone_mutation=false"
+          )
+          PY
+
+  exercise-phone:
+    name: Exercise one fixed full-phone reboot and Product-owned rehydration
+    needs: admit
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 20
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    env:
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+      MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+      MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+      MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+      MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+      MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
+    steps:
+      - name: Check out exact Controller comment-event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact admitted PRODUCT source for digest and render verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: iamaman11/mobile-proxy
+          ref: ${{ needs.admit.outputs.source_sha }}
+          path: product-source
+          persist-credentials: false
+
+      - name: Require exact user-local Rust toolchain before Product digest/render
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${HOME}/.cargo"
+          RUSTUP_HOME="${HOME}/.rustup"
+          PATH="${CARGO_HOME}/bin:${PATH}"
+          export CARGO_HOME RUSTUP_HOME PATH
+          test "$CARGO_HOME" = "${HOME}/.cargo"
+          test "$RUSTUP_HOME" = "${HOME}/.rustup"
+          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
+          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
+          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
+          (
+            cd product-source
+            "$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps >/dev/null
+            git diff --check
+            test -z "$(git status --porcelain --untracked-files=no)"
+          )
+          {
+            printf 'CARGO_HOME=%s\n' "$CARGO_HOME"
+            printf 'RUSTUP_HOME=%s\n' "$RUSTUP_HOME"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo 'stage4_phone_reboot_rust_prerequisite=true'
+          echo 'rust_toolchain=1.95.0'
+          echo 'user_local_tooling=true'
+          echo 'system_path_mutation=false'
+          echo 'phone_access=false'
+          echo 'phone_mutation=false'
+          echo 'provider_access=false'
+          echo 'vm_access=false'
+          echo 'runner_proxy_mutation=false'
+
+      - name: Execute one bounded fixed phone reboot perturbation
+        id: exercise
+        continue-on-error: true
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TOOL_CACHE:-}"
+          export MOBILE_PROXY_RUNTIME_CACHE_DIR="$RUNNER_TOOL_CACHE/mobile-proxy-runtime-cache"
+          python3 .github/scripts/exercise_phone_reboot.py \
+            --target "$TARGET" \
+            --release-tag "$RELEASE_TAG" \
+            --controller-revision "$GITHUB_SHA" \
+            --source-comment-id "$SOURCE_COMMENT_ID" \
+            --product-root "$GITHUB_WORKSPACE/product-source" \
+            --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
+            --output "$RUNNER_TEMP/stage4-phone-reboot-exercise.json"
+
+      - name: Preserve mandatory bounded phone reboot evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stage4-phone-reboot-exercise-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage4-phone-reboot-exercise.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce rebooted lifecycle terminal and independent postconditions
+        if: always()
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ needs.admit.outputs.source_sha }}
+          EXPECTED_COMMENT_ID: ${{ inputs.source_comment_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'stage4-phone-reboot-exercise.json'
+          if not path.is_file():
+              raise SystemExit('Stage 4 phone reboot evidence is unavailable')
+          value = json.loads(path.read_text(encoding='utf-8'))
+          if value.get('schema') != 'stage4-phone-reboot-exercise.v1':
+              raise SystemExit('Stage 4 phone reboot evidence schema differs')
+          if value.get('classification') != 'REBOOTED' or 'failure_code' in value:
+              raise SystemExit('Stage 4 phone reboot did not reach REBOOTED terminal')
+          if value.get('controller_revision') != os.environ['EXPECTED_CONTROLLER_SHA']:
+              raise SystemExit('Stage 4 phone reboot controller revision differs')
+          if value.get('release_source_sha') != os.environ['EXPECTED_SOURCE_SHA']:
+              raise SystemExit('Stage 4 phone reboot Product source SHA differs')
+          if value.get('source_comment_id') != int(os.environ['EXPECTED_COMMENT_ID']):
+              raise SystemExit('Stage 4 phone reboot source comment identity differs')
+          if value.get('target') != 'phone-production' or value.get('product_release') != 'v0.1.7':
+              raise SystemExit('Stage 4 phone reboot identity differs')
+
+          scenario = value.get('scenario')
+          if not isinstance(scenario, dict) or scenario != {
+              'id': 'android-rooted-phone-reboot-once',
+              'reboot_owner': 'android-init-via-sys.powerctl',
+              'post_boot_runtime_owner': 'product-magisk-module-service',
+              'arbitrary_reboot_selector': False,
+              'service_script_reinvoked': False,
+              'reboot_observation_bound_seconds': 180,
+              'post_operational_bound_seconds': 60,
+          }:
+              raise SystemExit('Stage 4 phone reboot fixed scenario differs')
+
+          pre = value.get('preconditions')
+          post = value.get('postconditions')
+          if not isinstance(pre, dict) or not isinstance(post, dict):
+              raise SystemExit('Stage 4 phone reboot pre/postconditions are unavailable')
+          for label, state in (('pre', pre), ('post', post)):
+              release = state.get('exact_product_release')
+              operational = state.get('operational')
+              if not isinstance(release, dict) or release.get('classification') != 'HEALTHY_EXACT' or release.get('exact') is not True:
+                  raise SystemExit(f'Stage 4 phone reboot {label} exact Release condition differs')
+              if not isinstance(operational, dict):
+                  raise SystemExit(f'Stage 4 phone reboot {label} operational evidence is unavailable')
+              local = operational.get('phone_local')
+              topology = operational.get('topology')
+              if not isinstance(local, dict) or local.get('ready') is not True:
+                  raise SystemExit(f'Stage 4 phone reboot {label} phone-local invariant differs')
+              if not isinstance(topology, dict) or topology.get('disposition') not in {
+                  'READY', 'TOPOLOGY_DEFERRED', 'NONLOCAL_DEGRADED'
+              }:
+                  raise SystemExit(f'Stage 4 phone reboot {label} topology disposition differs')
+
+          pre_boot = pre.get('boot')
+          post_boot = post.get('boot')
+          if pre_boot != {'boot_completed': True, 'boot_identity_observed': True}:
+              raise SystemExit('Stage 4 phone reboot pre-boot identity condition differs')
+          if post_boot != {'boot_identity_changed': True, 'boot_completed': True}:
+              raise SystemExit('Stage 4 phone reboot post-boot identity proof differs')
+
+          mutation = value.get('mutation')
+          if not isinstance(mutation, dict) or mutation != {
+              'attempts': 1,
+              'outcome': 'REBOOTED',
+              'dispatched': True,
+              'ambiguous_stop': False,
+          }:
+              raise SystemExit('Stage 4 phone reboot mutation terminal differs')
+
+          rehydration = value.get('boot_rehydration')
+          if not isinstance(rehydration, dict) or rehydration != {
+              'expected': True,
+              'boot_identity_changed': True,
+              'boot_completed': True,
+              'runtime_stack_ready': True,
+              'service_script_reinvoked': False,
+              'reboot_observation_bound_seconds': 180,
+              'post_operational_bound_seconds': 60,
+          }:
+              raise SystemExit('Stage 4 phone reboot rehydration proof differs')
+
+          safety = value.get('safety')
+          if not isinstance(safety, dict):
+              raise SystemExit('Stage 4 phone reboot safety evidence is unavailable')
+          required_true = (
+              'phone_access_performed',
+              'phone_mutation_performed',
+              'phone_reboot_performed',
+          )
+          required_false = (
+              'deployment_created',
+              'deployment_intent_created',
+              'provider_access_performed',
+              'provider_mutation_performed',
+              'vm_access_performed',
+              'vm_mutation_performed',
+              'runner_proxy_mutation_performed',
+              'runtime_restart_performed',
+              'bootstrap_reinvoked',
+              'service_script_reinvoked',
+              'arbitrary_reboot_selector_accepted',
+              'arbitrary_process_selector_accepted',
+              'raw_boot_identity_recorded',
+              'process_ids_recorded',
+              'process_cmdlines_recorded',
+              'process_generation_tokens_recorded',
+              'raw_device_identifier_recorded',
+              'raw_config_recorded',
+              'secret_values_recorded',
+              'blind_retry_performed',
+          )
+          if any(safety.get(field) is not True for field in required_true):
+              raise SystemExit('Stage 4 phone reboot phone access/mutation proof differs')
+          if any(safety.get(field) is not False for field in required_false):
+              raise SystemExit('Stage 4 phone reboot safety boundary differs')
+          print('STAGE4_PHONE_REBOOT_ACCEPTED classification=REBOOTED')
+          PY
