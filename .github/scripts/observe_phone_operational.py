@@ -35,16 +35,7 @@ _ALLOWED_FAILURE_CODES = frozenset(
         "PHONE_TARGET_UNAVAILABLE",
     }
 )
-_ALLOWED_FAILURE_PHASES = frozenset(
-    {
-        "busybox_selected",
-        "process_count_start",
-        "process_count_done",
-        "health_transport_start",
-        "health_transport_done",
-        "health_parse_done",
-    }
-)
+_ALLOWED_FAILURE_PHASES = runtime_observer._ALLOWED_FAILURE_PHASES
 _ALLOWED_PHONE_FAILURE_PHASES = frozenset(
     {
         "ADB_TOOLING_UNAVAILABLE",
