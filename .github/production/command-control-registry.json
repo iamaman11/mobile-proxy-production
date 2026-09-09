@@ -1,7 +1,5 @@
 {
-  "allowed_authors": [
-    "iamaman11"
-  ],
+  "allowed_authors": ["iamaman11"],
   "extension_rules": {
     "dispatch_workflow_must_be_read_only": true,
     "new_destructive_routes_require_concurrency_domain": true,
@@ -44,26 +42,12 @@
       "workflow": ".github/workflows/public-deployment-projection-observer.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        }
-      ],
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+release-admission-read-only",
       "concurrency_domain": "none",
       "destructive": false,
-      "dispatch_inputs": {
-        "release_tag": "release",
-        "target": "target"
-      },
+      "dispatch_inputs": {"release_tag": "release", "target": "target"},
       "enabled": true,
       "evidence_policy": "bounded-product-release-admission",
       "handler": "dispatch_workflow",
@@ -85,19 +69,8 @@
       "workflow": ".github/workflows/product-release-admission-proof.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        }
-      ],
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-phone-observation",
       "concurrency_domain": "production-target-phone-production",
       "destructive": false,
@@ -123,19 +96,8 @@
       "workflow": ".github/workflows/phone-release-observation.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        }
-      ],
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-phone-operational-observation",
       "concurrency_domain": "production-target-phone-production",
       "destructive": false,
@@ -161,19 +123,8 @@
       "workflow": ".github/workflows/phone-operational-observation.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        }
-      ],
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-recovery-exercise",
       "concurrency_domain": "production-target-phone-production",
       "destructive": true,
@@ -186,9 +137,7 @@
       "operation": "exercise-runtime-recovery",
       "operation_class": "RECOVER",
       "pattern": "^/exercise-runtime-recovery (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
-      "physical_domains": [
-        "runtime"
-      ],
+      "physical_domains": ["runtime"],
       "read_only": false,
       "recovery_policy": "UNKNOWN-no-blind-retry-owner-checkpoint-required",
       "ref": "main",
@@ -201,19 +150,35 @@
       "workflow": ".github/workflows/stage4-runtime-recovery-exercise.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        }
-      ],
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
+      "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-restart-exercise",
+      "concurrency_domain": "production-target-phone-production",
+      "destructive": true,
+      "dispatch_inputs": {},
+      "enabled": true,
+      "evidence_policy": "LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION",
+      "handler": "workflow_call",
+      "id": "exercise-runtime-restart",
+      "idempotency_policy": "single-run-attempt+single-semantic-command-attempt+no-automatic-retry",
+      "operation": "exercise-runtime-restart",
+      "operation_class": "RECOVER",
+      "pattern": "^/exercise-runtime-restart (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
+      "physical_domains": ["runtime"],
+      "read_only": false,
+      "recovery_policy": "UNKNOWN-no-blind-retry-owner-checkpoint-required",
+      "ref": "main",
+      "ref_policy": "controller-event-sha-exact",
+      "requires_phone": true,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "source-comment-id+command-arguments",
+      "target_capability_policy": "phone-production-fixed-runtime-restart-exercise",
+      "workflow": ".github/workflows/stage4-runtime-restart-exercise.yml"
+    },
+    {
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-target-read-only-reconcile",
       "concurrency_domain": "production-target-phone-production",
       "destructive": false,
@@ -293,20 +258,8 @@
       "workflow": ".github/workflows/runner-transport-observation.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production",
-        "vm-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        }
-      ],
+      "allowed_targets": ["phone-production", "vm-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+release-admission+explicit-refused-retry-lineage",
       "concurrency_domain": "target-global-mutation",
       "destructive": true,
@@ -319,10 +272,7 @@
       "operation": "deploy-product-release",
       "operation_class": "DEPLOY",
       "pattern": "^/(?=(?:deploy [^ ]+ [^ ]+|retry-deploy phone-production [^ ]+ req-sha256:[0-9a-f]{64})$)(?:deploy|retry-deploy) (?P<target>phone-production|vm-production) (?P<release>v[0-9]+\\.[0-9]+\\.[0-9]+)(?: req-sha256:[0-9a-f]{64})?$",
-      "physical_domains": [
-        "target-runtime",
-        "application-installation"
-      ],
+      "physical_domains": ["target-runtime", "application-installation"],
       "read_only": false,
       "recovery_policy": "UNKNOWN-read-only-reconcile-no-blind-retry",
       "ref": "main",
@@ -336,12 +286,7 @@
     },
     {
       "allowed_targets": [],
-      "arguments": [
-        {
-          "name": "canonical_sha",
-          "type": "git_sha"
-        }
-      ],
+      "arguments": [{"name": "canonical_sha", "type": "git_sha"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+public-main-sha",
       "concurrency_domain": "production-runner-android-build-tools-bootstrap",
       "destructive": false,
@@ -354,9 +299,7 @@
       "operation": "production-runner-android-build-tools-bootstrap",
       "operation_class": "RUNNER_TOOLING",
       "pattern": "^/runner-android-build-tools-bootstrap (?P<canonical_sha>[0-9a-f]{40})$",
-      "physical_domains": [
-        "runner-tooling"
-      ],
+      "physical_domains": ["runner-tooling"],
       "read_only": false,
       "recovery_policy": "fail-closed-without-phone-access",
       "ref": "main",
@@ -369,23 +312,8 @@
       "workflow": ".github/workflows/production-runner-android-build-tools-bootstrap.yml"
     },
     {
-      "allowed_targets": [
-        "phone-production"
-      ],
-      "arguments": [
-        {
-          "name": "target",
-          "type": "target"
-        },
-        {
-          "name": "release",
-          "type": "semver"
-        },
-        {
-          "name": "quarantined_request_id",
-          "type": "identifier"
-        }
-      ],
+      "allowed_targets": ["phone-production"],
+      "arguments": [{"name": "target", "type": "target"}, {"name": "release", "type": "semver"}, {"name": "quarantined_request_id", "type": "identifier"}],
       "authority_policy": "private-issue1-owner+controller-main-exact+exact-quarantined-v017+exact-prior-recovery-terminal",
       "concurrency_domain": "target-global-mutation",
       "destructive": true,
@@ -398,9 +326,7 @@
       "operation": "recover-quarantined-product-release",
       "operation_class": "RECOVER",
       "pattern": "^/recover-quarantined (?P<target>phone-production) (?P<release>v0\\.1\\.7) (?P<quarantined_request_id>req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7)$",
-      "physical_domains": [
-        "runtime"
-      ],
+      "physical_domains": ["runtime"],
       "read_only": false,
       "recovery_policy": "UNKNOWN-no-blind-retry-owner-checkpoint-required",
       "ref": "main",
