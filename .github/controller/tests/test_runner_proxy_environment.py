@@ -53,6 +53,18 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         self.assertEqual(env['NO_PROXY'], 'localhost,127.0.0.1,::1')
         self.assertNotIn('GIT_SSL_NO_VERIFY', env)
 
+    def test_runner_env_is_derived_from_service_working_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            self.assertEqual(proxy.runner_environment_path(root), root / '.env')
+            linked = root.parent / (root.name + '-link')
+            linked.symlink_to(root, target_is_directory=True)
+            try:
+                with self.assertRaisesRegex(ValueError, 'RUNNER_PROXY_WORKING_DIRECTORY_UNSAFE'):
+                    proxy.runner_environment_path(linked)
+            finally:
+                linked.unlink()
+
     def test_managed_block_preserves_unrelated_runner_env_and_updates_gateway(self):
         original = 'LANG=C.UTF-8\nJAVA_HOME=/opt/java\n'
         first = proxy.reconcile_environment(original, proxy.render_environment('172.22.0.1'))
@@ -78,6 +90,20 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, 'RUNNER_PROXY_MANAGED_BLOCK_INVALID'):
             proxy.reconcile_environment(malformed, None)
+
+    def test_check_is_read_only_and_validates_same_update_contract(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / 'runner'
+            root.mkdir(mode=0o700)
+            target = root / '.env'
+            target.write_text('LANG=C.UTF-8\n', encoding='utf-8')
+            target.chmod(0o600)
+            before = target.read_bytes()
+            proxy.check_runner_environment(target, proxy.render_environment('172.22.0.1'))
+            self.assertEqual(target.read_bytes(), before)
+            target.write_text('https_proxy=http://unmanaged\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'RUNNER_PROXY_EXISTING_ENV_CONFLICT'):
+                proxy.check_runner_environment(target, proxy.render_environment('172.22.0.1'))
 
     def test_atomic_runner_env_replacement_preserves_owner_mode_and_unrelated_lines(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -122,7 +148,7 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         self.assertNotIn('mobile-proxy-runner-proxy-prepare.service', dropin)
         self.assertFalse((HOST / 'mobile-proxy-runner-proxy-prepare.service').exists())
 
-    def test_installation_has_exact_rollback_and_no_restart_or_network_mutation(self):
+    def test_installation_prechecks_actual_workdir_and_has_exact_rollback_without_restart(self):
         installer = (HOST / 'install-runner-proxy.sh').read_text()
         helper = (HOST / 'prepare-runner-proxy-environment.py').read_text()
         dropin = (HOST / 'mobile-proxy-phone-runner-proxy.conf').read_text()
@@ -132,10 +158,15 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
             'git config', 'config.sh', 'iptables', 'netsh',
         ):
             self.assertNotIn(forbidden, combined)
+        self.assertIn('systemctl show --property=WorkingDirectory --value', installer)
+        self.assertIn('RUNNER_PROXY_WORKING_DIRECTORY_INVALID', installer)
+        self.assertIn('"${SOURCE_DIR}/${HELPER}" --check', installer)
+        self.assertIn('RUNNER_PROXY_PREINSTALL_CHECK_FAILED', installer)
         self.assertIn('RUNNER_PROXY_LEGACY_PREPARE_UNIT_PRESENT', installer)
         self.assertIn('cmp -s "$SOURCE_DROPIN" "$DROPIN"', installer)
         self.assertIn('"${LIB_DIR}/${HELPER}" --remove', installer)
         self.assertIn('runner_restart_performed=false', installer)
+        self.assertNotIn('/opt/mobile-proxy-production-runner', combined)
 
 
 if __name__ == '__main__':
