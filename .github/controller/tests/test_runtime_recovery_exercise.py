@@ -156,7 +156,7 @@ def test_ambiguous_mutation_transport_stops_without_inferred_success() -> None:
 
 
 def test_workflow_is_single_ingress_fixed_mutation_and_global_phone_serialized() -> None:
-    source = (WORKFLOWS / "phone-runtime-recovery.yml").read_text(encoding="utf-8")
+    source = (WORKFLOWS / "stage4-runtime-recovery-exercise.yml").read_text(encoding="utf-8")
     for required in (
         "workflow_call:",
         "command != '/exercise-runtime-recovery phone-production v0.1.7'",
