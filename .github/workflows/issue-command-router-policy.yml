@@ -114,7 +114,7 @@ jobs:
           admission = (workflows / 'product-release-admission-proof.yml').read_text(encoding='utf-8')
           phone_observation = (workflows / 'phone-release-observation.yml').read_text(encoding='utf-8')
           phone_operational = (workflows / 'phone-operational-observation.yml').read_text(encoding='utf-8')
-          runtime_recovery = (workflows / 'phone-runtime-recovery.yml').read_text(encoding='utf-8')
+          runtime_recovery = (workflows / 'stage4-runtime-recovery-exercise.yml').read_text(encoding='utf-8')
           phone_reconcile = (workflows / 'phone-release-reconcile.yml').read_text(encoding='utf-8')
           phone_transport_preflight = (workflows / 'phone-transport-preflight.yml').read_text(encoding='utf-8')
           registry_path = Path('.github/production/command-control-registry.json')
@@ -151,7 +151,7 @@ jobs:
               'name: Revalidate deployment request outputs against admitted route',
               'uses: ./.github/workflows/phone-release-observation.yml',
               'uses: ./.github/workflows/phone-operational-observation.yml',
-              'uses: ./.github/workflows/phone-runtime-recovery.yml',
+              'uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml',
               'uses: ./.github/workflows/phone-release-reconcile.yml',
               'uses: ./.github/workflows/phone-transport-preflight.yml',
               'uses: ./.github/workflows/runner-transport-observation.yml',
@@ -329,10 +329,10 @@ jobs:
               or lifecycle.get('authority_policy') != 'private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-recovery-exercise'
               or lifecycle.get('target_capability_policy') != 'phone-production-fixed-runtime-recovery-exercise'
               or lifecycle.get('evidence_policy') != 'LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION'
-              or lifecycle.get('idempotency_policy') != 'single-semantic-command-attempt+no-automatic-retry'
+              or lifecycle.get('idempotency_policy') != 'single-run-attempt+single-semantic-command-attempt+no-automatic-retry'
               or lifecycle.get('semantic_identity_policy') != 'source-comment-id+command-arguments'
               or lifecycle.get('recovery_policy') != 'UNKNOWN-no-blind-retry-owner-checkpoint-required'
-              or lifecycle.get('workflow') != '.github/workflows/phone-runtime-recovery.yml'
+              or lifecycle.get('workflow') != '.github/workflows/stage4-runtime-recovery-exercise.yml'
               or lifecycle.get('ref_policy') != 'controller-event-sha-exact'
               or lifecycle.get('pattern') != r'^/exercise-runtime-recovery (?P<target>phone-production) (?P<release>v0\.1\.7)$'
           ):
