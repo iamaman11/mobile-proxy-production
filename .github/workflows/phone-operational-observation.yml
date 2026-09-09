@@ -213,6 +213,7 @@ jobs:
           failure_phase = value.get('failure_phase')
           phone_failure_phase = value.get('phone_failure_phase')
           observer_failure_phase = value.get('observer_failure_phase')
+          observer_failure_code = value.get('observer_failure_code')
           if classification == 'UNKNOWN':
               if failure_code not in {
                   'RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE',
@@ -265,12 +266,39 @@ jobs:
                   if phone_failure_phase is not None:
                       raise SystemExit('Stage 4 phone target and observer failure phases overlap')
                   fields.append(f'observer_failure_phase={observer_failure_phase}')
+              if observer_failure_code is not None:
+                  if failure_code != 'PHONE_TARGET_UNAVAILABLE':
+                      raise SystemExit('Stage 4 observer failure code has incompatible failure code')
+                  if observer_failure_phase != 'OUTPUT_VALIDATION':
+                      raise SystemExit('Stage 4 observer failure code has incompatible observer phase')
+                  if phone_failure_phase is not None:
+                      raise SystemExit('Stage 4 phone target and observer failure metadata overlap')
+                  if observer_failure_code not in {
+                      'OUTPUT_STREAM_ENCODING',
+                      'OUTPUT_PHASE_PROTOCOL',
+                      'OUTPUT_PAYLOAD_ENCODING',
+                      'OUTPUT_PAYLOAD_STRUCTURE',
+                      'OUTPUT_PROCESS_COUNT',
+                      'OUTPUT_HEALTH_AUTH',
+                      'OUTPUT_UNAUTHENTICATED_PAYLOAD_CONTRACT',
+                      'OUTPUT_SERVING',
+                      'OUTPUT_CELLULAR_ROUTE_READY',
+                      'OUTPUT_PROXY_BIND_READY',
+                      'OUTPUT_LOCAL_SERVING_READY',
+                      'OUTPUT_READINESS_STATE',
+                      'OUTPUT_PROXY_STATUS',
+                      'OUTPUT_TUNNEL_OWNER',
+                      'OUTPUT_DEGRADATION_REASON_CODE',
+                  }:
+                      raise SystemExit('Stage 4 observer failure code differs')
+                  fields.append(f'observer_failure_code={observer_failure_code}')
           else:
               if (
                   failure_code is not None
                   or failure_phase is not None
                   or phone_failure_phase is not None
                   or observer_failure_phase is not None
+                  or observer_failure_code is not None
               ):
                   raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
               fields = [
