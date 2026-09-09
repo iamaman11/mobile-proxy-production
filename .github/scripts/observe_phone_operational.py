@@ -12,6 +12,7 @@ SCRIPTS = Path(__file__).resolve().parent
 CONTROLLER = SCRIPTS.parent / "controller"
 sys.path.insert(0, str(CONTROLLER))
 
+import runtime_operational_observer as runtime_observer  # noqa: E402
 from phone_target import (  # noqa: E402
     PhoneFailurePhase,
     PhoneTargetDiagnosticFailure,
@@ -54,6 +55,12 @@ _ALLOWED_PHONE_FAILURE_PHASES = frozenset(
         "ROOT_SCRIPT_PROTOCOL_MISMATCH",
         "ROOT_SCRIPT_NONZERO",
         "UNKNOWN",
+    }
+)
+_ALLOWED_OBSERVER_FAILURE_PHASES = frozenset(
+    {
+        "BINDING_VALIDATION",
+        "OUTPUT_VALIDATION",
     }
 )
 
@@ -116,6 +123,15 @@ def _bounded_terminal(payload: dict[str, object]) -> str:
         if failure_code != "PHONE_TARGET_UNAVAILABLE":
             raise ValueError("phone target failure phase has incompatible failure code")
         fields.append(f"phone_failure_phase={phone_failure_phase}")
+    observer_failure_phase = payload.get("observer_failure_phase")
+    if observer_failure_phase is not None:
+        if observer_failure_phase not in _ALLOWED_OBSERVER_FAILURE_PHASES:
+            raise ValueError("observer failure phase is not allowlisted")
+        if failure_code != "PHONE_TARGET_UNAVAILABLE":
+            raise ValueError("observer failure phase has incompatible failure code")
+        if phone_failure_phase is not None:
+            raise ValueError("phone target and observer failure phases are mutually exclusive")
+        fields.append(f"observer_failure_phase={observer_failure_phase}")
     fields.extend(
         (
             "phone_mutation=false",
@@ -124,6 +140,15 @@ def _bounded_terminal(payload: dict[str, object]) -> str:
         )
     )
     return "STAGE4_PHONE_OPERATIONAL_OBSERVATION " + " ".join(fields)
+
+
+def _observer_failure_phase(exc: PhoneTargetUnavailable) -> str | None:
+    message = str(exc)
+    if message == runtime_observer._UNAVAILABLE:
+        return "BINDING_VALIDATION"
+    if message == runtime_observer._MALFORMED:
+        return "OUTPUT_VALIDATION"
+    return None
 
 
 def observe(
@@ -170,8 +195,11 @@ def observe(
         base["phone_failure_phase"] = phone_failure_phase
         _write(output, base)
         return base
-    except PhoneTargetUnavailable:
+    except PhoneTargetUnavailable as exc:
         base["failure_code"] = "PHONE_TARGET_UNAVAILABLE"
+        observer_failure_phase = _observer_failure_phase(exc)
+        if observer_failure_phase is not None:
+            base["observer_failure_phase"] = observer_failure_phase
         _write(output, base)
         return base
 
@@ -184,6 +212,7 @@ def observe(
     base.pop("failure_code", None)
     base.pop("failure_phase", None)
     base.pop("phone_failure_phase", None)
+    base.pop("observer_failure_phase", None)
     _write(output, base)
     return base
 
