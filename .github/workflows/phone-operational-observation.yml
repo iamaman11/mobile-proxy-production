@@ -212,6 +212,7 @@ jobs:
           failure_code = value.get('failure_code')
           failure_phase = value.get('failure_phase')
           phone_failure_phase = value.get('phone_failure_phase')
+          observer_failure_phase = value.get('observer_failure_phase')
           if classification == 'UNKNOWN':
               if failure_code not in {
                   'RUNTIME_OPERATIONAL_OBSERVATION_UNAVAILABLE',
@@ -253,8 +254,24 @@ jobs:
                   }:
                       raise SystemExit('Stage 4 phone target failure phase differs')
                   fields.append(f'phone_failure_phase={phone_failure_phase}')
+              if observer_failure_phase is not None:
+                  if failure_code != 'PHONE_TARGET_UNAVAILABLE':
+                      raise SystemExit('Stage 4 observer failure phase has incompatible failure code')
+                  if observer_failure_phase not in {
+                      'BINDING_VALIDATION',
+                      'OUTPUT_VALIDATION',
+                  }:
+                      raise SystemExit('Stage 4 observer failure phase differs')
+                  if phone_failure_phase is not None:
+                      raise SystemExit('Stage 4 phone target and observer failure phases overlap')
+                  fields.append(f'observer_failure_phase={observer_failure_phase}')
           else:
-              if failure_code is not None or failure_phase is not None or phone_failure_phase is not None:
+              if (
+                  failure_code is not None
+                  or failure_phase is not None
+                  or phone_failure_phase is not None
+                  or observer_failure_phase is not None
+              ):
                   raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
               fields = [
                   'STAGE4_PHONE_OPERATIONAL_CLASSIFIED',
