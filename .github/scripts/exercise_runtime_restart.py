@@ -415,18 +415,23 @@ def _observe_post_operational(
     admin_token: str,
 ) -> RuntimeOperationalObservation:
     deadline = time.monotonic() + _POST_OBSERVATION_BOUND_SECONDS
+    last_value: RuntimeOperationalObservation | None = None
     last_error: PhoneTargetUnavailable | None = None
     while True:
         try:
             value = observe_runtime_operational_health(serial, admin_token=admin_token)
+            last_value = value
+            last_error = None
             if _phone_local_ready(value):
                 return value
         except PhoneTargetUnavailable as exc:
             last_error = exc
         if time.monotonic() >= deadline:
+            if last_value is not None:
+                return last_value
             if last_error is not None:
                 raise last_error
-            return value
+            raise PhoneTargetUnavailable("post-restart operational observation produced no result")
         time.sleep(1)
 
 
