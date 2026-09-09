@@ -37,6 +37,18 @@ _ALLOWED_DEGRADATION = frozenset(
         "local_probe_failed",
     }
 )
+_ALLOWED_REVERSE_TUNNEL_FRESHNESS = frozenset({"none", "unknown", "fresh", "stale"})
+_ALLOWED_REVERSE_TUNNEL_TRANSPORT = frozenset({"none", "tcp", "quic", "tls_tcp"})
+_ALLOWED_REVERSE_TUNNEL_FAILOVER_REASON = frozenset(
+    {
+        "none",
+        "connect_timeout",
+        "connect_failed",
+        "authentication_failed",
+        "session_closed",
+        "session_error",
+    }
+)
 _PHASE_SEQUENCE = (
     "busybox_selected",
     "process_count_start",
@@ -84,6 +96,10 @@ class RuntimeOperationalOutputFailureCode(str, Enum):
     PROXY_STATUS = "OUTPUT_PROXY_STATUS"
     TUNNEL_OWNER = "OUTPUT_TUNNEL_OWNER"
     DEGRADATION_REASON_CODE = "OUTPUT_DEGRADATION_REASON_CODE"
+    REVERSE_TUNNEL_CONNECTED = "OUTPUT_REVERSE_TUNNEL_CONNECTED"
+    REVERSE_TUNNEL_FRESHNESS = "OUTPUT_REVERSE_TUNNEL_FRESHNESS"
+    REVERSE_TUNNEL_ACTIVE_TRANSPORT = "OUTPUT_REVERSE_TUNNEL_ACTIVE_TRANSPORT"
+    REVERSE_TUNNEL_FAILOVER_REASON = "OUTPUT_REVERSE_TUNNEL_FAILOVER_REASON"
 
 
 class RuntimeOperationalOutputValidationFailure(phone_target.PhoneTargetUnavailable):
@@ -115,6 +131,10 @@ class RuntimeOperationalObservation:
     local_serving_ready: bool | None
     tunnel_owner: str
     degradation_reason_code: str
+    reverse_tunnel_connected: bool | None
+    reverse_tunnel_freshness: str
+    reverse_tunnel_active_transport: str
+    reverse_tunnel_failover_reason: str
     mode: str = "read_only"
 
     @property
@@ -274,6 +294,10 @@ proxy_bind_ready=unknown
 local_serving_ready=unknown
 tunnel_owner=unknown
 degradation_reason_code=unknown
+reverse_tunnel_connected=unknown
+reverse_tunnel_freshness=unknown
+reverse_tunnel_active_transport=unknown
+reverse_tunnel_failover_reason=unknown
 
 health_raw=""
 printf '{_PHASE_PREFIX}health_transport_start\\n'
@@ -300,6 +324,15 @@ if [ "$health_api_authenticated" = true ]; then
     value="$(printf '%s' "$health_raw" | sed -n "s/.*\\\"$key\\\"[[:space:]]*:[[:space:]]*\\([a-z][a-z]*\\).*/\\1/p" | head -n1)"
     case "$value" in true|false) printf '%s' "$value" ;; *) printf 'unknown' ;; esac
   }}
+  extract_optional_string() {{
+    key="$1"
+    if printf '%s' "$health_raw" | grep -Eq "\\\"$key\\\"[[:space:]]*:[[:space:]]*null"; then
+      printf 'none'
+    else
+      value="$(extract_string "$key")"
+      if [ -n "$value" ]; then printf '%s' "$value"; else printf 'invalid'; fi
+    fi
+  }}
   readiness_state="$(extract_string readiness_state)"
   proxy_status="$(extract_string proxy_status)"
   serving="$(extract_bool serving)"
@@ -307,6 +340,10 @@ if [ "$health_api_authenticated" = true ]; then
   proxy_bind_ready="$(extract_bool proxy_bind_ready)"
   local_serving_ready="$(extract_bool local_serving_ready)"
   tunnel_owner="$(extract_string tunnel_owner)"
+  reverse_tunnel_connected="$(extract_bool reverse_tunnel_connected)"
+  reverse_tunnel_freshness="$(extract_optional_string reverse_tunnel_freshness)"
+  reverse_tunnel_active_transport="$(extract_optional_string reverse_tunnel_active_transport)"
+  reverse_tunnel_failover_reason="$(extract_optional_string reverse_tunnel_failover_reason)"
   if printf '%s' "$health_raw" | grep -Eq '\"degradation_reason_code\"[[:space:]]*:[[:space:]]*null'; then
     degradation_reason_code=none
   else
@@ -333,6 +370,10 @@ printf 'proxy_bind_ready=%s\\n' "$proxy_bind_ready"
 printf 'local_serving_ready=%s\\n' "$local_serving_ready"
 printf 'tunnel_owner=%s\\n' "$tunnel_owner"
 printf 'degradation_reason_code=%s\\n' "$degradation_reason_code"
+printf 'reverse_tunnel_connected=%s\\n' "$reverse_tunnel_connected"
+printf 'reverse_tunnel_freshness=%s\\n' "$reverse_tunnel_freshness"
+printf 'reverse_tunnel_active_transport=%s\\n' "$reverse_tunnel_active_transport"
+printf 'reverse_tunnel_failover_reason=%s\\n' "$reverse_tunnel_failover_reason"
 '''.encode("utf-8")
 
 
@@ -424,6 +465,10 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
         "local_serving_ready",
         "tunnel_owner",
         "degradation_reason_code",
+        "reverse_tunnel_connected",
+        "reverse_tunnel_freshness",
+        "reverse_tunnel_active_transport",
+        "reverse_tunnel_failover_reason",
     }
     if set(values) != expected:
         raise _output_invalid(RuntimeOperationalOutputFailureCode.PAYLOAD_STRUCTURE)
@@ -451,10 +496,17 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
         values["local_serving_ready"],
         failure_code=RuntimeOperationalOutputFailureCode.LOCAL_SERVING_READY,
     )
+    reverse_tunnel_connected = _parse_bool(
+        values["reverse_tunnel_connected"],
+        failure_code=RuntimeOperationalOutputFailureCode.REVERSE_TUNNEL_CONNECTED,
+    )
     readiness = values["readiness_state"]
     proxy_status = values["proxy_status"]
     tunnel_owner = values["tunnel_owner"]
     degradation = values["degradation_reason_code"]
+    reverse_tunnel_freshness = values["reverse_tunnel_freshness"]
+    reverse_tunnel_active_transport = values["reverse_tunnel_active_transport"]
+    reverse_tunnel_failover_reason = values["reverse_tunnel_failover_reason"]
     if health_authenticated:
         if serving is None:
             raise _output_invalid(RuntimeOperationalOutputFailureCode.SERVING)
@@ -478,6 +530,21 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
             _ALLOWED_DEGRADATION,
             failure_code=RuntimeOperationalOutputFailureCode.DEGRADATION_REASON_CODE,
         )
+        reverse_tunnel_freshness = _require_enum(
+            reverse_tunnel_freshness,
+            _ALLOWED_REVERSE_TUNNEL_FRESHNESS,
+            failure_code=RuntimeOperationalOutputFailureCode.REVERSE_TUNNEL_FRESHNESS,
+        )
+        reverse_tunnel_active_transport = _require_enum(
+            reverse_tunnel_active_transport,
+            _ALLOWED_REVERSE_TUNNEL_TRANSPORT,
+            failure_code=RuntimeOperationalOutputFailureCode.REVERSE_TUNNEL_ACTIVE_TRANSPORT,
+        )
+        reverse_tunnel_failover_reason = _require_enum(
+            reverse_tunnel_failover_reason,
+            _ALLOWED_REVERSE_TUNNEL_FAILOVER_REASON,
+            failure_code=RuntimeOperationalOutputFailureCode.REVERSE_TUNNEL_FAILOVER_REASON,
+        )
     else:
         if any(
             value != "unknown"
@@ -490,6 +557,10 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
                 values["local_serving_ready"],
                 tunnel_owner,
                 degradation,
+                values["reverse_tunnel_connected"],
+                reverse_tunnel_freshness,
+                reverse_tunnel_active_transport,
+                reverse_tunnel_failover_reason,
             )
         ):
             raise _output_invalid(
@@ -510,6 +581,10 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
         local_serving_ready=local_serving_ready,
         tunnel_owner=tunnel_owner,
         degradation_reason_code=degradation,
+        reverse_tunnel_connected=reverse_tunnel_connected,
+        reverse_tunnel_freshness=reverse_tunnel_freshness,
+        reverse_tunnel_active_transport=reverse_tunnel_active_transport,
+        reverse_tunnel_failover_reason=reverse_tunnel_failover_reason,
     )
 
 

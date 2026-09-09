@@ -44,6 +44,10 @@ def _payload(**overrides: str) -> bytes:
         "local_serving_ready": "true",
         "tunnel_owner": "first_party_reverse_tunnel",
         "degradation_reason_code": "none",
+        "reverse_tunnel_connected": "true",
+        "reverse_tunnel_freshness": "fresh",
+        "reverse_tunnel_active_transport": "quic",
+        "reverse_tunnel_failover_reason": "none",
     }
     values.update(overrides)
     return ("\n".join(f"{key}={value}" for key, value in values.items()) + "\n").encode()
@@ -84,6 +88,10 @@ def test_phase_protocol_and_encoding_failures_are_typed() -> None:
         ({"proxy_status": "invalid"}, "PROXY_STATUS"),
         ({"tunnel_owner": "invalid"}, "TUNNEL_OWNER"),
         ({"degradation_reason_code": "invalid"}, "DEGRADATION_REASON_CODE"),
+        ({"reverse_tunnel_connected": "invalid"}, "REVERSE_TUNNEL_CONNECTED"),
+        ({"reverse_tunnel_freshness": "invalid"}, "REVERSE_TUNNEL_FRESHNESS"),
+        ({"reverse_tunnel_active_transport": "invalid"}, "REVERSE_TUNNEL_ACTIVE_TRANSPORT"),
+        ({"reverse_tunnel_failover_reason": "invalid"}, "REVERSE_TUNNEL_FAILOVER_REASON"),
     ),
 )
 def test_field_contract_failures_are_typed(
@@ -93,6 +101,44 @@ def test_field_contract_failures_are_typed(
         lambda: runtime_observer._parse_output(_payload(**overrides)),
         runtime_observer.RuntimeOperationalOutputFailureCode[expected],
     )
+
+
+def test_optional_reverse_tunnel_null_projection_is_bounded() -> None:
+    observed = runtime_observer._parse_output(
+        _payload(
+            readiness_state="starting_proxy",
+            serving="false",
+            proxy_status="degraded",
+            degradation_reason_code="reverse_tunnel_not_ready",
+            reverse_tunnel_connected="unknown",
+            reverse_tunnel_freshness="none",
+            reverse_tunnel_active_transport="none",
+            reverse_tunnel_failover_reason="none",
+        )
+    )
+    bounded = observed.to_bounded_dict()
+    assert observed.reverse_tunnel_connected is None
+    assert observed.reverse_tunnel_freshness == "none"
+    assert observed.reverse_tunnel_active_transport == "none"
+    assert observed.reverse_tunnel_failover_reason == "none"
+    assert bounded["desired"] is False
+    assert "reverse_tunnel_last_error" not in bounded
+
+
+def test_reverse_tunnel_snapshot_diagnostics_do_not_redefine_desired() -> None:
+    observed = runtime_observer._parse_output(
+        _payload(
+            reverse_tunnel_connected="false",
+            reverse_tunnel_freshness="stale",
+            reverse_tunnel_active_transport="tls_tcp",
+            reverse_tunnel_failover_reason="connect_failed",
+        )
+    )
+    assert observed.desired is True
+    assert observed.reverse_tunnel_connected is False
+    assert observed.reverse_tunnel_freshness == "stale"
+    assert observed.reverse_tunnel_active_transport == "tls_tcp"
+    assert observed.reverse_tunnel_failover_reason == "connect_failed"
 
 
 def test_payload_structure_and_unauthenticated_contract_are_typed() -> None:
@@ -112,6 +158,10 @@ def test_payload_structure_and_unauthenticated_contract_are_typed() -> None:
                 local_serving_ready="unknown",
                 tunnel_owner="unknown",
                 degradation_reason_code="unknown",
+                reverse_tunnel_connected="unknown",
+                reverse_tunnel_freshness="unknown",
+                reverse_tunnel_active_transport="unknown",
+                reverse_tunnel_failover_reason="unknown",
             )
         ),
         runtime_observer.RuntimeOperationalOutputFailureCode.UNAUTHENTICATED_PAYLOAD_CONTRACT,
@@ -123,7 +173,7 @@ def test_typed_failure_projects_only_bounded_code(tmp_path: Path) -> None:
 
     def fail(serial: str, *, admin_token: str):
         raise module.RuntimeOperationalOutputValidationFailure(
-            module.runtime_observer.RuntimeOperationalOutputFailureCode.TUNNEL_OWNER
+            module.runtime_observer.RuntimeOperationalOutputFailureCode.REVERSE_TUNNEL_FAILOVER_REASON
         )
 
     module.observe_runtime_operational_health = fail
@@ -139,14 +189,14 @@ def test_typed_failure_projects_only_bounded_code(tmp_path: Path) -> None:
     assert value["classification"] == "UNKNOWN"
     assert value["failure_code"] == "PHONE_TARGET_UNAVAILABLE"
     assert value["observer_failure_phase"] == "OUTPUT_VALIDATION"
-    assert value["observer_failure_code"] == "OUTPUT_TUNNEL_OWNER"
+    assert value["observer_failure_code"] == "OUTPUT_REVERSE_TUNNEL_FAILOVER_REASON"
     assert "phone_failure_phase" not in value
     text = output.read_text(encoding="utf-8")
     assert "registered-phone-secret-identifier" not in text
     assert "stage4-admin-token-secret-value" not in text
     terminal = module._bounded_terminal(value)
     assert "observer_failure_phase=OUTPUT_VALIDATION" in terminal
-    assert "observer_failure_code=OUTPUT_TUNNEL_OWNER" in terminal
+    assert "observer_failure_code=OUTPUT_REVERSE_TUNNEL_FAILOVER_REASON" in terminal
 
 
 def test_observer_failure_code_is_fail_closed() -> None:
@@ -162,14 +212,14 @@ def test_observer_failure_code_is_fail_closed() -> None:
             "classification": "UNKNOWN",
             "failure_code": "PHONE_TARGET_UNAVAILABLE",
             "observer_failure_phase": "BINDING_VALIDATION",
-            "observer_failure_code": "OUTPUT_TUNNEL_OWNER",
+            "observer_failure_code": "OUTPUT_REVERSE_TUNNEL_CONNECTED",
         },
         {
             "classification": "UNKNOWN",
             "failure_code": "PHONE_TARGET_UNAVAILABLE",
             "phone_failure_phase": "REGISTERED_DEVICE_NOT_DEVICE",
             "observer_failure_phase": "OUTPUT_VALIDATION",
-            "observer_failure_code": "OUTPUT_TUNNEL_OWNER",
+            "observer_failure_code": "OUTPUT_REVERSE_TUNNEL_CONNECTED",
         },
     )
     for payload in invalid:
@@ -180,6 +230,8 @@ def test_observer_failure_code_is_fail_closed() -> None:
 def test_workflow_independently_validates_output_failure_code() -> None:
     source = (WORKFLOWS / "phone-operational-observation.yml").read_text(encoding="utf-8")
     assert "observer_failure_code = value.get('observer_failure_code')" in source
-    assert "'OUTPUT_TUNNEL_OWNER'" in source
+    assert "'OUTPUT_REVERSE_TUNNEL_CONNECTED'" in source
+    assert "'OUTPUT_REVERSE_TUNNEL_FAILOVER_REASON'" in source
     assert "observer_failure_phase != 'OUTPUT_VALIDATION'" in source
     assert "observer_failure_code={observer_failure_code}" in source
+    assert "reverse_tunnel_last_error" in source
