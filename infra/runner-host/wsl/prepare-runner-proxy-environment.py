@@ -1,11 +1,12 @@
 #!/usr/bin/python3
 """Manage the existing GitHub runner's service proxy in its supported .env file.
 
-The helper runs only as the runner service's root ExecStartPre. It recomputes the
-current private WSL gateway, owns one bounded marker block in the existing
-runner .env, preserves every unrelated line and file owner/mode, and never
-prints proxy values. No network probe, recovery, phone or provider access is
-performed.
+The helper runs only as the runner service's root ExecStartPre. It derives the
+runner application directory from that service command's WorkingDirectory,
+recomputes the current private WSL gateway, owns one bounded marker block in
+the existing runner .env, preserves every unrelated line and file owner/mode,
+and never prints proxy values. No network probe, recovery, phone or provider
+access is performed.
 """
 from __future__ import annotations
 
@@ -17,8 +18,6 @@ import stat
 import subprocess
 import tempfile
 
-RUNNER_ROOT = Path('/opt/mobile-proxy-production-runner')
-RUNNER_ENV = RUNNER_ROOT / '.env'
 PROXY_PORT = 17890
 MAX_ENV_BYTES = 65536
 MANAGED_BEGIN = '# mobile-proxy-runner-proxy begin'
@@ -133,6 +132,17 @@ def reconcile_environment(current: str, managed_environment: str | None) -> str:
     return prefix + block
 
 
+def runner_environment_path(working_directory: Path | None = None) -> Path:
+    directory = Path.cwd() if working_directory is None else working_directory
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise ValueError('RUNNER_PROXY_WORKING_DIRECTORY_UNAVAILABLE') from exc
+    if not directory.is_absolute() or not stat.S_ISDIR(info.st_mode) or directory.is_symlink():
+        raise ValueError('RUNNER_PROXY_WORKING_DIRECTORY_UNSAFE')
+    return directory / '.env'
+
+
 def _validate_runner_env(path: Path) -> os.stat_result:
     try:
         parent = path.parent.lstat()
@@ -150,7 +160,7 @@ def _validate_runner_env(path: Path) -> os.stat_result:
     return info
 
 
-def update_runner_environment(path: Path, managed_environment: str | None) -> None:
+def _render_update(path: Path, managed_environment: str | None) -> tuple[os.stat_result, bytes, bytes]:
     info = _validate_runner_env(path)
     try:
         raw = path.read_bytes()
@@ -161,6 +171,15 @@ def update_runner_environment(path: Path, managed_environment: str | None) -> No
     encoded = updated.encode('utf-8')
     if len(encoded) > MAX_ENV_BYTES:
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_TOO_LARGE')
+    return info, raw, encoded
+
+
+def check_runner_environment(path: Path, managed_environment: str) -> None:
+    _render_update(path, managed_environment)
+
+
+def update_runner_environment(path: Path, managed_environment: str | None) -> None:
+    info, raw, encoded = _render_update(path, managed_environment)
     if encoded == raw:
         return
 
@@ -208,16 +227,20 @@ def main() -> int:
     if os.geteuid() != 0:
         print('RUNNER_PROXY_PREPARATION_REQUIRES_ROOT')
         return 1
-    if len(os.sys.argv) != 2 or os.sys.argv[1] not in {'--apply', '--remove'}:
+    if len(os.sys.argv) != 2 or os.sys.argv[1] not in {'--apply', '--remove', '--check'}:
         print('RUNNER_PROXY_PREPARATION_ARGUMENT_INVALID')
         return 1
     try:
+        path = runner_environment_path()
         if os.sys.argv[1] == '--apply':
-            update_runner_environment(RUNNER_ENV, render_environment(_gateway()))
+            update_runner_environment(path, render_environment(_gateway()))
             print('runner_proxy_env=applied')
-        else:
-            update_runner_environment(RUNNER_ENV, None)
+        elif os.sys.argv[1] == '--remove':
+            update_runner_environment(path, None)
             print('runner_proxy_env=removed')
+        else:
+            check_runner_environment(path, render_environment(_gateway()))
+            print('runner_proxy_env=ready')
     except (OSError, ValueError, subprocess.TimeoutExpired):
         # Details can contain local host/network state. Publish one bounded category only.
         print('RUNNER_PROXY_ENVIRONMENT_PREPARATION_FAILED')
