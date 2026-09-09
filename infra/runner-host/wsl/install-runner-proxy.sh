@@ -24,49 +24,89 @@ runner_user="$(systemctl show --property=User --value "$RUNNER_SERVICE")"
 runner_workdir="$(systemctl show --property=WorkingDirectory --value "$RUNNER_SERVICE")"
 [[ "$runner_workdir" == /* && -d "$runner_workdir" && ! -L "$runner_workdir" ]] || fail 'RUNNER_PROXY_WORKING_DIRECTORY_INVALID'
 
-# This revision supersedes the #195 prerequisite-unit generation. Require its
-# exact rollback before install instead of silently coexisting with stale
-# infrastructure owned by another accepted revision.
+# This generation supersedes the #195 prerequisite-unit EnvironmentFile path.
+# Never silently coexist with that older accepted generation.
 if [[ "$1" == '--install' && -e "$LEGACY_PREPARE_UNIT" ]]; then
   fail 'RUNNER_PROXY_LEGACY_PREPARE_UNIT_PRESENT'
 fi
 
-# Additive first installation, or exact idempotent re-installation only. Never
-# overwrite another revision/unmanaged file, including during rollback.
 for directory in "$LIB_DIR" "$DROPIN_DIR"; do
   [[ ! -L "$directory" ]] || fail 'RUNNER_PROXY_DIRECTORY_SYMLINK_REFUSED'
 done
 for target in "$DROPIN" "${LIB_DIR}/${HELPER}"; do
   [[ ! -L "$target" ]] || fail 'RUNNER_PROXY_FILE_SYMLINK_REFUSED'
 done
-if [[ -e "$DROPIN" ]]; then
-  cmp -s "$SOURCE_DROPIN" "$DROPIN" || fail 'RUNNER_PROXY_EXISTING_DROPIN_DIFFERS'
-fi
-if [[ -e "${LIB_DIR}/${HELPER}" ]]; then
+
+helper_present=false
+dropin_present=false
+[[ -e "${LIB_DIR}/${HELPER}" ]] && helper_present=true
+[[ -e "$DROPIN" ]] && dropin_present=true
+[[ "$helper_present" == "$dropin_present" ]] || fail 'RUNNER_PROXY_PARTIAL_GENERATION_PRESENT'
+
+generation_preexisting=false
+if [[ "$helper_present" == true ]]; then
   cmp -s "${SOURCE_DIR}/${HELPER}" "${LIB_DIR}/${HELPER}" || fail 'RUNNER_PROXY_EXISTING_HELPER_DIFFERS'
+  cmp -s "$SOURCE_DROPIN" "$DROPIN" || fail 'RUNNER_PROXY_EXISTING_DROPIN_DIFFERS'
+  generation_preexisting=true
 fi
 
+remove_generation_files() {
+  /usr/bin/python3 -I -c 'from pathlib import Path; Path("/etc/systemd/system/mobile-proxy-phone-runner.service.d/40-mobile-proxy-proxy.conf").unlink(missing_ok=True); Path("/usr/local/lib/mobile-proxy-runner-proxy/prepare-runner-proxy-environment.py").unlink(missing_ok=True)'
+}
+
+rollback_fresh_install() {
+  [[ "$generation_preexisting" == false ]] || return 0
+  local failed=0
+  if [[ -f "${LIB_DIR}/${HELPER}" ]]; then
+    (
+      cd -- "$runner_workdir"
+      /usr/bin/python3 -I -B "${LIB_DIR}/${HELPER}" --remove >/dev/null
+    ) || failed=1
+  fi
+  remove_generation_files || failed=1
+  systemctl daemon-reload >/dev/null 2>&1 || failed=1
+  [[ $failed -eq 0 ]]
+}
+
 if [[ "$1" == '--install' ]]; then
-  # Prove the actual runner-root .env and current route satisfy the exact helper
-  # contract before installing anything or asking for a later restart.
+  # Validate the prospective transition before any write. The accepted Runner
+  # contract permits .env to be absent; --check must therefore validate both
+  # ABSENT and SAFE_EXISTING without creating or changing the file.
   (
     cd -- "$runner_workdir"
     /usr/bin/python3 -I -B "${SOURCE_DIR}/${HELPER}" --check >/dev/null
   ) || fail 'RUNNER_PROXY_PREINSTALL_CHECK_FAILED'
+
   install -d -o root -g root -m 0755 "$LIB_DIR" "$DROPIN_DIR"
   install -o root -g root -m 0644 "${SOURCE_DIR}/${HELPER}" "${LIB_DIR}/${HELPER}"
   install -o root -g root -m 0644 "$SOURCE_DROPIN" "$DROPIN"
-  systemctl daemon-reload
-  printf '%s\n' 'runner_proxy_config=installed' 'runner_restart_performed=false'
+
+  # Materialize the exact Runner-supported .env generation before any later
+  # controlled restart. This is atomic inside the helper and exposes no values.
+  if ! (
+    cd -- "$runner_workdir"
+    /usr/bin/python3 -I -B "${LIB_DIR}/${HELPER}" --apply >/dev/null
+  ); then
+    rollback_fresh_install || fail 'RUNNER_PROXY_INSTALL_ROLLBACK_FAILED'
+    fail 'RUNNER_PROXY_ENV_APPLY_FAILED'
+  fi
+
+  if ! systemctl daemon-reload; then
+    rollback_fresh_install || fail 'RUNNER_PROXY_INSTALL_ROLLBACK_FAILED'
+    fail 'RUNNER_PROXY_SYSTEMD_RELOAD_FAILED'
+  fi
+  printf '%s\n' 'runner_proxy_config=installed' 'runner_proxy_env=applied' 'runner_restart_performed=false'
 else
-  # Remove only the marker block owned by this revision before removing its
-  # exact files. The running listener keeps its current environment until a
-  # separately admitted idle restart.
+  [[ "$generation_preexisting" == true ]] || fail 'RUNNER_PROXY_GENERATION_NOT_INSTALLED'
+
+  # Remove only this generation's owned marker block before removing exact
+  # helper/drop-in files. The running listener keeps its current process
+  # environment until a separately admitted idle restart.
   (
     cd -- "$runner_workdir"
     /usr/bin/python3 -I -B "${LIB_DIR}/${HELPER}" --remove >/dev/null
   ) || fail 'RUNNER_PROXY_ENV_ROLLBACK_FAILED'
-  /usr/bin/python3 -I -c 'from pathlib import Path; Path("/etc/systemd/system/mobile-proxy-phone-runner.service.d/40-mobile-proxy-proxy.conf").unlink(missing_ok=True); Path("/usr/local/lib/mobile-proxy-runner-proxy/prepare-runner-proxy-environment.py").unlink(missing_ok=True)'
+  remove_generation_files
   systemctl daemon-reload
   printf '%s\n' 'runner_proxy_config=rolled_back' 'runner_restart_performed=false'
 fi
