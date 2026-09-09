@@ -289,6 +289,10 @@ jobs:
                       'OUTPUT_PROXY_STATUS',
                       'OUTPUT_TUNNEL_OWNER',
                       'OUTPUT_DEGRADATION_REASON_CODE',
+                      'OUTPUT_REVERSE_TUNNEL_CONNECTED',
+                      'OUTPUT_REVERSE_TUNNEL_FRESHNESS',
+                      'OUTPUT_REVERSE_TUNNEL_ACTIVE_TRANSPORT',
+                      'OUTPUT_REVERSE_TUNNEL_FAILOVER_REASON',
                   }:
                       raise SystemExit('Stage 4 observer failure code differs')
                   fields.append(f'observer_failure_code={observer_failure_code}')
@@ -301,6 +305,28 @@ jobs:
                   or observer_failure_code is not None
               ):
                   raise SystemExit('Stage 4 operational healthy/degraded result retained failure metadata')
+              connected = observation.get('reverse_tunnel_connected')
+              if connected is not None and not isinstance(connected, bool):
+                  raise SystemExit('Stage 4 reverse tunnel connected evidence differs')
+              if observation.get('reverse_tunnel_freshness') not in {
+                  'none', 'unknown', 'fresh', 'stale'
+              }:
+                  raise SystemExit('Stage 4 reverse tunnel freshness evidence differs')
+              if observation.get('reverse_tunnel_active_transport') not in {
+                  'none', 'tcp', 'quic', 'tls_tcp'
+              }:
+                  raise SystemExit('Stage 4 reverse tunnel transport evidence differs')
+              if observation.get('reverse_tunnel_failover_reason') not in {
+                  'none',
+                  'connect_timeout',
+                  'connect_failed',
+                  'authentication_failed',
+                  'session_closed',
+                  'session_error',
+              }:
+                  raise SystemExit('Stage 4 reverse tunnel failover evidence differs')
+              if 'reverse_tunnel_last_error' in observation:
+                  raise SystemExit('Stage 4 operational evidence exposed unbounded reverse tunnel error')
               fields = [
                   'STAGE4_PHONE_OPERATIONAL_CLASSIFIED',
                   'workflow_execution=success',
