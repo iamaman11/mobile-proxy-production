@@ -105,7 +105,7 @@ jobs:
                   raise SystemExit('runner transport evidence owner invariant missing: ' + required)
 
           for required in (
-              'phone-transport-preflight.v3',
+              'phone-transport-preflight.v4',
               'collect_runner_transport_evidence',
               'classify_preflight',
               'phone_failure_phase',
