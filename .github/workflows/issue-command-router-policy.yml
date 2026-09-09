@@ -37,6 +37,7 @@ jobs:
             .github/scripts/observe_phone_operational.py \
             .github/scripts/exercise_runtime_recovery.py \
             .github/scripts/exercise_runtime_restart.py \
+            .github/scripts/exercise_phone_reboot.py \
             .github/scripts/reconcile_phone_release.py \
             .github/scripts/phone_transport_preflight.py \
             .github/scripts/observe_runner_transport.py \
@@ -73,6 +74,7 @@ jobs:
           python3 .github/controller/tests/test_quarantine_recovery.py
           python3 .github/controller/tests/test_runtime_recovery_exercise.py
           python3 .github/controller/tests/test_runtime_restart_exercise.py
+          python3 .github/controller/tests/test_phone_reboot_exercise.py
           echo 'DEPLOYMENT_CONTROLLER_HOSTED_TESTS_OK'
 
       - name: Prove legacy Product Release refusal off-device
@@ -118,6 +120,7 @@ jobs:
           phone_operational = (workflows / 'phone-operational-observation.yml').read_text(encoding='utf-8')
           runtime_recovery = (workflows / 'stage4-runtime-recovery-exercise.yml').read_text(encoding='utf-8')
           runtime_restart = (workflows / 'stage4-runtime-restart-exercise.yml').read_text(encoding='utf-8')
+          phone_reboot = (workflows / 'stage4-phone-reboot-exercise.yml').read_text(encoding='utf-8')
           phone_reconcile = (workflows / 'phone-release-reconcile.yml').read_text(encoding='utf-8')
           phone_transport_preflight = (workflows / 'phone-transport-preflight.yml').read_text(encoding='utf-8')
           registry_path = Path('.github/production/command-control-registry.json')
@@ -144,6 +147,7 @@ jobs:
               "needs.route.outputs.route_id == 'observe-phone-operational'",
               "needs.route.outputs.route_id == 'exercise-runtime-recovery'",
               "needs.route.outputs.route_id == 'exercise-runtime-restart'",
+              "needs.route.outputs.route_id == 'exercise-phone-reboot'",
               "needs.route.outputs.route_id == 'reconcile-phone-release'",
               "needs.route.outputs.operation_class == 'RECONCILE'",
               "needs.route.outputs.route_id == 'phone-transport-preflight'",
@@ -157,6 +161,7 @@ jobs:
               'uses: ./.github/workflows/phone-operational-observation.yml',
               'uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml',
               'uses: ./.github/workflows/stage4-runtime-restart-exercise.yml',
+              'uses: ./.github/workflows/stage4-phone-reboot-exercise.yml',
               'uses: ./.github/workflows/phone-release-reconcile.yml',
               'uses: ./.github/workflows/phone-transport-preflight.yml',
               'uses: ./.github/workflows/runner-transport-observation.yml',
@@ -214,6 +219,7 @@ jobs:
               'observe-phone-operational',
               'exercise-runtime-recovery',
               'exercise-runtime-restart',
+              'exercise-phone-reboot',
               'reconcile-phone-release',
               'phone-transport-preflight',
               'observe-runner-transport',
@@ -228,6 +234,7 @@ jobs:
               'recover-quarantined-product-release',
               'exercise-runtime-recovery',
               'exercise-runtime-restart',
+              'exercise-phone-reboot',
           }:
               raise SystemExit('unexpected destructive route set')
           deploy = destructive['deploy-product-release']
@@ -370,6 +377,31 @@ jobs:
           ):
               raise SystemExit('Stage 4 runtime restart route safety contract differs')
 
+          reboot = destructive['exercise-phone-reboot']
+          if (
+              reboot.get('handler') != 'workflow_call'
+              or reboot.get('operation') != 'exercise-phone-reboot'
+              or reboot.get('operation_class') != 'RECOVER'
+              or reboot.get('read_only') is not False
+              or reboot.get('destructive') is not True
+              or reboot.get('requires_phone') is not True
+              or reboot.get('requires_vm') is not False
+              or reboot.get('requires_release') is not True
+              or reboot.get('allowed_targets') != ['phone-production']
+              or reboot.get('physical_domains') != ['device-lifecycle']
+              or reboot.get('concurrency_domain') != 'production-target-phone-production'
+              or reboot.get('authority_policy') != 'private-issue1-owner+controller-main-exact+stage4-v017-fixed-phone-reboot-exercise'
+              or reboot.get('target_capability_policy') != 'phone-production-fixed-phone-reboot-exercise'
+              or reboot.get('evidence_policy') != 'LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION'
+              or reboot.get('idempotency_policy') != 'single-run-attempt+single-semantic-command-attempt+no-automatic-retry'
+              or reboot.get('semantic_identity_policy') != 'source-comment-id+command-arguments'
+              or reboot.get('recovery_policy') != 'UNKNOWN-no-blind-retry-owner-checkpoint-required'
+              or reboot.get('workflow') != '.github/workflows/stage4-phone-reboot-exercise.yml'
+              or reboot.get('ref_policy') != 'controller-event-sha-exact'
+              or reboot.get('pattern') != r'^/exercise-phone-reboot (?P<target>phone-production) (?P<release>v0\.1\.7)$'
+          ):
+              raise SystemExit('Stage 4 phone reboot route safety contract differs')
+
           reconcile = next((item for item in active if item.get('id') == 'reconcile-phone-release'), None)
           if reconcile is None:
               raise SystemExit('Stage 4 phone reconcile route is missing')
@@ -451,11 +483,14 @@ jobs:
               'observe-phone-operational',
               'exercise-runtime-recovery',
               'exercise-runtime-restart',
+              'exercise-phone-reboot',
               'reconcile-phone-release',
               'phone-transport-preflight',
               'recover-quarantined-product-release',
           ]:
               raise SystemExit('phone target operation allowlist differs')
+          if targets['phone-production'].get('physical_domains') != ['android-package', 'runtime', 'device-lifecycle']:
+              raise SystemExit('phone target physical domain allowlist differs')
           if targets['vm-production'].get('active') is not False or targets['vm-production'].get('adapter') != 'deferred':
               raise SystemExit('VM target is not fail-closed/deferred')
           if targets['vm-production'].get('allowed_operations') != ['deploy-product-release']:
@@ -616,6 +651,40 @@ jobs:
           ):
               if forbidden in runtime_restart:
                   raise SystemExit('Stage 4 runtime restart workflow gained forbidden ingress/cross-domain mutation surface: ' + forbidden)
+
+          for required in (
+              'workflow_call:',
+              "command != '/exercise-phone-reboot phone-production v0.1.7'",
+              "SOURCE_ISSUE_NUMBER'] != '1'",
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              '.github/scripts/exercise_phone_reboot.py',
+              'stage4-phone-reboot-exercise.v1',
+              'STAGE4_PHONE_REBOOT_ACCEPTED classification=REBOOTED',
+              'if-no-files-found: error',
+          ):
+              if required not in phone_reboot:
+                  raise SystemExit('Stage 4 phone reboot workflow invariant missing: ' + required)
+          for forbidden in (
+              'workflow_dispatch:',
+              'issue_comment:',
+              'run_phone_release_deployment.py',
+              'dispatch_release_once',
+              'dispatch_install_once',
+              'systemctl restart',
+              'observe-runner-transport',
+              'phone-transport-preflight',
+              'phone-runtime-recovery.yml',
+              'service.sh',
+              'adb install',
+              'adb push',
+              '/deploy ',
+              '/retry-deploy ',
+          ):
+              if forbidden in phone_reboot:
+                  raise SystemExit('Stage 4 phone reboot workflow gained forbidden ingress/cross-domain mutation surface: ' + forbidden)
 
           for required in (
               'workflow_call:',
@@ -794,6 +863,7 @@ jobs:
           print('STAGE4_PHONE_OPERATIONAL_OBSERVATION_BOUNDARY_OK')
           print('STAGE4_RUNTIME_RECOVERY_BOUNDARY_OK')
           print('STAGE4_RUNTIME_RESTART_BOUNDARY_OK')
+          print('STAGE4_PHONE_REBOOT_BOUNDARY_OK')
           print('STAGE4_PHONE_RECONCILE_BOUNDARY_OK')
           print('STAGE4_PHONE_TRANSPORT_PREFLIGHT_BOUNDARY_OK')
           print('STAGE4_RUNNER_TRANSPORT_OBSERVATION_BOUNDARY_OK')
