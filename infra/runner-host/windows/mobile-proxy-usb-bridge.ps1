@@ -13,6 +13,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $UsbipdExecutable = Join-Path $env:ProgramFiles 'usbipd-win\usbipd.exe'
 $WslExecutable = Join-Path $env:SystemRoot 'System32\wsl.exe'
+$WindowsAdbPort = 5037
+$WindowsAdbStopTimeoutSeconds = 5
 
 function Write-BridgeEvent {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -100,6 +102,74 @@ function Test-ApprovedUsbDeviceAttached {
     catch { throw 'usbipd state invalid' }
 }
 
+function Invoke-AllowlistedUsbAttach {
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $rawAttach = @(& $UsbipdExecutable attach --wsl $Distro --busid $BusId 2>&1)
+    $attachExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorAction
+    if ($attachExitCode -eq 0) {
+        $rawAttach = $null
+        return 'success'
+    }
+    $attachFailureCategory = Get-UsbipdAttachFailureCategory -OutputLines $rawAttach
+    $rawAttach = $null
+    return $attachFailureCategory
+}
+
+function Get-ExactWindowsAdbListenerProcessId {
+    try {
+        $listeners = @(Get-NetTCPConnection -LocalPort $WindowsAdbPort -State Listen -ErrorAction Stop)
+        if ($listeners.Count -eq 0) { return $null }
+        $ownerPids = @(
+            $listeners |
+                ForEach-Object { [int]$_.OwningProcess } |
+                Where-Object { $_ -gt 0 } |
+                Sort-Object -Unique
+        )
+        if ($ownerPids.Count -ne 1) { return $null }
+        $ownerPid = [int]$ownerPids[0]
+        $owner = Get-Process -Id $ownerPid -ErrorAction Stop
+        if ($owner.ProcessName -ne 'adb') { return $null }
+        return $ownerPid
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-WindowsAdbPortUnbound {
+    try {
+        $listeners = @(Get-NetTCPConnection -LocalPort $WindowsAdbPort -State Listen -ErrorAction Stop)
+        return $listeners.Count -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Stop-ExactWindowsAdbListenerOnce {
+    param([Parameter(Mandatory = $true)][int]$OwnerPid)
+
+    # Revalidate immediately before the only process mutation. Never stop by
+    # name, never enumerate/kill unrelated processes, and never invoke ADB.
+    $currentOwnerPid = Get-ExactWindowsAdbListenerProcessId
+    if ($null -eq $currentOwnerPid -or [int]$currentOwnerPid -ne $OwnerPid) { return $false }
+    try {
+        Stop-Process -Id $OwnerPid -Force -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+
+    $deadline = (Get-Date).AddSeconds($WindowsAdbStopTimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 100
+        if (Test-WindowsAdbPortUnbound) { return $true }
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
 function Ensure-WslDistroRunning {
     & $WslExecutable --distribution $Distro --exec /bin/true 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'wsl distro unavailable' }
@@ -109,31 +179,66 @@ function Ensure-WslDistroRunning {
 # no device, distribution, user, process, or host identity.
 Write-BridgeEvent 'bridge_started'
 
-# Keep an idempotent attach lease for precisely one allowlisted device. This
-# avoids both usbipd's event-loop gap after WSL restarts and JSON state parsing
-# differences between task-host PowerShell versions. This script never owns
-# ADB, device detach, or any phone operation.
+# Keep an idempotent attach lease for precisely one allowlisted device. Windows
+# owns this USB -> WSL handoff; WSL jobs own the production ADB server. The
+# bridge never invokes ADB, never detaches the device, and never changes the
+# phone. A proven Windows-native ADB listener may be evicted only after the
+# allowlisted usbipd attach itself reports windows_device_busy, and at most once
+# per continuous attachment-loss incident.
+$windowsAdbRecoveryAttempted = $false
 while ($true) {
     try {
         Ensure-WslDistroRunning
         if (-not (Test-ApprovedUsbDevicePresent)) {
+            $windowsAdbRecoveryAttempted = $false
             Write-BridgeEvent 'approved_usb_device_not_present; retrying'
             Start-Sleep -Seconds 15
             continue
         }
-        if (-not (Test-ApprovedUsbDeviceAttached)) {
-            $previousErrorAction = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            $rawAttach = @(& $UsbipdExecutable attach --wsl $Distro --busid $BusId 2>&1)
-            $attachExitCode = $LASTEXITCODE
-            $ErrorActionPreference = $previousErrorAction
-            if ($attachExitCode -ne 0) {
-                $attachFailureCategory = Get-UsbipdAttachFailureCategory -OutputLines $rawAttach
-                $rawAttach = $null
-                throw "usbipd attach failed:$attachFailureCategory"
-            }
-            $rawAttach = $null
+
+        if (Test-ApprovedUsbDeviceAttached) {
+            $windowsAdbRecoveryAttempted = $false
+            # This bounded heartbeat keeps the durable host state current and
+            # prevents an older failure event from masquerading as live truth.
             Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
+        }
+        else {
+            $attachResult = Invoke-AllowlistedUsbAttach
+            if ($attachResult -eq 'success') {
+                $windowsAdbRecoveryAttempted = $false
+                Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
+            }
+            elseif ($attachResult -eq 'windows_device_busy' -and -not $windowsAdbRecoveryAttempted) {
+                $ownerPid = Get-ExactWindowsAdbListenerProcessId
+                if ($null -eq $ownerPid) {
+                    throw "usbipd attach failed:$attachResult"
+                }
+
+                # Set the guard before mutation. If stop or re-attach fails,
+                # later polling may observe/attach but cannot create a process
+                # kill loop until a healthy attachment or device absence resets
+                # the incident.
+                $windowsAdbRecoveryAttempted = $true
+                if (-not (Stop-ExactWindowsAdbListenerOnce -OwnerPid ([int]$ownerPid))) {
+                    throw "usbipd attach failed:$attachResult"
+                }
+
+                if (Test-ApprovedUsbDeviceAttached) {
+                    $windowsAdbRecoveryAttempted = $false
+                    Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
+                }
+                else {
+                    $recoveryAttachResult = Invoke-AllowlistedUsbAttach
+                    if ($recoveryAttachResult -ne 'success') {
+                        throw "usbipd attach failed:$recoveryAttachResult"
+                    }
+                    $windowsAdbRecoveryAttempted = $false
+                    Write-BridgeEvent 'allowlisted_usb_attached_to_wsl'
+                }
+            }
+            else {
+                throw "usbipd attach failed:$attachResult"
+            }
         }
     }
     catch {

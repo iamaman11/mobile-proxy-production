@@ -9,7 +9,10 @@ There are two small supervisors plus one service-scoped permission contract.
 * `windows/mobile-proxy-usb-bridge.ps1` runs as the existing owner-logon
   Scheduled Task. It owns one allowlisted USBIPD device and preserves its
   USBIPD auto-attach session across WSL restarts. It never invokes ADB, never
-  detaches a device, and never changes the phone.
+  detaches a device, and never changes the phone. If the allowlisted attach
+  itself proves `windows_device_busy`, the bridge may remove exactly one
+  Windows-native `adb` listener that owns TCP 5037, once per continuous
+  attachment-loss incident, solely to restore the USB -> WSL handoff.
 * `wsl/runner-transport-health.*` is a root-owned systemd timer. It observes
   the existing runner and local diagnostic logs. It restarts that existing
   service only after a five-minute listener outage with three recent
@@ -22,8 +25,10 @@ There are two small supervisors plus one service-scoped permission contract.
 
 Windows owns USB. WSL owns the outbound GitHub runner session and the
 service-scoped Linux device permission required for that runner to use the
-already attached device. A normal GitHub job owns the per-job ADB server and
-all device observation or mutation.
+already attached device. A normal GitHub job owns the per-job production ADB
+server and all device observation or mutation. A Windows-native ADB listener
+is therefore a competing host consumer, not a second supported production ADB
+owner.
 
 The bridge uses the current usbipd-win 5.x command contract: the distribution
 is the optional value of `--wsl`, not a `--distribution` flag. Every 15 seconds
@@ -33,10 +38,22 @@ event-driven auto-attach loop, which can survive a full WSL shutdown without
 noticing that its prior client disappeared. The policy test locks this argv
 shape and ownership boundary.
 
+Normal attach is always attempted first. Only an exact `windows_device_busy`
+result can enter Windows-ADB conflict recovery. The bridge then requires one
+unique TCP 5037 listener owner, resolves that exact owner PID, verifies its
+process name is exactly `adb`, revalidates the same ownership immediately before
+mutation, and stops only that PID. It never stops by process name, never invokes
+`adb kill-server`, and never scans or kills unrelated processes. The mutation
+is guarded to one attempt per continuous attachment-loss incident; a failed
+stop or failed re-attach cannot create a process-kill loop. Healthy attachment
+or physical device disappearance resets the incident boundary.
+
 The bridge keeps a bounded local event log under its ProgramData directory. It
 contains only generic bridge states such as `attach_failed`; it intentionally
-never persists USB inventory, command output, device identifiers, or exception
-text.
+never persists USB inventory, command output, device identifiers, process IDs,
+or exception text. While the allowlisted WSL client is attached, the existing
+`allowlisted_usb_attached_to_wsl` event is refreshed as a bounded heartbeat so
+an old `windows_device_busy` failure cannot masquerade as current host truth.
 
 ## Bootstrap after merge
 
