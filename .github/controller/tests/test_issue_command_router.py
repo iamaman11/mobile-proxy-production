@@ -82,6 +82,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
         "exercise-phone-reboot",
+        "exercise-runtime-mismatch",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "observe-runner-transport",
@@ -99,6 +100,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
         "exercise-phone-reboot",
+        "exercise-runtime-mismatch",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release",
@@ -385,6 +387,42 @@ def test_stage4_phone_reboot_route_is_exact_destructive_and_no_retry() -> None:
         raise AssertionError("generic hosted dispatcher accepted destructive phone reboot workflow_call route")
 
 
+def test_stage4_runtime_mismatch_route_is_fixed_read_only_and_bounded() -> None:
+    route = accepted("/exercise-runtime-mismatch phone-production v0.1.7")
+    assert route.route_id == "exercise-runtime-mismatch"
+    assert route.handler == "dispatch_workflow"
+    assert route.workflow == ".github/workflows/stage4-runtime-mismatch-exercise.yml"
+    assert route.ref == "main"
+    assert route.operation == "exercise-runtime-mismatch"
+    assert route.operation_class == "DIAGNOSTIC"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.read_only is True and route.destructive is False
+    assert route.concurrency_domain == "production-target-phone-production"
+    assert route.idempotency_policy == "single-run-attempt"
+    assert route.ref_policy == "controller-main-exact"
+    assert route.target_capability_policy == "phone-production-fixed-runtime-mismatch-observation"
+    assert json.loads(route.arguments_json) == {
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused("/exercise-runtime-mismatch phone-production v0.1.8")
+    refused("/exercise-runtime-mismatch vm-production v0.1.7")
+    refused("/exercise-runtime-mismatch phone-production v0.1.7 other")
+    refused("/exercise-runtime-mismatch phone-production v0.1.7;echo")
+    refused("/exercise-runtime-mismatch phone-production v0.1.7\n/deploy phone-production v0.1.7")
+    refused("/exercise-runtime-mismatch phone-production v0.1.7", run_attempt=2)
+
+    dispatcher = load_dispatcher()
+    workflow, ref, inputs = dispatcher.build_dispatch(
+        "exercise-runtime-mismatch",
+        '{"release":"v0.1.7","target":"phone-production"}',
+    )
+    assert workflow == "stage4-runtime-mismatch-exercise.yml"
+    assert ref == "main"
+    assert inputs == {"release_tag": "v0.1.7", "target": "phone-production"}
+
+
 def test_stage4_phone_reconcile_route_is_distinct_target_read_only_control_plane_write() -> None:
     route = accepted("/reconcile-phone-release phone-production v0.1.7")
     assert route.route_id == "reconcile-phone-release"
@@ -507,6 +545,13 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
     assert workflow == "public-deployment-projection-observer.yml"
     assert ref == "main"
     assert inputs == {}
+    mismatch_workflow, mismatch_ref, mismatch_inputs = dispatcher.build_dispatch(
+        "exercise-runtime-mismatch",
+        '{"release":"v0.1.7","target":"phone-production"}',
+    )
+    assert mismatch_workflow == "stage4-runtime-mismatch-exercise.yml"
+    assert mismatch_ref == "main"
+    assert mismatch_inputs == {"release_tag": "v0.1.7", "target": "phone-production"}
     for route_id, arguments in (
         ("observe-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
         ("observe-phone-operational", '{"release":"v0.1.7","target":"phone-production"}'),
