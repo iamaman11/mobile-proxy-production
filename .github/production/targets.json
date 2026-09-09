@@ -11,13 +11,15 @@
         "observe-phone-operational",
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
+        "exercise-phone-reboot",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release"
       ],
       "physical_domains": [
         "android-package",
-        "runtime"
+        "runtime",
+        "device-lifecycle"
       ],
       "required_postcondition": "independent-android-postcondition",
       "serialization_domain": "production-target-phone-production",
