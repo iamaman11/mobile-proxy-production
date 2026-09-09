@@ -196,6 +196,28 @@ find_unique_exact_exe() {{
   printf '%s' "$found"
 }}
 
+process_generation() {{
+  pid="$1"
+  [ -r "/proc/$pid/stat" ] || return 1
+  set -- $(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  [ "$#" -ge 22 ] || return 1
+  printf '%s:%s' "$1" "${{22}}"
+}}
+
+process_parent() {{
+  pid="$1"
+  [ -r "/proc/$pid/status" ] || return 1
+  while read -r key value rest; do
+    [ "$key" = 'PPid:' ] || continue
+    case "$value" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$value"
+    return 0
+  done < "/proc/$pid/status"
+  return 1
+}}
+
 if [ "$(readlink -f "$CURRENT" 2>/dev/null || true)" != "$TARGET" ]; then
   printf 'stage4_recovery=precondition_refused\\n'
   exit 40
@@ -208,6 +230,22 @@ host_pid="$(find_unique_exact_exe "$HOST")" || {{
   printf 'stage4_recovery=precondition_refused\\n'
   exit 40
 }}
+supervisor_generation="$(process_generation "$supervisor_pid")" || {{
+  printf 'stage4_recovery=precondition_refused\\n'
+  exit 40
+}}
+host_generation="$(process_generation "$host_pid")" || {{
+  printf 'stage4_recovery=precondition_refused\\n'
+  exit 40
+}}
+host_parent="$(process_parent "$host_pid")" || {{
+  printf 'stage4_recovery=precondition_refused\\n'
+  exit 40
+}}
+if [ "$host_parent" != "$supervisor_pid" ]; then
+  printf 'stage4_recovery=precondition_refused\\n'
+  exit 40
+fi
 
 kill -TERM "$host_pid"
 printf 'stage4_recovery=mutation_dispatched\\n'
@@ -216,14 +254,27 @@ i=0
 while [ "$i" -lt {_RECOVERY_BOUND_SECONDS} ]; do
   sleep 1
   current_supervisor="$(find_unique_exact_exe "$SUPERVISOR" || true)"
-  if [ "$current_supervisor" != "$supervisor_pid" ]; then
+  if [ -z "$current_supervisor" ]; then
+    printf 'stage4_recovery=owner_changed\\n'
+    exit 42
+  fi
+  current_supervisor_generation="$(process_generation "$current_supervisor" || true)"
+  if [ -z "$current_supervisor_generation" ] || [ "$current_supervisor_generation" != "$supervisor_generation" ]; then
     printf 'stage4_recovery=owner_changed\\n'
     exit 42
   fi
   current_host="$(find_unique_exact_exe "$HOST" || true)"
-  if [ -n "$current_host" ] && [ "$current_host" != "$host_pid" ]; then
-    printf 'stage4_recovery=generation_changed\\n'
-    exit 0
+  if [ -n "$current_host" ]; then
+    current_host_generation="$(process_generation "$current_host" || true)"
+    current_host_parent="$(process_parent "$current_host" || true)"
+    if [ -n "$current_host_parent" ] && [ "$current_host_parent" != "$supervisor_pid" ]; then
+      printf 'stage4_recovery=owner_changed\\n'
+      exit 42
+    fi
+    if [ -n "$current_host_generation" ] && [ "$current_host_parent" = "$supervisor_pid" ] && [ "$current_host_generation" != "$host_generation" ]; then
+      printf 'stage4_recovery=generation_changed\\n'
+      exit 0
+    fi
   fi
   i=$((i + 1))
 done
