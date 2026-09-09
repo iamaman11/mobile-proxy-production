@@ -91,7 +91,7 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'RUNNER_PROXY_MANAGED_BLOCK_INVALID'):
             proxy.reconcile_environment(malformed, None)
 
-    def test_check_is_read_only_and_validates_same_update_contract(self):
+    def test_check_is_read_only_and_validates_same_existing_file_contract(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / 'runner'
             root.mkdir(mode=0o700)
@@ -103,6 +103,42 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), before)
             target.write_text('https_proxy=http://unmanaged\n', encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'RUNNER_PROXY_EXISTING_ENV_CONFLICT'):
+                proxy.check_runner_environment(target, proxy.render_environment('172.22.0.1'))
+
+    def test_absent_runner_env_check_is_read_only_and_apply_creates_atomically(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / 'runner'
+            root.mkdir(mode=0o700)
+            target = root / '.env'
+            parent = root.stat()
+            managed = proxy.render_environment('172.22.0.1')
+
+            self.assertFalse(target.exists())
+            proxy.check_runner_environment(target, managed)
+            self.assertFalse(target.exists())
+
+            proxy.update_runner_environment(target, managed)
+            self.assertTrue(target.is_file())
+            info = target.stat()
+            self.assertEqual(info.st_uid, parent.st_uid)
+            self.assertEqual(info.st_gid, parent.st_gid)
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+            value = target.read_text(encoding='utf-8')
+            self.assertEqual(value.count(proxy.MANAGED_BEGIN), 1)
+            self.assertEqual(value.count(proxy.MANAGED_END), 1)
+            for key in proxy.MANAGED_KEYS:
+                self.assertIn(f'{key}=', value)
+
+            proxy.update_runner_environment(target, None)
+            self.assertEqual(target.read_bytes(), b'')
+
+    def test_absent_runner_env_under_writable_parent_is_refused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / 'runner'
+            root.mkdir(mode=0o700)
+            root.chmod(0o777)
+            target = root / '.env'
+            with self.assertRaisesRegex(ValueError, 'RUNNER_PROXY_RUNNER_DIRECTORY_UNSAFE'):
                 proxy.check_runner_environment(target, proxy.render_environment('172.22.0.1'))
 
     def test_atomic_runner_env_replacement_preserves_owner_mode_and_unrelated_lines(self):
@@ -148,7 +184,7 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         self.assertNotIn('mobile-proxy-runner-proxy-prepare.service', dropin)
         self.assertFalse((HOST / 'mobile-proxy-runner-proxy-prepare.service').exists())
 
-    def test_installation_prechecks_actual_workdir_and_has_exact_rollback_without_restart(self):
+    def test_installation_validates_then_applies_before_activation_without_restart(self):
         installer = (HOST / 'install-runner-proxy.sh').read_text()
         helper = (HOST / 'prepare-runner-proxy-environment.py').read_text()
         dropin = (HOST / 'mobile-proxy-phone-runner-proxy.conf').read_text()
@@ -162,10 +198,23 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
         self.assertIn('RUNNER_PROXY_WORKING_DIRECTORY_INVALID', installer)
         self.assertIn('"${SOURCE_DIR}/${HELPER}" --check', installer)
         self.assertIn('RUNNER_PROXY_PREINSTALL_CHECK_FAILED', installer)
+        self.assertIn('"${LIB_DIR}/${HELPER}" --apply', installer)
+        self.assertIn('RUNNER_PROXY_ENV_APPLY_FAILED', installer)
+        self.assertIn('RUNNER_PROXY_PARTIAL_GENERATION_PRESENT', installer)
+        self.assertIn('rollback_fresh_install', installer)
         self.assertIn('RUNNER_PROXY_LEGACY_PREPARE_UNIT_PRESENT', installer)
         self.assertIn('cmp -s "$SOURCE_DROPIN" "$DROPIN"', installer)
         self.assertIn('"${LIB_DIR}/${HELPER}" --remove', installer)
+        self.assertIn('runner_proxy_env=applied', installer)
         self.assertIn('runner_restart_performed=false', installer)
+        self.assertLess(
+            installer.index('"${SOURCE_DIR}/${HELPER}" --check'),
+            installer.index('"${LIB_DIR}/${HELPER}" --apply'),
+        )
+        self.assertLess(
+            installer.index('"${LIB_DIR}/${HELPER}" --apply'),
+            installer.index('if ! systemctl daemon-reload; then'),
+        )
         self.assertNotIn('/opt/mobile-proxy-production-runner', combined)
 
 

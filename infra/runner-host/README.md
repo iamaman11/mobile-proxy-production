@@ -74,35 +74,54 @@ passed the bounded comparison. The interactive shell already uses this proxy;
 the runner service must configure its own process tree explicitly.
 
 GitHub Actions Runner supports service proxy configuration through the
-runner-root `.env` file loaded by `Runner.Listener` at startup. The Controller
-therefore uses that runner-owned boundary instead of relying on a dynamic
-systemd `EnvironmentFile`. `wsl/mobile-proxy-phone-runner-proxy.conf` adds only
-a root `ExecStartPre` to the existing runner service. Immediately before each
-listener activation, `prepare-runner-proxy-environment.py` resolves the current
-private IPv4 default gateway and atomically reconciles one bounded
-`mobile-proxy-runner-proxy` marker block in the existing runner `.env`.
+runner-root `.env` file loaded by `Runner.Listener` at startup. That file is an
+optional Runner input: absence is a valid clean state. The Controller therefore
+uses the runner-owned `.env` boundary instead of a dynamic systemd
+`EnvironmentFile`. `wsl/mobile-proxy-phone-runner-proxy.conf` adds only a root
+`ExecStartPre` to the existing runner service. Immediately before each listener
+activation, `prepare-runner-proxy-environment.py` resolves the current private
+IPv4 default gateway and atomically reconciles one bounded
+`mobile-proxy-runner-proxy` marker block in the runner `.env`.
 
-The helper preserves all unrelated `.env` lines plus the existing file owner,
-group and mode. It refuses a missing/unsafe/symlinked runner `.env`, malformed
-owned markers, unmanaged occurrences of any proxy key it owns, and
-missing/ambiguous/invalid routes. Lowercase and uppercase HTTP/HTTPS/SOCKS proxy
-variables agree; loopback traffic remains local. The helper never prints proxy
-values. Existing runner `ExecStart`, service identity, USB permissions, TLS
-verification and .NET settings are preserved.
+For an existing `.env`, the helper preserves every unrelated line plus existing
+owner, group and mode. If `.env` is absent, `--check` validates the prospective
+transition without creating anything and `--apply` atomically creates `.env`
+with RunnerRoot owner/group and mode `0600`. Unsafe/symlinked/group- or
+world-writable existing state, malformed owned markers, unmanaged occurrences
+of proxy keys it owns, and missing/ambiguous/invalid routes remain fail-closed.
+Lowercase and uppercase HTTP/HTTPS/SOCKS proxy variables agree; loopback traffic
+remains local. The helper never prints proxy values. Existing runner `ExecStart`,
+service identity, USB permissions, TLS verification and .NET settings are
+preserved.
 
-This design intentionally supersedes the #195 separate prerequisite-unit /
+This design supersedes the #195 separate prerequisite-unit /
 systemd-EnvironmentFile generation. Installation fails closed while that old
-prepare unit is still installed, so migration is explicit: roll back the exact
-older generation first, then install this generation. The installer adds only
-the exact helper and runner drop-in, reloads systemd, and never restarts the
-runner automatically:
+prepare unit is still installed, so the generations never coexist. The
+migration transaction is intentionally ordered:
+
+1. validate the exact RunnerRoot, current route and prospective `.env` change
+   with read-only `--check`;
+2. install the exact helper and runner drop-in;
+3. atomically apply the owned `.env` block before any restart;
+4. reload systemd;
+5. return with `runner_restart_performed=false`.
+
+If a fresh installation fails during apply/reload, the installer attempts to
+remove the just-installed generation and its owned `.env` block before
+returning failure. A partially present helper/drop-in pair is rejected instead
+of guessed or repaired implicitly.
+
+For migration from #195, roll back the exact old generation once. If that
+rollback has already completed and the legacy prepare unit is absent, do not
+repeat it: install only the accepted new generation.
 
 ```bash
 sudo bash infra/runner-host/wsl/install-runner-proxy.sh --install
 ```
 
-After confirming the runner is idle, one controlled restart of the existing
-service activates the new generation. Acceptance observes the exact
+After successful install and after confirming the runner is idle, one
+separately controlled restart of the existing service activates the already
+materialized `.env` generation. Acceptance observes the exact
 `Runner.Listener run --startuptype service` descendant rather than assuming the
 systemd MainPID wrapper is the listener. Require proxy-presence in that exact
 listener, a fresh successfully established listener session, one governed
@@ -112,9 +131,9 @@ wrapper process environment as acceptance. No global Git proxy configuration
 is required: runner jobs inherit the listener's environment.
 
 Rollback from the same revision first removes only its owned marker block from
-the existing runner `.env`, then removes only the exact matching helper and
-drop-in. It refuses to overwrite/remove another revision and reloads systemd
-without restarting the service:
+the Runner `.env`, then removes only the exact matching helper and drop-in. It
+refuses another revision or partial generation and reloads systemd without
+restarting the service:
 
 ```bash
 sudo bash infra/runner-host/wsl/install-runner-proxy.sh --rollback
@@ -122,7 +141,9 @@ sudo bash infra/runner-host/wsl/install-runner-proxy.sh --rollback
 
 An independently admitted idle restart is required for the running listener to
 lose the removed proxy environment. The original runner service, unrelated
-`.env` settings and all other drop-ins remain intact.
+`.env` settings and all other drop-ins remain intact. If `.env` was created from
+an absent state and contains no unrelated settings, rollback leaves an empty,
+secure runner-owned `.env`; Runner treats empty and absent `.env` equivalently.
 
 The existing Windows edge-platform lifecycle is owner-logon based and manages
 remote tunnels. This change does not start/reconfigure that platform, change its
