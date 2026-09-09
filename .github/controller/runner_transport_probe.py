@@ -20,6 +20,8 @@ WATCHDOG_PROJECTION = Path("/run/mobile-proxy-runner-health/observation.json")
 WATCHDOG_PROJECTION_SCHEMA = "runner-transport-health-projection.v1"
 _MAX_PROJECTION_BYTES = 4096
 _MAX_PROJECTION_COUNTER = 1000
+_MAX_SERVICE_DESCENDANTS = 128
+_MAX_CMDLINE_BYTES = 4096
 _WATCHDOG_DECISIONS = frozenset({"HEALTHY", "OBSERVE", "RESTART_ELIGIBLE", "RATE_LIMITED", "UNKNOWN"})
 
 _PROXY_KEYS = frozenset({
@@ -155,6 +157,72 @@ def _read_environment_names(path: Path) -> set[str] | None:
     return names
 
 
+def _read_cmdline(path: Path) -> tuple[str, ...] | None:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if not raw or len(raw) > _MAX_CMDLINE_BYTES:
+        return None
+    try:
+        values = tuple(item.decode("utf-8") for item in raw.rstrip(b"\0").split(b"\0") if item)
+    except UnicodeDecodeError:
+        return None
+    return values or None
+
+
+def _is_runner_listener(argv: tuple[str, ...] | None) -> bool:
+    return bool(
+        argv
+        and Path(argv[0]).name == "Runner.Listener"
+        and argv[1:] == ("run", "--startuptype", "service")
+    )
+
+
+def _listener_environment_pid(proc_root: Path, main_pid: int) -> int | None:
+    main = proc_root / str(main_pid)
+    if _is_runner_listener(_read_cmdline(main / "cmdline")):
+        return main_pid
+
+    # Linux always exposes task/<tid>/children. If a synthetic/non-Linux proc
+    # fixture lacks it, retain the legacy MainPID path for compatibility. On a
+    # real host an unreadable/malformed descendant tree fails closed instead of
+    # silently treating the systemd wrapper as Runner.Listener.
+    root_children = main / "task" / str(main_pid) / "children"
+    if not root_children.exists():
+        return main_pid
+
+    queue = [main_pid]
+    visited: set[int] = set()
+    listeners: list[int] = []
+    while queue and len(visited) < _MAX_SERVICE_DESCENDANTS:
+        pid = queue.pop(0)
+        if pid in visited:
+            continue
+        visited.add(pid)
+        task_children = proc_root / str(pid) / "task" / str(pid) / "children"
+        try:
+            raw_children = task_children.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            return None
+        if not raw_children:
+            continue
+        for item in raw_children.split():
+            if not item.isdigit() or int(item) <= 0:
+                return None
+            child = int(item)
+            if child in visited:
+                continue
+            if _is_runner_listener(_read_cmdline(proc_root / str(child) / "cmdline")):
+                listeners.append(child)
+            queue.append(child)
+            if len(queue) + len(visited) > _MAX_SERVICE_DESCENDANTS:
+                return None
+    if queue or len(listeners) != 1:
+        return None
+    return listeners[0]
+
+
 def _presence(names: set[str]) -> dict[str, bool]:
     return {
         "proxy_present": bool(names & _PROXY_KEYS),
@@ -185,7 +253,9 @@ def collect_runner_runtime(
 
     direct_names: set[str] | None = None
     if main_pid is not None:
-        direct_names = _read_environment_names(proc_root / str(main_pid) / "environ")
+        environment_pid = _listener_environment_pid(proc_root, main_pid)
+        if environment_pid is not None:
+            direct_names = _read_environment_names(proc_root / str(environment_pid) / "environ")
     observer_names = {name for name in environment if _ENV_NAME.fullmatch(name)}
     selected_names = direct_names if direct_names is not None else observer_names
 
