@@ -4,9 +4,10 @@
 The helper runs only as the runner service's root ExecStartPre. It derives the
 runner application directory from that service command's WorkingDirectory,
 recomputes the current private WSL gateway, owns one bounded marker block in
-the existing runner .env, preserves every unrelated line and file owner/mode,
-and never prints proxy values. No network probe, recovery, phone or provider
-access is performed.
+the runner's optional .env, preserves unrelated existing lines plus file
+owner/mode, and never prints proxy values. If .env is absent, validation stays
+read-only and apply creates it atomically with runner-root ownership and mode
+0600. No network probe, recovery, phone or provider access is performed.
 """
 from __future__ import annotations
 
@@ -143,35 +144,80 @@ def runner_environment_path(working_directory: Path | None = None) -> Path:
     return directory / '.env'
 
 
-def _validate_runner_env(path: Path) -> os.stat_result:
+def _validate_runner_env_target(path: Path) -> tuple[os.stat_result, os.stat_result | None]:
     try:
         parent = path.parent.lstat()
+    except OSError as exc:
+        raise ValueError('RUNNER_PROXY_RUNNER_DIRECTORY_UNAVAILABLE') from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or path.parent.is_symlink()
+        or parent.st_mode & 0o022
+    ):
+        raise ValueError('RUNNER_PROXY_RUNNER_DIRECTORY_UNSAFE')
+
+    try:
         info = path.lstat()
+    except FileNotFoundError:
+        return parent, None
     except OSError as exc:
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_UNAVAILABLE') from exc
-    if not stat.S_ISDIR(parent.st_mode) or path.parent.is_symlink():
-        raise ValueError('RUNNER_PROXY_RUNNER_DIRECTORY_UNSAFE')
+
     if not stat.S_ISREG(info.st_mode) or path.is_symlink():
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_UNSAFE')
     if info.st_uid != parent.st_uid or info.st_mode & 0o022:
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_UNSAFE')
     if info.st_size < 0 or info.st_size > MAX_ENV_BYTES:
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_UNSAFE')
-    return info
+    return parent, info
 
 
-def _render_update(path: Path, managed_environment: str | None) -> tuple[os.stat_result, bytes, bytes]:
-    info = _validate_runner_env(path)
+def _read_runner_env(path: Path) -> tuple[os.stat_result, os.stat_result | None, bytes, str]:
+    parent, info = _validate_runner_env_target(path)
+    if info is None:
+        return parent, None, b'', ''
     try:
         raw = path.read_bytes()
         current = raw.decode('utf-8')
     except (OSError, UnicodeError) as exc:
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_UNREADABLE') from exc
+    return parent, info, raw, current
+
+
+def _render_update(
+    path: Path,
+    managed_environment: str | None,
+) -> tuple[os.stat_result, os.stat_result | None, bytes, bytes]:
+    parent, info, raw, current = _read_runner_env(path)
     updated = reconcile_environment(current, managed_environment)
     encoded = updated.encode('utf-8')
     if len(encoded) > MAX_ENV_BYTES:
         raise ValueError('RUNNER_PROXY_RUNNER_ENV_TOO_LARGE')
-    return info, raw, encoded
+    return parent, info, raw, encoded
+
+
+def _assert_target_unchanged(path: Path, expected: os.stat_result | None) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise ValueError('RUNNER_PROXY_RUNNER_ENV_CHANGED') from None
+    except OSError as exc:
+        raise ValueError('RUNNER_PROXY_RUNNER_ENV_CHANGED') from exc
+
+    if expected is None:
+        raise ValueError('RUNNER_PROXY_RUNNER_ENV_CHANGED')
+    observed = (
+        current.st_dev, current.st_ino, current.st_uid, current.st_gid,
+        stat.S_IMODE(current.st_mode), current.st_size, current.st_mtime_ns,
+    )
+    original = (
+        expected.st_dev, expected.st_ino, expected.st_uid, expected.st_gid,
+        stat.S_IMODE(expected.st_mode), expected.st_size, expected.st_mtime_ns,
+    )
+    if observed != original:
+        raise ValueError('RUNNER_PROXY_RUNNER_ENV_CHANGED')
 
 
 def check_runner_environment(path: Path, managed_environment: str) -> None:
@@ -179,19 +225,24 @@ def check_runner_environment(path: Path, managed_environment: str) -> None:
 
 
 def update_runner_environment(path: Path, managed_environment: str | None) -> None:
-    info, raw, encoded = _render_update(path, managed_environment)
+    parent, info, raw, encoded = _render_update(path, managed_environment)
     if encoded == raw:
         return
 
     fd, temporary = tempfile.mkstemp(prefix='.env.mobile-proxy-', dir=path.parent)
     try:
-        os.fchmod(fd, stat.S_IMODE(info.st_mode))
-        os.fchown(fd, info.st_uid, info.st_gid)
+        mode = stat.S_IMODE(info.st_mode) if info is not None else 0o600
+        owner_uid = info.st_uid if info is not None else parent.st_uid
+        owner_gid = info.st_gid if info is not None else parent.st_gid
+        os.fchmod(fd, mode)
+        os.fchown(fd, owner_uid, owner_gid)
         with os.fdopen(fd, 'wb', closefd=True) as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
         fd = -1
+
+        _assert_target_unchanged(path, info)
         os.replace(temporary, path)
         temporary = ''
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
