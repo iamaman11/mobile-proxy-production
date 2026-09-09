@@ -20,6 +20,7 @@ from phone_target import (  # noqa: E402
 )
 from runtime_operational_observer import (  # noqa: E402
     RuntimeOperationalObservationUnavailable,
+    RuntimeOperationalOutputValidationFailure,
     observe_runtime_operational_health,
 )
 
@@ -61,6 +62,25 @@ _ALLOWED_OBSERVER_FAILURE_PHASES = frozenset(
     {
         "BINDING_VALIDATION",
         "OUTPUT_VALIDATION",
+    }
+)
+_ALLOWED_OBSERVER_FAILURE_CODES = frozenset(
+    {
+        "OUTPUT_STREAM_ENCODING",
+        "OUTPUT_PHASE_PROTOCOL",
+        "OUTPUT_PAYLOAD_ENCODING",
+        "OUTPUT_PAYLOAD_STRUCTURE",
+        "OUTPUT_PROCESS_COUNT",
+        "OUTPUT_HEALTH_AUTH",
+        "OUTPUT_UNAUTHENTICATED_PAYLOAD_CONTRACT",
+        "OUTPUT_SERVING",
+        "OUTPUT_CELLULAR_ROUTE_READY",
+        "OUTPUT_PROXY_BIND_READY",
+        "OUTPUT_LOCAL_SERVING_READY",
+        "OUTPUT_READINESS_STATE",
+        "OUTPUT_PROXY_STATUS",
+        "OUTPUT_TUNNEL_OWNER",
+        "OUTPUT_DEGRADATION_REASON_CODE",
     }
 )
 
@@ -132,6 +152,17 @@ def _bounded_terminal(payload: dict[str, object]) -> str:
         if phone_failure_phase is not None:
             raise ValueError("phone target and observer failure phases are mutually exclusive")
         fields.append(f"observer_failure_phase={observer_failure_phase}")
+    observer_failure_code = payload.get("observer_failure_code")
+    if observer_failure_code is not None:
+        if observer_failure_code not in _ALLOWED_OBSERVER_FAILURE_CODES:
+            raise ValueError("observer failure code is not allowlisted")
+        if failure_code != "PHONE_TARGET_UNAVAILABLE":
+            raise ValueError("observer failure code has incompatible failure code")
+        if observer_failure_phase != "OUTPUT_VALIDATION":
+            raise ValueError("observer failure code has incompatible observer phase")
+        if phone_failure_phase is not None:
+            raise ValueError("phone target and observer failure metadata overlap")
+        fields.append(f"observer_failure_code={observer_failure_code}")
     fields.extend(
         (
             "phone_mutation=false",
@@ -195,6 +226,15 @@ def observe(
         base["phone_failure_phase"] = phone_failure_phase
         _write(output, base)
         return base
+    except RuntimeOperationalOutputValidationFailure as exc:
+        observer_failure_code = exc.code.value
+        if observer_failure_code not in _ALLOWED_OBSERVER_FAILURE_CODES:
+            raise ValueError("observer output validation code is not allowlisted")
+        base["failure_code"] = "PHONE_TARGET_UNAVAILABLE"
+        base["observer_failure_phase"] = "OUTPUT_VALIDATION"
+        base["observer_failure_code"] = observer_failure_code
+        _write(output, base)
+        return base
     except PhoneTargetUnavailable as exc:
         base["failure_code"] = "PHONE_TARGET_UNAVAILABLE"
         observer_failure_phase = _observer_failure_phase(exc)
@@ -213,6 +253,7 @@ def observe(
     base.pop("failure_phase", None)
     base.pop("phone_failure_phase", None)
     base.pop("observer_failure_phase", None)
+    base.pop("observer_failure_code", None)
     _write(output, base)
     return base
 
