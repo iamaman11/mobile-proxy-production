@@ -1,4 +1,4 @@
-name: Stage 4 controlled phone runtime recovery exercise
+name: Production phone runtime recovery
 
 on:
   workflow_call:
@@ -6,10 +6,7 @@ on:
       command:
         required: true
         type: string
-      target:
-        required: true
-        type: string
-      release_tag:
+      source_event_name:
         required: true
         type: string
       source_issue_number:
@@ -24,298 +21,339 @@ on:
       source_comment_url:
         required: true
         type: string
-    secrets:
-      ANDROID_PRODUCTION_SERIAL:
+      control_request_id:
         required: true
-      ANDROID_TARGET_BINDING_KEY:
+        type: string
+      control_request_json:
         required: true
-      MOBILE_PROXY_ADMIN_TOKEN:
-        required: true
-      MOBILE_PROXY_DEVICE_TOKEN:
-        required: true
-      MOBILE_PROXY_UI_TOKEN:
-        required: true
-      MOBILE_PROXY_RELAY_USER:
-        required: true
-      MOBILE_PROXY_RELAY_PASSWORD:
-        required: true
-      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64:
-        required: true
+        type: string
 
 permissions:
   contents: read
 
-env:
-  PYTHONDONTWRITEBYTECODE: '1'
-
 jobs:
-  admit:
-    name: Admit one exact Stage 4 lifecycle exercise without phone access
+  command-gate:
+    name: Validate exact owner runtime recovery authority and fail closed
+    if: >-
+      inputs.source_issue_number == 1 &&
+      inputs.source_actor == github.repository_owner &&
+      startsWith(inputs.command, '/phone-runtime-recover ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      source_sha: ${{ steps.release.outputs.source_sha }}
+      canonical_sha: ${{ steps.command.outputs.canonical_sha }}
+      quality_run_id: ${{ steps.command.outputs.quality_run_id }}
     steps:
-      - name: Check out exact Controller comment-event revision
+      - name: Check out exact private execution revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
+          path: private-execution
 
-      - name: Validate sole-ingress provenance and immutable Stage 4 Release
-        id: release
+      - name: Validate command, private binding, current canonical main, and Quality
+        id: command
+        shell: bash
         env:
           COMMAND: ${{ inputs.command }}
-          TARGET: ${{ inputs.target }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_ISSUE_NUMBER: ${{ inputs.source_issue_number }}
-          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
-          SOURCE_ACTOR: ${{ inputs.source_actor }}
-          SOURCE_COMMENT_URL: ${{ inputs.source_comment_url }}
-          EXPECTED_OWNER: ${{ github.repository_owner }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF" = 'refs/heads/main'
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 - <<'PY'
-          import os
-          import sys
-          from pathlib import Path
-
-          command = os.environ['COMMAND']
-          target = os.environ['TARGET']
-          release_tag = os.environ['RELEASE_TAG']
-          if command != '/exercise-runtime-recovery phone-production v0.1.7':
-              raise SystemExit('Stage 4 runtime recovery command differs from exact Issue #1 contract')
-          if target != 'phone-production' or release_tag != 'v0.1.7':
-              raise SystemExit('Stage 4 runtime recovery admission differs from phone-production@v0.1.7')
-          if os.environ['SOURCE_ISSUE_NUMBER'] != '1':
-              raise SystemExit('Stage 4 runtime recovery source Issue differs')
-          if os.environ['SOURCE_ACTOR'] != os.environ['EXPECTED_OWNER']:
-              raise SystemExit('Stage 4 runtime recovery source actor is not repository owner')
-          try:
-              comment_id = int(os.environ['SOURCE_COMMENT_ID'])
-          except ValueError as exc:
-              raise SystemExit('Stage 4 runtime recovery source comment id is invalid') from exc
-          if comment_id <= 0:
-              raise SystemExit('Stage 4 runtime recovery source comment id is invalid')
-          expected_url = (
-              'https://github.com/iamaman11/mobile-proxy-production/issues/1#issuecomment-'
-              + str(comment_id)
-          )
-          if os.environ['SOURCE_COMMENT_URL'] != expected_url:
-              raise SystemExit('Stage 4 runtime recovery source comment URL differs')
-
-          sys.path.insert(0, str(Path('.github/controller').resolve()))
-          from release_resolver import resolve_release
-
-          admitted = resolve_release(tag=release_tag, target=target)
-          if admitted.identity.tag != release_tag or admitted.identity.immutable is not True:
-              raise SystemExit('Stage 4 runtime recovery Product Release admission differs')
-          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
-              handle.write(f"source_sha={admitted.identity.source_sha}\n")
-          print(
-              'STAGE4_RUNTIME_RECOVERY_ADMISSION_ACCEPTED '
-              f"release={release_tag} source_sha={admitted.identity.source_sha} "
-              f"source_comment_id={comment_id} phone_access=false phone_mutation=false"
-          )
-          PY
-
-  exercise-phone:
-    name: Exercise fixed host-daemon recovery once
-    needs: admit
-    runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 20
-    concurrency:
-      group: production-target-phone-production
-      cancel-in-progress: false
-    environment: phone-production
-    env:
-      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
-      ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
-      MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
-      MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
-      MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
-      MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
-      MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
-      MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
-    steps:
-      - name: Check out exact Controller comment-event revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Check out exact admitted PRODUCT source for digest and render verification
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: iamaman11/mobile-proxy
-          ref: ${{ needs.admit.outputs.source_sha }}
-          path: product-source
-          persist-credentials: false
-
-      - name: Require exact user-local Rust toolchain before Product digest/render
-        shell: bash
-        run: |
-          set -euo pipefail
-          CARGO_HOME="${HOME}/.cargo"
-          RUSTUP_HOME="${HOME}/.rustup"
-          PATH="${CARGO_HOME}/bin:${PATH}"
-          export CARGO_HOME RUSTUP_HOME PATH
-          test "$CARGO_HOME" = "${HOME}/.cargo"
-          test "$RUSTUP_HOME" = "${HOME}/.rustup"
-          test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
-          test "$(command -v rustc)" = "$CARGO_HOME/bin/rustc"
-          "$CARGO_HOME/bin/cargo" --version | grep -Eq '^cargo 1\.95\.0([[:space:]]|$)'
-          "$CARGO_HOME/bin/rustc" --version | grep -Eq '^rustc 1\.95\.0([[:space:]]|$)'
-          (
-            cd product-source
-            "$CARGO_HOME/bin/cargo" metadata --format-version 1 --locked --no-deps >/dev/null
-            git diff --check
-            test -z "$(git status --porcelain --untracked-files=no)"
-          )
-          {
-            printf 'CARGO_HOME=%s\n' "$CARGO_HOME"
-            printf 'RUSTUP_HOME=%s\n' "$RUSTUP_HOME"
-          } >> "$GITHUB_ENV"
-          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-          echo 'stage4_runtime_recovery_rust_prerequisite=true'
-          echo 'rust_toolchain=1.95.0'
-          echo 'user_local_tooling=true'
-          echo 'system_path_mutation=false'
-          echo 'phone_access=false'
-          echo 'phone_mutation=false'
-          echo 'provider_access=false'
-          echo 'vm_access=false'
-          echo 'runner_proxy_mutation=false'
-
-      - name: Execute one bounded fixed lifecycle perturbation
-        id: exercise
-        continue-on-error: true
-        shell: bash
-        env:
-          TARGET: ${{ inputs.target }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
-        run: |
-          set -euo pipefail
-          test -n "${RUNNER_TOOL_CACHE:-}"
-          export MOBILE_PROXY_RUNTIME_CACHE_DIR="$RUNNER_TOOL_CACHE/mobile-proxy-runtime-cache"
-          python3 .github/scripts/exercise_runtime_recovery.py \
-            --target "$TARGET" \
-            --release-tag "$RELEASE_TAG" \
-            --controller-revision "$GITHUB_SHA" \
-            --source-comment-id "$SOURCE_COMMENT_ID" \
-            --product-root "$GITHUB_WORKSPACE/product-source" \
-            --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
-            --output "$RUNNER_TEMP/stage4-runtime-recovery-exercise.json"
-
-      - name: Preserve mandatory bounded lifecycle evidence
-        id: evidence_upload
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: stage4-runtime-recovery-exercise-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/stage4-runtime-recovery-exercise.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Enforce recovered lifecycle terminal and independent postconditions
-        if: always()
-        shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
           import os
+          import re
+          import time
+          import urllib.error
+          import urllib.request
           from pathlib import Path
 
-          path = Path(os.environ['RUNNER_TEMP']) / 'stage4-runtime-recovery-exercise.json'
-          if not path.is_file():
-              raise SystemExit('Stage 4 runtime recovery evidence is unavailable')
-          value = json.loads(path.read_text(encoding='utf-8'))
-          if value.get('schema') != 'stage4-runtime-recovery-exercise.v1':
-              raise SystemExit('Stage 4 runtime recovery evidence schema differs')
-          if value.get('classification') != 'RECOVERED' or 'failure_code' in value:
-              raise SystemExit('Stage 4 runtime recovery did not reach RECOVERED terminal')
-          if value.get('target') != 'phone-production' or value.get('product_release') != 'v0.1.7':
-              raise SystemExit('Stage 4 runtime recovery identity differs')
+          command = os.environ.get("COMMAND", "").strip()
+          match = re.fullmatch(r"/phone-runtime-recover ([0-9a-f]{40})", command)
+          if match is None:
+              raise SystemExit("invalid phone runtime recovery command")
+          requested_sha = match.group(1)
 
-          scenario = value.get('scenario')
-          if not isinstance(scenario, dict) or scenario != {
-              'id': 'host-daemon-sigterm-once',
-              'critical_child': 'host-daemon',
-              'signal': 'TERM',
-              'automatic_recovery_owner': 'runtime-supervisor',
-              'arbitrary_process_selector': False,
-              'automatic_recovery_bound_seconds': 15,
-          }:
-              raise SystemExit('Stage 4 runtime recovery fixed scenario differs')
-
-          pre = value.get('preconditions')
-          post = value.get('postconditions')
-          if not isinstance(pre, dict) or not isinstance(post, dict):
-              raise SystemExit('Stage 4 runtime recovery pre/postconditions are unavailable')
-          for label, state in (('pre', pre), ('post', post)):
-              release = state.get('exact_product_release')
-              operational = state.get('operational')
-              if not isinstance(release, dict) or release.get('classification') != 'HEALTHY_EXACT' or release.get('exact') is not True:
-                  raise SystemExit(f'Stage 4 runtime recovery {label} exact Release postcondition differs')
-              if not isinstance(operational, dict):
-                  raise SystemExit(f'Stage 4 runtime recovery {label} operational evidence is unavailable')
-              local = operational.get('phone_local')
-              topology = operational.get('topology')
-              if not isinstance(local, dict) or local.get('ready') is not True:
-                  raise SystemExit(f'Stage 4 runtime recovery {label} phone-local invariant differs')
-              if not isinstance(topology, dict) or topology.get('disposition') not in {
-                  'READY', 'TOPOLOGY_DEFERRED', 'NONLOCAL_DEGRADED'
-              }:
-                  raise SystemExit(f'Stage 4 runtime recovery {label} topology disposition differs')
-
-          mutation = value.get('mutation')
-          if not isinstance(mutation, dict) or mutation != {
-              'attempts': 1,
-              'outcome': 'RECOVERED',
-              'dispatched': True,
-              'ambiguous_stop': False,
-          }:
-              raise SystemExit('Stage 4 runtime recovery mutation terminal differs')
-          recovery = value.get('automatic_recovery')
-          if not isinstance(recovery, dict) or recovery != {
-              'expected': True,
-              'observed': True,
-              'generation_changed': True,
-              'owner_generation_stable': True,
-              'bound_seconds': 15,
-          }:
-              raise SystemExit('Stage 4 runtime recovery automatic recovery proof differs')
-
-          safety = value.get('safety')
-          if not isinstance(safety, dict):
-              raise SystemExit('Stage 4 runtime recovery safety evidence is unavailable')
-          required_true = ('phone_access_performed', 'phone_mutation_performed')
-          required_false = (
-              'deployment_created',
-              'deployment_intent_created',
-              'provider_access_performed',
-              'provider_mutation_performed',
-              'vm_access_performed',
-              'vm_mutation_performed',
-              'runner_proxy_mutation_performed',
-              'runtime_restart_performed',
-              'phone_reboot_performed',
-              'arbitrary_process_selector_accepted',
-              'process_ids_recorded',
-              'process_cmdlines_recorded',
-              'raw_device_identifier_recorded',
-              'raw_config_recorded',
-              'secret_values_recorded',
-              'blind_retry_performed',
+          binding = json.loads(
+              Path("private-execution/.github/production/android-v0.1.4-migration-binding.json").read_text(
+                  encoding="utf-8"
+              )
           )
-          if any(safety.get(field) is not True for field in required_true):
-              raise SystemExit('Stage 4 runtime recovery phone access/mutation proof differs')
-          if any(safety.get(field) is not False for field in required_false):
-              raise SystemExit('Stage 4 runtime recovery safety boundary differs')
-          print('STAGE4_RUNTIME_RECOVERY_ACCEPTED classification=RECOVERED')
+          expected = {
+              "format_version": 1,
+              "binding_role": "private_execution_only",
+              "canonical_repository": "iamaman11/mobile-proxy",
+              "quality_required": True,
+              "migration_tracker_issue": 162,
+              "hardening_tracker_issue": 179,
+              "application_id": "com.example.mobileproxy",
+              "version_name": "0.1.4",
+              "version_code": 1004,
+              "old_version_name": "1.1.0",
+              "old_version_code": 2,
+              "candidate_retention_days_minimum": 30,
+              "final_release_authority": False,
+          }
+          for key, value in expected.items():
+              if binding.get(key) != value:
+                  raise SystemExit(f"runtime recovery private binding mismatch: {key}")
+          if binding.get("canonical_sha") != requested_sha:
+              raise SystemExit("runtime recovery requested SHA differs from current private execution binding")
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "mobile-proxy-production-runtime-recovery",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def get_json(url):
+              last = None
+              for attempt, delay in enumerate((0, 1, 2), start=1):
+                  if delay:
+                      time.sleep(delay)
+                  request = urllib.request.Request(url, headers=headers)
+                  try:
+                      with urllib.request.urlopen(request, timeout=15) as response:
+                          return json.load(response)
+                  except (urllib.error.URLError, TimeoutError) as error:
+                      last = error
+                      if attempt == 3:
+                          break
+              raise SystemExit("runtime recovery authority lookup unavailable after bounded retries") from last
+
+          canonical_main = get_json(
+              "https://api.github.com/repos/iamaman11/mobile-proxy/commits/main"
+          ).get("sha")
+          if requested_sha != canonical_main:
+              raise SystemExit("requested SHA is not current canonical main")
+
+          runs = get_json(
+              f"https://api.github.com/repos/iamaman11/mobile-proxy/actions/runs?head_sha={requested_sha}&event=push&per_page=100"
+          ).get("workflow_runs", [])
+          quality = [
+              run
+              for run in runs
+              if run.get("name") == "Quality"
+              and run.get("head_branch") == "main"
+              and run.get("head_sha") == requested_sha
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+          ]
+          if not quality:
+              raise SystemExit("exact current canonical SHA has no successful main Quality run")
+          accepted = max(quality, key=lambda run: int(run.get("id", 0)))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"canonical_sha={requested_sha}\n")
+              handle.write(f"quality_run_id={accepted['id']}\n")
           PY
+
+      - name: Refuse legacy-only recovery until empty-layout materialization is proven
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "phone-runtime-recover is hard-blocked: current tracker evidence proves the canonical managed runtime layout is absent, while this legacy workflow requires an already-installed current release and has no source-bound config-preserving materialization contract." >&2
+          exit 1
+
+  recover-runtime:
+    name: Recover existing production runtime without APK mutation
+    needs: command-gate
+    concurrency:
+      group: production-phone-global-mutation
+      cancel-in-progress: false
+      queue: max
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 5
+    env:
+      CANONICAL_SHA: ${{ needs.command-gate.outputs.canonical_sha }}
+      QUALITY_RUN_ID: ${{ needs.command-gate.outputs.quality_run_id }}
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+    steps:
+      - name: Fetch exact canonical registered-device preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-all-errors --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 60 \
+            "https://raw.githubusercontent.com/iamaman11/mobile-proxy/${CANONICAL_SHA}/scripts/run_private_phone_preflight.py" \
+            --output "${RUNNER_TEMP}/run_private_phone_preflight.py"
+
+      - name: Recover canonical installed runtime and prove local health
+        id: recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          from pathlib import Path
+
+          canonical_sha = os.environ["CANONICAL_SHA"]
+          serial = os.environ["ANDROID_PRODUCTION_SERIAL"]
+          package = "com.example.mobileproxy"
+          runtime_root = "/data/adb/mobile-proxy-node/current"
+          service_entrypoint = f"{runtime_root}/service.sh"
+          supervisor = f"{runtime_root}/bin/runtime-supervisor"
+          config = f"{runtime_root}/config/host-daemon.json"
+          egress_service = "com.example.mobileproxy/.CellularEgressService"
+
+          spec = importlib.util.spec_from_file_location(
+              "phone_preflight", Path(os.environ["RUNNER_TEMP"]) / "run_private_phone_preflight.py"
+          )
+          preflight = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(preflight)
+
+          def adb(*args, timeout=60, check=True):
+              result = subprocess.run(
+                  ["adb", "-s", serial, *args],
+                  check=False,
+                  capture_output=True,
+                  text=True,
+                  timeout=timeout,
+              )
+              if check and result.returncode != 0:
+                  raise RuntimeError("registered-phone runtime recovery command failed")
+              return result
+
+          def root_ok(shell):
+              try:
+                  return adb("shell", "su", "0", "sh", "-c", shell, timeout=20, check=False).returncode == 0
+              except (OSError, subprocess.TimeoutExpired):
+                  return False
+
+          def supervisor_running():
+              return root_ok(f'''for proc in /proc/[0-9]*; do
+                [ -r "$proc/cmdline" ] || continue
+                cmd="$(tr '\\000' ' ' < "$proc/cmdline")"
+                case "$cmd" in
+                  "{supervisor} --runtime-root {runtime_root} "*) exit 0 ;;
+                esac
+              done
+              exit 1
+              ''')
+
+          def egress_running():
+              result = adb("shell", "dumpsys", "activity", "services", package, timeout=30, check=False)
+              return result.returncode == 0 and egress_service in result.stdout
+
+          def ports_ready():
+              return root_ok('''BB=""
+              for candidate in /data/adb/magisk/busybox /debug_ramdisk/.magisk/busybox/busybox; do
+                [ -x "$candidate" ] && BB="$candidate" && break
+              done
+              [ -n "$BB" ] || exit 1
+              "$BB" nc -z -w 2 127.0.0.1 18080 >/dev/null 2>&1
+              "$BB" nc -z -w 2 127.0.0.1 1080 >/dev/null 2>&1
+              ''')
+
+          # Read-only target and baseline gate before any recovery mutation.
+          preflight.require_canonical_sha(canonical_sha)
+          preflight.require_expected_serial()
+          preflight.prove_registered_device(serial)
+
+          package_dump = adb("shell", "dumpsys", "package", package, timeout=60).stdout
+          codes = re.findall(r"^\s*versionCode=([0-9]+)\b", package_dump, re.MULTILINE)
+          names = re.findall(r"^\s*versionName=([^\s]+)\s*$", package_dump, re.MULTILINE)
+          if len(codes) != 1 or len(names) != 1 or (codes[0], names[0]) != ("2", "1.1.0"):
+              raise RuntimeError("installed Android baseline differs from approved recovery state")
+
+          bootstrap_ready = (
+              root_ok(f'test -f "{service_entrypoint}"')
+              and root_ok(f'test -x "{supervisor}"')
+              and root_ok(f'test -f "{config}"')
+          )
+          if not bootstrap_ready:
+              raise RuntimeError("installed runtime bootstrap contract is unavailable")
+
+          # This mutation body is unreachable while the hosted hard block above is present.
+          # It is retained only as the legacy existing-layout implementation until the
+          # tracker approves a source-bound, config-preserving materialization contract.
+          preflight.prove_registered_device(serial)
+          adb(
+              "shell",
+              "su",
+              "0",
+              "sh",
+              "-c",
+              f'sh "{service_entrypoint}"',
+              timeout=60,
+          )
+
+          deadline = time.monotonic() + 90
+          healthy = False
+          state = {}
+          while time.monotonic() < deadline:
+              state = {
+                  "runtime_supervisor_running": supervisor_running(),
+                  "cellular_egress_service_running": egress_running(),
+                  "local_proxy_ports_ready": ports_ready(),
+              }
+              healthy = all(state.values())
+              if healthy:
+                  break
+              time.sleep(2)
+
+          evidence = {
+              "format_version": 1,
+              "repository": "iamaman11/mobile-proxy",
+              "canonical_sha": canonical_sha,
+              "quality_run_id": int(os.environ["QUALITY_RUN_ID"]),
+              "mode": "existing_runtime_recovery",
+              "installed_version_name": names[0],
+              "installed_version_code": int(codes[0]),
+              "registered_device_preflight_before_mutation": True,
+              "runtime_bootstrap_invoked": True,
+              **state,
+              "local_healthy": healthy,
+              "apk_install_update_uninstall_performed": False,
+              "config_mutation_performed": False,
+              "phone_reboot_performed": False,
+              "provider_credentials_requested": False,
+              "raw_device_identifier_recorded": False,
+              "accepted": healthy,
+          }
+          Path(os.environ["RUNNER_TEMP"], "phone-runtime-recovery.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+
+          print(
+              "bounded runtime recovery: "
+              f"baseline_version=1.1.0 baseline_code=2 "
+              f"supervisor_running={str(state.get('runtime_supervisor_running', False)).lower()} "
+              f"egress_service_running={str(state.get('cellular_egress_service_running', False)).lower()} "
+              f"local_proxy_ports_ready={str(state.get('local_proxy_ports_ready', False)).lower()} "
+              f"local_healthy={str(healthy).lower()} "
+              "apk_mutation=false config_mutation=false phone_reboot=false provider_credentials_requested=false"
+          )
+          if not healthy:
+              raise RuntimeError("existing production runtime did not recover local health")
+          PY
+
+      - name: Upload bounded private recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phone-runtime-recovery-${{ env.CANONICAL_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phone-runtime-recovery.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Record safe result
+        if: always()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Production phone runtime recovery
+          - Canonical SHA: ${{ env.CANONICAL_SHA }}
+          - Exact Quality run: ${{ env.QUALITY_RUN_ID }}
+          - Expected installed baseline: 1.1.0 / 2
+          - Recovery outcome: ${{ steps.recovery.outcome }}
+          - APK install/update/uninstall requested: false
+          - Config mutation requested: false
+          - Phone reboot requested: false
+          - Provider credentials requested: false
+          - Raw device identifier recorded: false
+          EOF
