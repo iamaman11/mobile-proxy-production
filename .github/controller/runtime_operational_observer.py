@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import asdict, dataclass
+from enum import Enum
 
 import phone_target
 
@@ -65,6 +66,38 @@ class RuntimeOperationalObservationUnavailable(phone_target.PhoneTargetUnavailab
         if last_phase is not None and last_phase not in _ALLOWED_PHASES:
             raise ValueError("runtime operational failure phase is not allowlisted")
         self.last_phase = last_phase
+
+
+class RuntimeOperationalOutputFailureCode(str, Enum):
+    STREAM_ENCODING = "OUTPUT_STREAM_ENCODING"
+    PHASE_PROTOCOL = "OUTPUT_PHASE_PROTOCOL"
+    PAYLOAD_ENCODING = "OUTPUT_PAYLOAD_ENCODING"
+    PAYLOAD_STRUCTURE = "OUTPUT_PAYLOAD_STRUCTURE"
+    PROCESS_COUNT = "OUTPUT_PROCESS_COUNT"
+    HEALTH_AUTH = "OUTPUT_HEALTH_AUTH"
+    UNAUTHENTICATED_PAYLOAD_CONTRACT = "OUTPUT_UNAUTHENTICATED_PAYLOAD_CONTRACT"
+    SERVING = "OUTPUT_SERVING"
+    CELLULAR_ROUTE_READY = "OUTPUT_CELLULAR_ROUTE_READY"
+    PROXY_BIND_READY = "OUTPUT_PROXY_BIND_READY"
+    LOCAL_SERVING_READY = "OUTPUT_LOCAL_SERVING_READY"
+    READINESS_STATE = "OUTPUT_READINESS_STATE"
+    PROXY_STATUS = "OUTPUT_PROXY_STATUS"
+    TUNNEL_OWNER = "OUTPUT_TUNNEL_OWNER"
+    DEGRADATION_REASON_CODE = "OUTPUT_DEGRADATION_REASON_CODE"
+
+
+class RuntimeOperationalOutputValidationFailure(phone_target.PhoneTargetUnavailable):
+    """Bounded observer-local classification for malformed operational output."""
+
+    def __init__(self, code: RuntimeOperationalOutputFailureCode) -> None:
+        super().__init__(_MALFORMED)
+        self.code = code
+
+
+def _output_invalid(
+    code: RuntimeOperationalOutputFailureCode,
+) -> RuntimeOperationalOutputValidationFailure:
+    return RuntimeOperationalOutputValidationFailure(code)
 
 
 @dataclass(frozen=True)
@@ -307,19 +340,19 @@ def _split_phase_markers(raw: bytes) -> tuple[tuple[str, ...], bytes]:
     try:
         lines = raw.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED) from exc
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.STREAM_ENCODING) from exc
     phases: list[str] = []
     payload: list[str] = []
     for line in lines:
         if line.startswith(_PHASE_PREFIX):
             phase = line[len(_PHASE_PREFIX) :]
             if phase not in _ALLOWED_PHASES:
-                raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+                raise _output_invalid(RuntimeOperationalOutputFailureCode.PHASE_PROTOCOL)
             phases.append(phase)
         else:
             payload.append(line)
     if tuple(phases) != _PHASE_SEQUENCE[: len(phases)]:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.PHASE_PROTOCOL)
     body = ("\n".join(payload) + ("\n" if payload else "")).encode("utf-8")
     return tuple(phases), body
 
@@ -332,28 +365,35 @@ def _last_allowlisted_phase(raw: bytes) -> str | None:
     return phases[-1] if phases else None
 
 
-def _parse_bool(raw: str) -> bool | None:
+def _parse_bool(
+    raw: str, *, failure_code: RuntimeOperationalOutputFailureCode
+) -> bool | None:
     if raw == "true":
         return True
     if raw == "false":
         return False
     if raw == "unknown":
         return None
-    raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+    raise _output_invalid(failure_code)
 
 
 def _parse_count(raw: str) -> int:
     if not raw.isdigit():
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.PROCESS_COUNT)
     value = int(raw)
     if value > _MAX_PROCESS_COUNT:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.PROCESS_COUNT)
     return value
 
 
-def _require_enum(raw: str, allowed: frozenset[str]) -> str:
+def _require_enum(
+    raw: str,
+    allowed: frozenset[str],
+    *,
+    failure_code: RuntimeOperationalOutputFailureCode,
+) -> str:
     if raw not in allowed:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+        raise _output_invalid(failure_code)
     return raw
 
 
@@ -361,14 +401,14 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED) from exc
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.PAYLOAD_ENCODING) from exc
     values: dict[str, str] = {}
     for line in text.splitlines():
         if "=" not in line:
-            raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+            raise _output_invalid(RuntimeOperationalOutputFailureCode.PAYLOAD_STRUCTURE)
         key, value = line.split("=", 1)
         if key in values:
-            raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+            raise _output_invalid(RuntimeOperationalOutputFailureCode.PAYLOAD_STRUCTURE)
         values[key] = value
     expected = {
         "watchdog_count",
@@ -386,27 +426,58 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
         "degradation_reason_code",
     }
     if set(values) != expected:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.PAYLOAD_STRUCTURE)
 
-    health_authenticated = _parse_bool(values["health_api_authenticated"])
+    health_authenticated = _parse_bool(
+        values["health_api_authenticated"],
+        failure_code=RuntimeOperationalOutputFailureCode.HEALTH_AUTH,
+    )
     if health_authenticated is None:
-        raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+        raise _output_invalid(RuntimeOperationalOutputFailureCode.HEALTH_AUTH)
 
-    serving = _parse_bool(values["serving"])
-    cellular_route_ready = _parse_bool(values["cellular_route_ready"])
-    proxy_bind_ready = _parse_bool(values["proxy_bind_ready"])
-    local_serving_ready = _parse_bool(values["local_serving_ready"])
+    serving = _parse_bool(
+        values["serving"],
+        failure_code=RuntimeOperationalOutputFailureCode.SERVING,
+    )
+    cellular_route_ready = _parse_bool(
+        values["cellular_route_ready"],
+        failure_code=RuntimeOperationalOutputFailureCode.CELLULAR_ROUTE_READY,
+    )
+    proxy_bind_ready = _parse_bool(
+        values["proxy_bind_ready"],
+        failure_code=RuntimeOperationalOutputFailureCode.PROXY_BIND_READY,
+    )
+    local_serving_ready = _parse_bool(
+        values["local_serving_ready"],
+        failure_code=RuntimeOperationalOutputFailureCode.LOCAL_SERVING_READY,
+    )
     readiness = values["readiness_state"]
     proxy_status = values["proxy_status"]
     tunnel_owner = values["tunnel_owner"]
     degradation = values["degradation_reason_code"]
     if health_authenticated:
         if serving is None:
-            raise phone_target.PhoneTargetUnavailable(_MALFORMED)
-        readiness = _require_enum(readiness, _ALLOWED_READINESS)
-        proxy_status = _require_enum(proxy_status, _ALLOWED_PROXY_STATUS)
-        tunnel_owner = _require_enum(tunnel_owner, _ALLOWED_TUNNEL_OWNERS)
-        degradation = _require_enum(degradation, _ALLOWED_DEGRADATION)
+            raise _output_invalid(RuntimeOperationalOutputFailureCode.SERVING)
+        readiness = _require_enum(
+            readiness,
+            _ALLOWED_READINESS,
+            failure_code=RuntimeOperationalOutputFailureCode.READINESS_STATE,
+        )
+        proxy_status = _require_enum(
+            proxy_status,
+            _ALLOWED_PROXY_STATUS,
+            failure_code=RuntimeOperationalOutputFailureCode.PROXY_STATUS,
+        )
+        tunnel_owner = _require_enum(
+            tunnel_owner,
+            _ALLOWED_TUNNEL_OWNERS,
+            failure_code=RuntimeOperationalOutputFailureCode.TUNNEL_OWNER,
+        )
+        degradation = _require_enum(
+            degradation,
+            _ALLOWED_DEGRADATION,
+            failure_code=RuntimeOperationalOutputFailureCode.DEGRADATION_REASON_CODE,
+        )
     else:
         if any(
             value != "unknown"
@@ -421,7 +492,9 @@ def _parse_output(raw: bytes) -> RuntimeOperationalObservation:
                 degradation,
             )
         ):
-            raise phone_target.PhoneTargetUnavailable(_MALFORMED)
+            raise _output_invalid(
+                RuntimeOperationalOutputFailureCode.UNAUTHENTICATED_PAYLOAD_CONTRACT
+            )
 
     return RuntimeOperationalObservation(
         watchdog_count=_parse_count(values["watchdog_count"]),
