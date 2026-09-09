@@ -32,7 +32,7 @@ jobs:
 
           workflows = Path('.github/workflows')
           workflow = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
-          lifecycle_workflow = (workflows / 'phone-runtime-recovery.yml').read_text(encoding='utf-8')
+          lifecycle_workflow = (workflows / 'stage4-runtime-recovery-exercise.yml').read_text(encoding='utf-8')
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
           runtime = Path('.github/scripts/run_phone_release_deployment.py')
@@ -97,7 +97,7 @@ jobs:
           lifecycle = lifecycle_routes[0]
           lifecycle_expected = {
               'handler': 'workflow_call',
-              'workflow': '.github/workflows/phone-runtime-recovery.yml',
+              'workflow': '.github/workflows/stage4-runtime-recovery-exercise.yml',
               'ref': 'main',
               'operation': 'exercise-runtime-recovery',
               'operation_class': 'RECOVER',
@@ -107,7 +107,7 @@ jobs:
               'physical_domains': ['runtime'],
               'authority_policy': 'private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-recovery-exercise',
               'semantic_identity_policy': 'source-comment-id+command-arguments',
-              'idempotency_policy': 'single-semantic-command-attempt+no-automatic-retry',
+              'idempotency_policy': 'single-run-attempt+single-semantic-command-attempt+no-automatic-retry',
               'concurrency_domain': 'production-target-phone-production',
               'recovery_policy': 'UNKNOWN-no-blind-retry-owner-checkpoint-required',
               'evidence_policy': 'LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION',
@@ -253,7 +253,7 @@ jobs:
               "needs.route.outputs.route_id == 'deploy-product-release'", "needs.route.outputs.operation == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'exercise-runtime-recovery'", "needs.route.outputs.operation == 'exercise-runtime-recovery'",
               "needs.route.outputs.destructive == 'true'", 'uses: ./.github/workflows/release-deployment.yml',
-              'uses: ./.github/workflows/phone-runtime-recovery.yml', 'secrets: inherit',
+              'uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml', 'secrets: inherit',
           )
           router_missing = [item for item in router_required if item not in router]
           if router_missing:
