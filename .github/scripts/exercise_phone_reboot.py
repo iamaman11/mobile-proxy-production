@@ -25,6 +25,8 @@ import phone_target  # noqa: E402
 from release_resolver import ReleaseAdmissionError, resolve_release  # noqa: E402
 from runtime_operational_observer import (  # noqa: E402
     RuntimeOperationalObservation,
+    RuntimeOperationalObservationUnavailable,
+    RuntimeOperationalOutputValidationFailure,
     observe_runtime_operational_health,
 )
 
@@ -50,6 +52,13 @@ class RebootDispatch:
 class BootState:
     boot_id: str
     boot_completed: bool
+
+
+@dataclass(frozen=True)
+class PostOperationalFailure:
+    failure_code: str
+    failure_domain: str
+    failure_phase: str | None
 
 
 def _write(path: Path, payload: dict[str, object]) -> None:
@@ -296,6 +305,32 @@ def _observe_post_operational(
         time.sleep(1)
 
 
+def _classify_post_operational_unavailable(exc: PhoneTargetUnavailable) -> PostOperationalFailure:
+    if isinstance(exc, RuntimeOperationalObservationUnavailable):
+        return PostOperationalFailure(
+            failure_code="POST_OPERATIONAL_OBSERVER_UNAVAILABLE",
+            failure_domain="RUNTIME_OPERATIONAL_OBSERVER",
+            failure_phase=exc.last_phase,
+        )
+    if isinstance(exc, RuntimeOperationalOutputValidationFailure):
+        return PostOperationalFailure(
+            failure_code="POST_OPERATIONAL_OUTPUT_INVALID",
+            failure_domain="RUNTIME_OPERATIONAL_OUTPUT",
+            failure_phase=exc.code.value,
+        )
+    if isinstance(exc, phone_target.PhoneTargetDiagnosticFailure):
+        return PostOperationalFailure(
+            failure_code="POST_PHONE_TRANSPORT_UNAVAILABLE",
+            failure_domain="PHONE_TRANSPORT",
+            failure_phase=exc.phase.value,
+        )
+    return PostOperationalFailure(
+        failure_code="POST_PHONE_TARGET_UNAVAILABLE",
+        failure_domain="PHONE_TARGET",
+        failure_phase=None,
+    )
+
+
 def _set_terminal(
     payload: dict[str, object],
     *,
@@ -536,7 +571,11 @@ def exercise(
 
             try:
                 post_operational = _observe_post_operational(serial, admin_token=admin_token)
-            except PhoneTargetUnavailable:
+            except PhoneTargetUnavailable as exc:
+                diagnostic = _classify_post_operational_unavailable(exc)
+                payload["failure_domain"] = diagnostic.failure_domain
+                if diagnostic.failure_phase is not None:
+                    payload["failure_phase"] = diagnostic.failure_phase
                 payload["postconditions"] = {
                     "exact_product_release": None,
                     "operational": None,
@@ -548,7 +587,7 @@ def exercise(
                 code = _set_terminal(
                     payload,
                     classification="UNKNOWN",
-                    failure_code="POST_OPERATIONAL_STATE_UNKNOWN",
+                    failure_code=diagnostic.failure_code,
                     phone_access=True,
                     phone_mutation=True,
                     phone_reboot=True,

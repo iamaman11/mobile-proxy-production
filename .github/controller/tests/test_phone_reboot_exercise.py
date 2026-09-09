@@ -211,6 +211,95 @@ def test_phone_local_failure_remains_a_reboot_precondition_failure() -> None:
     assert module._topology_disposition(value) == "PHONE_LOCAL_NOT_READY"
 
 
+def test_post_reboot_unknown_preserves_bounded_failure_domain_and_phase() -> None:
+    module = load_module()
+
+    class OutputCode:
+        value = "OUTPUT_HEALTH_AUTH"
+
+    cases = (
+        (
+            module.RuntimeOperationalObservationUnavailable(
+                "observer unavailable",
+                last_phase="process_count_start",
+            ),
+            (
+                "POST_OPERATIONAL_OBSERVER_UNAVAILABLE",
+                "RUNTIME_OPERATIONAL_OBSERVER",
+                "process_count_start",
+            ),
+        ),
+        (
+            module.RuntimeOperationalOutputValidationFailure(OutputCode()),
+            (
+                "POST_OPERATIONAL_OUTPUT_INVALID",
+                "RUNTIME_OPERATIONAL_OUTPUT",
+                "OUTPUT_HEALTH_AUTH",
+            ),
+        ),
+        (
+            module.phone_target.PhoneTargetDiagnosticFailure(
+                module.phone_target.PhoneFailurePhase.REGISTERED_DEVICE_NOT_DEVICE,
+                "registered phone target is not in device state",
+            ),
+            (
+                "POST_PHONE_TRANSPORT_UNAVAILABLE",
+                "PHONE_TRANSPORT",
+                "REGISTERED_DEVICE_NOT_DEVICE",
+            ),
+        ),
+        (
+            module.PhoneTargetUnavailable("opaque target failure"),
+            (
+                "POST_PHONE_TARGET_UNAVAILABLE",
+                "PHONE_TARGET",
+                None,
+            ),
+        ),
+    )
+
+    for error, expected in cases:
+        observed = module._classify_post_operational_unavailable(error)
+        assert (observed.failure_code, observed.failure_domain, observed.failure_phase) == expected
+
+    source = (SCRIPTS / "exercise_phone_reboot.py").read_text(encoding="utf-8")
+    assert "diagnostic = _classify_post_operational_unavailable(exc)" in source
+    assert 'payload["failure_domain"] = diagnostic.failure_domain' in source
+    assert 'payload["failure_phase"] = diagnostic.failure_phase' in source
+    assert "failure_code=diagnostic.failure_code" in source
+
+
+def test_post_operational_bound_reraises_last_machine_readable_transport_failure() -> None:
+    module = load_module()
+    original_observe = module.observe_runtime_operational_health
+    original_monotonic = module.time.monotonic
+    original_sleep = module.time.sleep
+    error = module.phone_target.PhoneTargetDiagnosticFailure(
+        module.phone_target.PhoneFailurePhase.ROOT_SCRIPT_TIMEOUT,
+        "rooted runtime capability unavailable",
+    )
+    ticks = iter((0.0, float(module._POST_OPERATIONAL_BOUND_SECONDS)))
+
+    def observe(serial: str, *, admin_token: str):
+        raise error
+
+    try:
+        module.observe_runtime_operational_health = observe
+        module.time.monotonic = lambda: next(ticks)
+        module.time.sleep = lambda seconds: None
+        try:
+            module._observe_post_operational("registered-phone", admin_token="bounded-token")
+        except module.phone_target.PhoneTargetDiagnosticFailure as exc:
+            assert exc is error
+            assert exc.phase == module.phone_target.PhoneFailurePhase.ROOT_SCRIPT_TIMEOUT
+        else:
+            raise AssertionError("post-operational observation should preserve the last diagnostic failure")
+    finally:
+        module.observe_runtime_operational_health = original_observe
+        module.time.monotonic = original_monotonic
+        module.time.sleep = original_sleep
+
+
 def test_workflow_is_single_ingress_fixed_reboot_and_phone_serialized() -> None:
     source = (WORKFLOWS / "stage4-phone-reboot-exercise.yml").read_text(encoding="utf-8")
     for required in (
