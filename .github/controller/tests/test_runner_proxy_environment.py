@@ -60,16 +60,35 @@ class RunnerProxyEnvironmentTests(unittest.TestCase):
             public=base/'public'; public.mkdir(mode=0o755)
             with self.assertRaises(ValueError): proxy.write_environment(public,'bad')
 
+    def test_preparation_is_a_required_prior_unit_not_same_activation_execstartpre(self):
+        dropin=(HOST/'mobile-proxy-phone-runner-proxy.conf').read_text()
+        prepare=(HOST/'mobile-proxy-runner-proxy-prepare.service').read_text()
+        self.assertIn('Requires=mobile-proxy-runner-proxy-prepare.service',dropin)
+        self.assertIn('After=mobile-proxy-runner-proxy-prepare.service',dropin)
+        self.assertIn('EnvironmentFile=/run/mobile-proxy-runner-proxy/environment',dropin)
+        self.assertNotIn('EnvironmentFile=-',dropin)
+        self.assertNotIn('ExecStartPre=',dropin)
+        self.assertNotIn('ExecStart=',dropin)
+        self.assertIn('Before=mobile-proxy-phone-runner.service',prepare)
+        self.assertIn('Type=oneshot',prepare)
+        self.assertIn('User=root',prepare)
+        self.assertIn('Group=root',prepare)
+        self.assertIn('UMask=0077',prepare)
+        self.assertIn('ExecStart=/usr/bin/python3 -I -B /usr/local/lib/mobile-proxy-runner-proxy/prepare-runner-proxy-environment.py',prepare)
+        self.assertNotIn('RemainAfterExit=',prepare)
+
     def test_installation_does_not_restart_or_change_git_phone_network(self):
         installer=(HOST/'install-runner-proxy.sh').read_text()
         helper=(HOST/'prepare-runner-proxy-environment.py').read_text()
         dropin=(HOST/'mobile-proxy-phone-runner-proxy.conf').read_text()
-        for forbidden in ('systemctl restart','systemctl stop','adb ','usbipd','git config','config.sh','iptables','netsh'):
-            self.assertNotIn(forbidden,installer+helper+dropin)
-        self.assertIn('ExecStartPre=+',dropin)
-        self.assertIn('EnvironmentFile=-/run/mobile-proxy-runner-proxy/environment',dropin)
+        prepare=(HOST/'mobile-proxy-runner-proxy-prepare.service').read_text()
+        combined=installer+helper+dropin+prepare
+        for forbidden in ('systemctl restart','systemctl stop','systemctl start','adb ','usbipd','git config','config.sh','iptables','netsh'):
+            self.assertNotIn(forbidden,combined)
         self.assertIn('cmp -s "$SOURCE_DROPIN" "$DROPIN"',installer)
-        self.assertNotIn('ExecStart=',dropin)
+        self.assertIn('cmp -s "$SOURCE_PREPARE_UNIT" "$INSTALLED_PREPARE_UNIT"',installer)
+        self.assertIn('install -o root -g root -m 0644 "$SOURCE_PREPARE_UNIT" "$INSTALLED_PREPARE_UNIT"',installer)
+        self.assertIn('Path("/etc/systemd/system/mobile-proxy-runner-proxy-prepare.service").unlink(missing_ok=True)',installer)
 
 
 if __name__=='__main__': unittest.main()

@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare service-scoped proxy environment for mobile-proxy phone runner
+Before=mobile-proxy-phone-runner.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/mobile-proxy-runner-proxy/prepare-runner-proxy-environment.py
