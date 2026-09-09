@@ -58,6 +58,21 @@ _PHASE_SEQUENCE = (
     "health_parse_done",
 )
 _ALLOWED_PHASES = frozenset(_PHASE_SEQUENCE)
+_PROCESS_COUNT_TIMEOUT_PHASE = "process_count_timeout"
+_PROCESS_COUNT_NO_READABLE_PROC_PHASE = "process_count_no_readable_proc"
+_PROCESS_COUNT_EXECUTION_FAILED_PHASE = "process_count_execution_failed"
+_ALLOWED_FAILURE_PHASES = _ALLOWED_PHASES | frozenset(
+    {
+        _PROCESS_COUNT_TIMEOUT_PHASE,
+        _PROCESS_COUNT_NO_READABLE_PROC_PHASE,
+        _PROCESS_COUNT_EXECUTION_FAILED_PHASE,
+    }
+)
+_PROCESS_COUNT_FAILURE_BY_RETURN_CODE = {
+    31: (_PROCESS_COUNT_NO_READABLE_PROC_PHASE, "process_count_done"),
+    32: (_PROCESS_COUNT_TIMEOUT_PHASE, "process_count_start"),
+    33: (_PROCESS_COUNT_EXECUTION_FAILED_PHASE, "process_count_start"),
+}
 _PHASE_PREFIX = "stage4_phase="
 _EXPECTED_TUNNEL_OWNER = "first_party_reverse_tunnel"
 _HEALTH_HOST = "127.0.0.1"
@@ -75,7 +90,7 @@ _UNAVAILABLE = "runtime operational observation is unavailable"
 class RuntimeOperationalObservationUnavailable(phone_target.PhoneTargetUnavailable):
     def __init__(self, message: str, *, last_phase: str | None = None) -> None:
         super().__init__(message)
-        if last_phase is not None and last_phase not in _ALLOWED_PHASES:
+        if last_phase is not None and last_phase not in _ALLOWED_FAILURE_PHASES:
             raise ValueError("runtime operational failure phase is not allowlisted")
         self.last_phase = last_phase
 
@@ -267,10 +282,18 @@ STAGE4_PROCESS_COUNT
 )"
 process_count_status="$?"
 if [ "$process_count_status" -ne 0 ]; then
-  if [ "$process_count_status" -eq 26 ]; then
-    printf '{_PHASE_PREFIX}process_count_done\\n'
-  fi
-  exit 21
+  case "$process_count_status" in
+    26)
+      printf '{_PHASE_PREFIX}process_count_done\\n'
+      exit 31
+      ;;
+    124|143)
+      exit 32
+      ;;
+    *)
+      exit 33
+      ;;
+  esac
 fi
 set -- $process_counts
 [ "$#" -eq 4 ] || exit 22
@@ -597,10 +620,38 @@ def observe_runtime_operational_health(
         _operational_script(admin_token),
         timeout=_ROOT_SCRIPT_TIMEOUT_SECONDS,
     )
-    if result.status != "completed" or result.returncode != 0 or result.stderr != b"":
+    transport_failure_phase = phone_target._root_transport_failure_phase(result)
+    if transport_failure_phase is not None:
+        raise phone_target.PhoneTargetDiagnosticFailure(
+            transport_failure_phase,
+            _UNAVAILABLE,
+        )
+    if result.status != "completed":
+        raise phone_target.PhoneTargetDiagnosticFailure(
+            phone_target.PhoneFailurePhase.UNKNOWN,
+            _UNAVAILABLE,
+        )
+    process_failure = _PROCESS_COUNT_FAILURE_BY_RETURN_CODE.get(result.returncode)
+    if process_failure is not None:
+        failure_phase, expected_last_phase = process_failure
+        if _last_allowlisted_phase(result.stdout) != expected_last_phase:
+            raise phone_target.PhoneTargetDiagnosticFailure(
+                phone_target.PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH,
+                _UNAVAILABLE,
+            )
         raise RuntimeOperationalObservationUnavailable(
             _UNAVAILABLE,
-            last_phase=_last_allowlisted_phase(result.stdout),
+            last_phase=failure_phase,
+        )
+    if result.stderr != b"":
+        raise phone_target.PhoneTargetDiagnosticFailure(
+            phone_target.PhoneFailurePhase.ROOT_SCRIPT_PROTOCOL_MISMATCH,
+            _UNAVAILABLE,
+        )
+    if result.returncode != 0:
+        raise phone_target.PhoneTargetDiagnosticFailure(
+            phone_target.PhoneFailurePhase.ROOT_SCRIPT_NONZERO,
+            _UNAVAILABLE,
         )
     phases, payload = _split_phase_markers(result.stdout)
     if phases != _PHASE_SEQUENCE:

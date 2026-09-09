@@ -106,7 +106,8 @@ def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     assert b"readable_processes=0" in process_block
     assert b'[ "$readable_processes" -gt 0 ] || exit 26' in process_block
     assert b'process_count_status="$?"' in process_block
-    assert b'if [ "$process_count_status" -eq 26 ]; then' in process_block
+    assert b'case "$process_count_status" in' in process_block
+    assert b"124|143)" in process_block
     for needle in (
         b'case "$process_args" in *"\n$WATCHDOG_NEEDLE\n"*',
         b'case "$process_args" in *"\n$RUNTIME_SUPERVISOR_NEEDLE\n"*',
@@ -118,7 +119,7 @@ def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     assert b"process_cmdlines_recorded" not in script
 
 
-def test_runtime_health_outer_timeout_retains_only_last_allowlisted_phase() -> None:
+def test_runtime_health_outer_timeout_uses_existing_phone_target_classification() -> None:
     module = load_operational_observer()
     module.phone_target._probe_root_capability = lambda serial: None
     module.phone_target._run_root_script = lambda serial, script, timeout: module.phone_target.RootScriptResult(
@@ -135,19 +136,19 @@ def test_runtime_health_outer_timeout_retains_only_last_allowlisted_phase() -> N
 
     try:
         module.observe_runtime_operational_health("registered-phone", admin_token="safe-token")
-    except module.RuntimeOperationalObservationUnavailable as exc:
+    except module.phone_target.PhoneTargetDiagnosticFailure as exc:
         assert str(exc) == module._UNAVAILABLE
-        assert exc.last_phase == "health_transport_start"
+        assert exc.phase is module.phone_target.PhoneFailurePhase.ROOT_SCRIPT_TIMEOUT
     else:
-        raise AssertionError("outer timeout must fail closed with bounded phase evidence")
+        raise AssertionError("outer timeout must use bounded phone-target transport evidence")
 
 
-def test_runtime_process_count_failure_retains_started_phase() -> None:
+def test_runtime_process_count_failure_retains_bounded_execution_class() -> None:
     module = load_operational_observer()
     module.phone_target._probe_root_capability = lambda serial: None
     module.phone_target._run_root_script = lambda serial, script, timeout: module.phone_target.RootScriptResult(
         status="completed",
-        returncode=21,
+        returncode=33,
         stdout=(
             b"stage4_phase=busybox_selected\n"
             b"stage4_phase=process_count_start\n"
@@ -158,17 +159,17 @@ def test_runtime_process_count_failure_retains_started_phase() -> None:
     try:
         module.observe_runtime_operational_health("registered-phone", admin_token="safe-token")
     except module.RuntimeOperationalObservationUnavailable as exc:
-        assert exc.last_phase == "process_count_start"
+        assert exc.last_phase == "process_count_execution_failed"
     else:
         raise AssertionError("bounded process-count failure must fail closed")
 
 
-def test_runtime_process_count_unreadable_retains_completed_process_phase() -> None:
+def test_runtime_process_count_unreadable_retains_bounded_unreadable_class() -> None:
     module = load_operational_observer()
     module.phone_target._probe_root_capability = lambda serial: None
     module.phone_target._run_root_script = lambda serial, script, timeout: module.phone_target.RootScriptResult(
         status="completed",
-        returncode=21,
+        returncode=31,
         stdout=(
             b"stage4_phase=busybox_selected\n"
             b"stage4_phase=process_count_start\n"
@@ -180,9 +181,9 @@ def test_runtime_process_count_unreadable_retains_completed_process_phase() -> N
     try:
         module.observe_runtime_operational_health("registered-phone", admin_token="safe-token")
     except module.RuntimeOperationalObservationUnavailable as exc:
-        assert exc.last_phase == "process_count_done"
+        assert exc.last_phase == "process_count_no_readable_proc"
     else:
-        raise AssertionError("unreadable process snapshot must retain bounded completed phase")
+        raise AssertionError("unreadable process snapshot must retain bounded failure class")
 
 
 def test_runtime_health_phase_parser_rejects_unallowlisted_or_out_of_order_markers() -> None:
