@@ -286,7 +286,8 @@ jobs:
               raise SystemExit('Stage 4 runtime restart adapter must contain exactly one fixed runtime-supervisor TERM')
           if 'kill -TERM "$host_pid"' in restart_source or 'kill -TERM "$sing_box_pid"' in restart_source:
               raise SystemExit('Stage 4 runtime restart adapter must not terminate child processes directly')
-          if 'printf \'%s\' "${{22}}"' not in restart_source or 'printf \'%s\' "$22"' in restart_source:
+          expected_starttime_source = 'printf \'%s\' "' + '$' + '{{' + '22' + '}}"'
+          if expected_starttime_source not in restart_source or 'printf \'%s\' "$22"' in restart_source:
               raise SystemExit('Stage 4 runtime restart adapter does not encode the exact process starttime field safely')
           for forbidden in (
               '--process', '--signal', '--pid',
