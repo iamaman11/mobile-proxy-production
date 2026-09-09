@@ -244,7 +244,6 @@ def _run_transition(serial: str, *, restore: bool) -> LinkTransition:
         _transition_script(restore=restore),
         timeout=_ROOT_SCRIPT_TIMEOUT_SECONDS,
     )
-    prefix = b"stage4_mismatch=restore" if restore else b"stage4_mismatch=inject"
     refused_line = (
         b"stage4_mismatch=restore_precondition_refused\n"
         if restore
@@ -308,6 +307,18 @@ def _mismatch_condition(snapshot: object) -> dict[str, object]:
         "current_matches_canonical_target": current_matches,
         "exact_files_verified": bool(getattr(runtime, "exact_files_verified", False)),
         "detected": detected,
+    }
+
+
+def _unknown_mismatch_observation() -> dict[str, object]:
+    return {
+        "classification": "UNKNOWN",
+        "apk_exact": None,
+        "runtime_desired": None,
+        "target_release_exists": None,
+        "current_matches_canonical_target": None,
+        "exact_files_verified": None,
+        "detected": False,
     }
 
 
@@ -455,13 +466,22 @@ def exercise(
                 _write(output, payload)
                 return code
 
-            mismatch_snapshot = observe_exact_phone_release(
-                serial=serial,
-                binding_key=binding_key,
-                admitted=admitted,
-                materialized=materialized,
-            )
-            mismatch = _mismatch_condition(mismatch_snapshot)
+            mismatch_snapshot: object | None = None
+            mismatch: dict[str, object] = _unknown_mismatch_observation()
+            mismatch_observation_failed = False
+            try:
+                mismatch_snapshot = observe_exact_phone_release(
+                    serial=serial,
+                    binding_key=binding_key,
+                    admitted=admitted,
+                    materialized=materialized,
+                )
+                mismatch = _mismatch_condition(mismatch_snapshot)
+            except Exception:
+                # The fixed compensating restore below is mandatory once injection
+                # was proven. Observation failure must never strand current in the
+                # intentionally non-canonical-but-equivalent state.
+                mismatch_observation_failed = True
             payload["mismatch_observation"] = mismatch
 
             restore_attempted = True
@@ -500,7 +520,9 @@ def exercise(
                 "operational": _bounded_operational(post_operational),
             }
 
-            if mismatch_snapshot.classification == "UNKNOWN":
+            if mismatch_observation_failed or mismatch_snapshot is None:
+                classification, failure_code = "UNKNOWN", "MISMATCH_OBSERVATION_UNKNOWN"
+            elif getattr(mismatch_snapshot, "classification", "UNKNOWN") == "UNKNOWN":
                 classification, failure_code = "UNKNOWN", "MISMATCH_OBSERVATION_UNKNOWN"
             elif mismatch.get("detected") is not True:
                 classification, failure_code = "FAILED", "MISMATCH_NOT_DETECTED"
