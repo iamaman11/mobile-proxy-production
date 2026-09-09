@@ -12,6 +12,7 @@
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
         "exercise-phone-reboot",
+        "exercise-runtime-mismatch",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release"
