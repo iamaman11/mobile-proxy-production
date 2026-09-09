@@ -80,7 +80,7 @@ def test_runtime_timeout_adapter_supports_modern_and_legacy_busybox() -> None:
     assert b'"$BB_BIN" timeout -t 5 "$BB_BIN" nc' not in script
 
 
-def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
+def test_runtime_process_count_uses_single_shell_nul_aware_proc_snapshot() -> None:
     module = load_operational_observer()
     script = module._operational_script("stage4-admin-token-safe-value")
 
@@ -102,17 +102,23 @@ def test_runtime_process_count_uses_bounded_proc_snapshot_without_ps() -> None:
     assert b" ps " not in process_block
     assert process_block.count(b"for process_dir in /proc/[0-9]*") == 1
     assert b'cmdline_path="$process_dir/cmdline"' in process_block
-    assert b'"$BB_BIN" tr \'\\000\' \'\\n\'' in process_block
+    assert b'"$BB_BIN" tr \'\\000\' \'\\n\'' not in process_block
+    assert b"process_args=" not in process_block
+    assert b"IFS= read -r -d '' process_arg </dev/null" in process_block
+    assert b'[ "$?" -eq 1 ] || exit 27' in process_block
+    assert b'exec 3<"$cmdline_path" 2>/dev/null || continue' in process_block
+    assert b"while IFS= read -r -d '' process_arg <&3; do" in process_block
+    assert b"exec 3<&-" in process_block
     assert b"readable_processes=0" in process_block
     assert b'[ "$readable_processes" -gt 0 ] || exit 26' in process_block
     assert b'process_count_status="$?"' in process_block
     assert b'case "$process_count_status" in' in process_block
     assert b"124|143)" in process_block
     for needle in (
-        b'case "$process_args" in *"\n$WATCHDOG_NEEDLE\n"*',
-        b'case "$process_args" in *"\n$RUNTIME_SUPERVISOR_NEEDLE\n"*',
-        b'case "$process_args" in *"\n$HOST_DAEMON_NEEDLE\n"*',
-        b'case "$process_args" in *"\n$SING_BOX_NEEDLE\n"*',
+        b'"$WATCHDOG_NEEDLE") watchdog_match=1 ;;',
+        b'"$RUNTIME_SUPERVISOR_NEEDLE") runtime_supervisor_match=1 ;;',
+        b'"$HOST_DAEMON_NEEDLE") host_daemon_match=1 ;;',
+        b'"$SING_BOX_NEEDLE") sing_box_match=1 ;;',
     ):
         assert needle in process_block
     assert b"process_ids_recorded" not in script
