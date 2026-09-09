@@ -81,6 +81,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "observe-phone-operational",
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
+        "exercise-phone-reboot",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "observe-runner-transport",
@@ -97,9 +98,15 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "observe-phone-operational",
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
+        "exercise-phone-reboot",
         "reconcile-phone-release",
         "phone-transport-preflight",
         "recover-quarantined-product-release",
+    ]
+    assert targets["phone-production"]["physical_domains"] == [
+        "android-package",
+        "runtime",
+        "device-lifecycle",
     ]
     assert targets["vm-production"]["active"] is False
     assert targets["vm-production"]["allowed_operations"] == ["deploy-product-release"]
@@ -338,6 +345,46 @@ def test_stage4_runtime_restart_route_is_exact_destructive_and_no_retry() -> Non
         raise AssertionError("generic hosted dispatcher accepted destructive runtime restart workflow_call route")
 
 
+def test_stage4_phone_reboot_route_is_exact_destructive_and_no_retry() -> None:
+    route = accepted("/exercise-phone-reboot phone-production v0.1.7")
+    assert route.route_id == "exercise-phone-reboot"
+    assert route.handler == "workflow_call"
+    assert route.workflow == ".github/workflows/stage4-phone-reboot-exercise.yml"
+    assert route.ref == "main"
+    assert route.operation == "exercise-phone-reboot"
+    assert route.operation_class == "RECOVER"
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
+    assert route.read_only is False and route.destructive is True
+    assert route.concurrency_domain == "production-target-phone-production"
+    assert route.ref_policy == "controller-event-sha-exact"
+    assert "semantic" in route.idempotency_policy
+    assert "single-run-attempt" in route.idempotency_policy
+    assert "UNKNOWN" in route.recovery_policy and "no-blind-retry" in route.recovery_policy
+    assert route.target_capability_policy == "phone-production-fixed-phone-reboot-exercise"
+    assert json.loads(route.arguments_json) == {
+        "release": "v0.1.7",
+        "target": "phone-production",
+    }
+    refused("/exercise-phone-reboot phone-production v0.1.8")
+    refused("/exercise-phone-reboot vm-production v0.1.7")
+    refused("/exercise-phone-reboot phone-production v0.1.7 recovery")
+    refused("/exercise-phone-reboot phone-production v0.1.7;echo")
+    refused("/exercise-phone-reboot phone-production v0.1.7\n/deploy phone-production v0.1.7")
+    refused("/exercise-phone-reboot phone-production v0.1.7", run_attempt=2)
+
+    dispatcher = load_dispatcher()
+    try:
+        dispatcher.build_dispatch(
+            "exercise-phone-reboot",
+            '{"release":"v0.1.7","target":"phone-production"}',
+        )
+    except dispatcher.DispatchRefused:
+        pass
+    else:
+        raise AssertionError("generic hosted dispatcher accepted destructive phone reboot workflow_call route")
+
+
 def test_stage4_phone_reconcile_route_is_distinct_target_read_only_control_plane_write() -> None:
     route = accepted("/reconcile-phone-release phone-production v0.1.7")
     assert route.route_id == "reconcile-phone-release"
@@ -465,6 +512,7 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
         ("observe-phone-operational", '{"release":"v0.1.7","target":"phone-production"}'),
         ("exercise-runtime-recovery", '{"release":"v0.1.7","target":"phone-production"}'),
         ("exercise-runtime-restart", '{"release":"v0.1.7","target":"phone-production"}'),
+        ("exercise-phone-reboot", '{"release":"v0.1.7","target":"phone-production"}'),
         ("reconcile-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
         ("observe-runner-transport", '{}'),
         ("deploy-product-release", '{"release":"v0.1.4","target":"phone-production"}'),
@@ -673,6 +721,7 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "needs.route.outputs.route_id == 'observe-phone-operational'",
         "needs.route.outputs.route_id == 'exercise-runtime-recovery'",
         "needs.route.outputs.route_id == 'exercise-runtime-restart'",
+        "needs.route.outputs.route_id == 'exercise-phone-reboot'",
         "needs.route.outputs.route_id == 'reconcile-phone-release'",
         "needs.route.outputs.route_id == 'observe-runner-transport'",
         "needs.route.outputs.operation_class == 'RECONCILE'",
@@ -682,6 +731,7 @@ def test_exactly_one_issue_comment_ingress_and_generic_safe_dispatch_adapter() -
         "./.github/workflows/phone-operational-observation.yml",
         "./.github/workflows/stage4-runtime-recovery-exercise.yml",
         "./.github/workflows/stage4-runtime-restart-exercise.yml",
+        "./.github/workflows/stage4-phone-reboot-exercise.yml",
         "./.github/workflows/phone-release-reconcile.yml",
         "./.github/workflows/runner-transport-observation.yml",
         "./.github/workflows/release-deployment.yml",

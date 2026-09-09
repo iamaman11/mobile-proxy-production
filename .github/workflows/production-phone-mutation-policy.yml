@@ -34,11 +34,13 @@ jobs:
           workflow = (workflows / 'release-deployment.yml').read_text(encoding='utf-8')
           lifecycle_workflow = (workflows / 'stage4-runtime-recovery-exercise.yml').read_text(encoding='utf-8')
           restart_workflow = (workflows / 'stage4-runtime-restart-exercise.yml').read_text(encoding='utf-8')
+          reboot_workflow = (workflows / 'stage4-phone-reboot-exercise.yml').read_text(encoding='utf-8')
           router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
           registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
           runtime = Path('.github/scripts/run_phone_release_deployment.py')
           lifecycle_runtime = Path('.github/scripts/exercise_runtime_recovery.py')
           restart_runtime = Path('.github/scripts/exercise_runtime_restart.py')
+          reboot_runtime = Path('.github/scripts/exercise_phone_reboot.py')
           apk_adapter_path = Path('.github/controller/android_target.py')
           composite_adapter_path = Path('.github/controller/phone_target.py')
           apk_adapter = apk_adapter_path.read_text(encoding='utf-8')
@@ -176,6 +178,49 @@ jobs:
               if restart_re.fullmatch(command) is not None:
                   raise SystemExit('Stage 4 runtime restart syntax admitted a forbidden variant')
 
+          reboot_routes = [
+              item for item in registry.get('routes', [])
+              if isinstance(item, dict) and item.get('id') == 'exercise-phone-reboot' and item.get('enabled') is True
+          ]
+          if len(reboot_routes) != 1:
+              raise SystemExit('exactly one enabled Stage 4 phone reboot exercise route is required')
+          reboot = reboot_routes[0]
+          reboot_expected = {
+              'handler': 'workflow_call',
+              'workflow': '.github/workflows/stage4-phone-reboot-exercise.yml',
+              'ref': 'main',
+              'operation': 'exercise-phone-reboot',
+              'operation_class': 'RECOVER',
+              'read_only': False,
+              'destructive': True,
+              'allowed_targets': ['phone-production'],
+              'physical_domains': ['device-lifecycle'],
+              'authority_policy': 'private-issue1-owner+controller-main-exact+stage4-v017-fixed-phone-reboot-exercise',
+              'semantic_identity_policy': 'source-comment-id+command-arguments',
+              'idempotency_policy': 'single-run-attempt+single-semantic-command-attempt+no-automatic-retry',
+              'concurrency_domain': 'production-target-phone-production',
+              'recovery_policy': 'UNKNOWN-no-blind-retry-owner-checkpoint-required',
+              'evidence_policy': 'LIFECYCLE_TERMINAL+EXACT_RELEASE_POSTCONDITION+OPERATIONAL_POSTCONDITION',
+              'target_capability_policy': 'phone-production-fixed-phone-reboot-exercise',
+          }
+          for field, expected in reboot_expected.items():
+              if reboot.get(field) != expected:
+                  raise SystemExit(f'Stage 4 phone reboot route contract drifted: {field}')
+          reboot_pattern = r'^/exercise-phone-reboot (?P<target>phone-production) (?P<release>v0\.1\.7)$'
+          if reboot.get('pattern') != reboot_pattern:
+              raise SystemExit('Stage 4 phone reboot command syntax drifted')
+          reboot_re = re.compile(reboot_pattern)
+          if reboot_re.fullmatch('/exercise-phone-reboot phone-production v0.1.7') is None:
+              raise SystemExit('Stage 4 phone reboot exact command is not admitted')
+          for command in (
+              '/exercise-phone-reboot phone-production v0.1.8',
+              '/exercise-phone-reboot vm-production v0.1.7',
+              '/exercise-phone-reboot phone-production v0.1.7 recovery',
+              '/exercise-phone-reboot phone-production v0.1.7;echo',
+          ):
+              if reboot_re.fullmatch(command) is not None:
+                  raise SystemExit('Stage 4 phone reboot syntax admitted a forbidden variant')
+
           required = (
               'runs-on: [self-hosted, Linux, X64, android-production]',
               'group: production-target-phone-production', 'cancel-in-progress: false',
@@ -251,6 +296,40 @@ jobs:
               if forbidden in restart_workflow:
                   raise SystemExit('Stage 4 runtime restart workflow gained forbidden capability: ' + forbidden)
 
+          reboot_required = (
+              'workflow_call:',
+              "command != '/exercise-phone-reboot phone-production v0.1.7'",
+              'runs-on: [self-hosted, Linux, X64, android-production]',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
+              '.github/scripts/exercise_phone_reboot.py',
+              'stage4-phone-reboot-exercise.v1',
+              'STAGE4_PHONE_REBOOT_ACCEPTED classification=REBOOTED',
+              'if-no-files-found: error',
+          )
+          reboot_missing = [item for item in reboot_required if item not in reboot_workflow]
+          if reboot_missing:
+              raise SystemExit('Stage 4 phone reboot workflow boundary incomplete: ' + ', '.join(reboot_missing))
+          for forbidden in (
+              'workflow_dispatch:',
+              'issue_comment:',
+              'run_phone_release_deployment.py',
+              'dispatch_release_once',
+              'dispatch_install_once',
+              'systemctl restart',
+              'observe-runner-transport',
+              'phone-transport-preflight',
+              'phone-runtime-recovery.yml',
+              'service.sh',
+              'adb install',
+              'adb push',
+              '/deploy ',
+              '/retry-deploy ',
+          ):
+              if forbidden in reboot_workflow:
+                  raise SystemExit('Stage 4 phone reboot workflow gained forbidden capability: ' + forbidden)
+
           lifecycle_source = lifecycle_runtime.read_text(encoding='utf-8')
           lifecycle_tree = ast.parse(lifecycle_source)
           root_mutation_calls = [
@@ -298,12 +377,39 @@ jobs:
               if forbidden in restart_source:
                   raise SystemExit('Stage 4 runtime restart adapter gained forbidden generic/mutation surface: ' + forbidden)
 
+          reboot_source = reboot_runtime.read_text(encoding='utf-8')
+          reboot_tree = ast.parse(reboot_source)
+          reboot_root_mutation_calls = [
+              node for node in ast.walk(reboot_tree)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and node.func.attr == '_run_root_script'
+          ]
+          if len(reboot_root_mutation_calls) != 1:
+              raise SystemExit('Stage 4 phone reboot adapter must contain exactly one root mutation callsite')
+          if reboot_source.count('setprop sys.powerctl reboot') != 1:
+              raise SystemExit('Stage 4 phone reboot adapter must contain exactly one fixed Android reboot primitive')
+          if "nohup sh -c 'sleep 2; setprop sys.powerctl reboot'" not in reboot_source:
+              raise SystemExit('Stage 4 phone reboot adapter lost deterministic delayed dispatch acknowledgment')
+          if reboot_source.count('phone_target._read(') != 2:
+              raise SystemExit('Stage 4 phone reboot adapter boot proof must remain two read-only observations')
+          for forbidden in (
+              '--reboot-mode', '--reason', '--selector', '--process', '--signal', '--pid',
+              'dispatch_release_once', 'dispatch_install_once',
+              'subprocess.run', 'subprocess.Popen',
+              'systemctl', 'runner_transport', 'service.sh',
+          ):
+              if forbidden in reboot_source:
+                  raise SystemExit('Stage 4 phone reboot adapter gained forbidden generic/mutation surface: ' + forbidden)
+
           if workflow.count('group: production-target-phone-production') < 1:
               raise SystemExit('Product Release phone transaction lost target serialization')
           if lifecycle_workflow.count('group: production-target-phone-production') != 1:
               raise SystemExit('Stage 4 lifecycle exercise must share the exact production phone serialization domain')
           if restart_workflow.count('group: production-target-phone-production') != 1:
               raise SystemExit('Stage 4 runtime restart exercise must share the exact production phone serialization domain')
+          if reboot_workflow.count('group: production-target-phone-production') != 1:
+              raise SystemExit('Stage 4 phone reboot exercise must share the exact production phone serialization domain')
 
           adapter_tree = ast.parse(apk_adapter)
           install_calls = []
@@ -360,9 +466,11 @@ jobs:
               "needs.route.outputs.route_id == 'deploy-product-release'", "needs.route.outputs.operation == 'deploy-product-release'",
               "needs.route.outputs.route_id == 'exercise-runtime-recovery'", "needs.route.outputs.operation == 'exercise-runtime-recovery'",
               "needs.route.outputs.route_id == 'exercise-runtime-restart'", "needs.route.outputs.operation == 'exercise-runtime-restart'",
+              "needs.route.outputs.route_id == 'exercise-phone-reboot'", "needs.route.outputs.operation == 'exercise-phone-reboot'",
               "needs.route.outputs.destructive == 'true'", 'uses: ./.github/workflows/release-deployment.yml',
               'uses: ./.github/workflows/stage4-runtime-recovery-exercise.yml',
-              'uses: ./.github/workflows/stage4-runtime-restart-exercise.yml', 'secrets: inherit',
+              'uses: ./.github/workflows/stage4-runtime-restart-exercise.yml',
+              'uses: ./.github/workflows/stage4-phone-reboot-exercise.yml', 'secrets: inherit',
           )
           router_missing = [item for item in router_required if item not in router]
           if router_missing:
@@ -373,6 +481,8 @@ jobs:
               raise SystemExit('lifecycle mutation bypassed the declarative command classifier')
           if "startsWith(github.event.comment.body, '/exercise-runtime-restart ')" in router:
               raise SystemExit('runtime restart mutation bypassed the declarative command classifier')
+          if "startsWith(github.event.comment.body, '/exercise-phone-reboot ')" in router:
+              raise SystemExit('phone reboot mutation bypassed the declarative command classifier')
 
           recovery = Path('.github/controller/deployment_state_machine.py').read_text(encoding='utf-8')
           if 'def recover_unknown' not in recovery or 'raise TransitionError("recovery is strictly read-only")' not in recovery:
@@ -383,5 +493,6 @@ jobs:
           print('deployment_registry_gate=true')
           print('fixed_lifecycle_registry_gate=true')
           print('fixed_runtime_restart_registry_gate=true')
+          print('fixed_phone_reboot_registry_gate=true')
           print('shared_phone_serialization=true')
           PY
