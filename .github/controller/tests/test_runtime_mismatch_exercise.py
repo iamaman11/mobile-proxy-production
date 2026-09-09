@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,7 +56,7 @@ def test_fixed_scripts_only_switch_current_between_equivalent_v017_paths() -> No
         assert forbidden not in restore
 
 
-def test_transition_protocol_is_typed_and_fail_closed(monkeypatch) -> None:
+def test_transition_protocol_is_typed_and_fail_closed() -> None:
     module = load_module()
 
     def result(*, status="completed", returncode=0, stdout=b"", stderr=b""):
@@ -75,51 +76,51 @@ def test_transition_protocol_is_typed_and_fail_closed(monkeypatch) -> None:
         b"stage4_mismatch=canonical_current_restored\n"
     )
 
-    monkeypatch.setattr(module.phone_target, "_run_root_script", lambda *a, **k: result(stdout=inject_ok))
-    injected = module._run_transition("serial", restore=False)
+    with patch.object(module.phone_target, "_run_root_script", lambda *a, **k: result(stdout=inject_ok)):
+        injected = module._run_transition("serial", restore=False)
     assert injected.outcome == "INJECTED"
     assert injected.failure_code is None
     assert injected.dispatched is True and injected.verified is True
 
-    monkeypatch.setattr(module.phone_target, "_run_root_script", lambda *a, **k: result(stdout=restore_ok))
-    restored = module._run_transition("serial", restore=True)
+    with patch.object(module.phone_target, "_run_root_script", lambda *a, **k: result(stdout=restore_ok)):
+        restored = module._run_transition("serial", restore=True)
     assert restored.outcome == "RESTORED"
     assert restored.failure_code is None
     assert restored.dispatched is True and restored.verified is True
 
-    monkeypatch.setattr(
+    with patch.object(
         module.phone_target,
         "_run_root_script",
         lambda *a, **k: result(returncode=40, stdout=b"stage4_mismatch=inject_precondition_refused\n"),
-    )
-    refused = module._run_transition("serial", restore=False)
+    ):
+        refused = module._run_transition("serial", restore=False)
     assert refused.outcome == "REFUSED"
     assert refused.dispatched is False and refused.verified is False
 
-    monkeypatch.setattr(
+    with patch.object(
         module.phone_target,
         "_run_root_script",
         lambda *a, **k: result(status="timeout", returncode=None),
-    )
-    unknown = module._run_transition("serial", restore=False)
+    ):
+        unknown = module._run_transition("serial", restore=False)
     assert unknown.outcome == "UNKNOWN"
     assert unknown.dispatched is None and unknown.verified is None
 
-    monkeypatch.setattr(
+    with patch.object(
         module.phone_target,
         "_run_root_script",
         lambda *a, **k: result(returncode=41, stdout=b"stage4_mismatch=inject_dispatched\n"),
-    )
-    ambiguous = module._run_transition("serial", restore=False)
+    ):
+        ambiguous = module._run_transition("serial", restore=False)
     assert ambiguous.outcome == "UNKNOWN"
     assert ambiguous.dispatched is True and ambiguous.verified is None
 
-    monkeypatch.setattr(
+    with patch.object(
         module.phone_target,
         "_run_root_script",
         lambda *a, **k: result(stdout=inject_ok, stderr=b"unexpected"),
-    )
-    protocol = module._run_transition("serial", restore=False)
+    ):
+        protocol = module._run_transition("serial", restore=False)
     assert protocol.outcome == "UNKNOWN"
     assert protocol.failure_code == "LINK_TRANSITION_PROTOCOL_MISMATCH"
 
@@ -169,6 +170,19 @@ def test_mismatch_detection_requires_real_degraded_release_observation() -> None
     assert safe["classification"] == "UNKNOWN"
     assert safe["detected"] is False
     assert safe["current_matches_canonical_target"] is None
+
+
+def test_proven_injection_restores_before_any_postcondition_after_observer_exception() -> None:
+    source = (SCRIPTS / "exercise_runtime_mismatch.py").read_text(encoding="utf-8")
+    start = source.index("mismatch_snapshot: object | None = None")
+    observer = source.index("mismatch_snapshot = observe_exact_phone_release(", start)
+    exception = source.index("except Exception:", observer)
+    failed_marker = source.index("mismatch_observation_failed = True", exception)
+    restore = source.index("_run_transition(serial, restore=True)", failed_marker)
+    post = source.index("post_release = observe_exact_phone_release(", restore)
+    assert start < observer < exception < failed_marker < restore < post
+    assert "Observation failure must never strand current" in source[exception:restore]
+    assert source.count("_run_transition(serial, restore=True)") == 1
 
 
 def test_adapter_has_only_two_fixed_root_transition_calls_and_no_generic_mutator() -> None:
@@ -228,3 +242,22 @@ def test_workflow_is_single_ingress_reusable_bounded_and_preserves_evidence() ->
         "/retry-deploy ",
     ):
         assert forbidden not in source
+
+
+def main() -> int:
+    tests = (
+        test_fixed_scripts_only_switch_current_between_equivalent_v017_paths,
+        test_transition_protocol_is_typed_and_fail_closed,
+        test_mismatch_detection_requires_real_degraded_release_observation,
+        test_proven_injection_restores_before_any_postcondition_after_observer_exception,
+        test_adapter_has_only_two_fixed_root_transition_calls_and_no_generic_mutator,
+        test_workflow_is_single_ingress_reusable_bounded_and_preserves_evidence,
+    )
+    for test in tests:
+        test()
+    print(f"RUNTIME_MISMATCH_EXERCISE_TESTS_OK count={len(tests)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
