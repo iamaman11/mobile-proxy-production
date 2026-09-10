@@ -82,6 +82,22 @@ def _matching_recovery_records(
     return intents, terminals
 
 
+def _request_recovery_records(
+    evidence: IssueEvidenceStore,
+    *,
+    request_id: str,
+) -> tuple[list[object], list[object]]:
+    intents = [
+        item for item in evidence.list_records(RECOVERY_INTENT_HEADING)
+        if item.payload.get("quarantined_request_id") == request_id
+    ]
+    terminals = [
+        item for item in evidence.list_records(RECOVERY_TERMINAL_HEADING)
+        if item.payload.get("quarantined_request_id") == request_id
+    ]
+    return intents, terminals
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
@@ -98,7 +114,7 @@ def main() -> int:
 
     admitted = resolve_release(tag=args.release, target=args.target)
     release_id = admitted.identity.release_id
-    if not isinstance(release_id, int) or release_id <= 0:
+    if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
         raise QuarantineRecoveryError("immutable Product Release id is unavailable")
 
     evidence = IssueEvidenceStore(os.environ.get("GITHUB_TOKEN", ""))
@@ -131,6 +147,13 @@ def main() -> int:
         raise QuarantineRecoveryError("quarantined deployment intent conflicts with immutable Product Release identity")
     if not _terminal_matches_release_identity(original_terminal.payload, admitted.identity, target=args.target):
         raise QuarantineRecoveryError("quarantined deployment terminal conflicts with immutable Product Release identity")
+
+    existing_request_intents, existing_request_terminals = _request_recovery_records(
+        evidence,
+        request_id=args.quarantined_request_id,
+    )
+    if existing_request_intents or existing_request_terminals:
+        raise QuarantineRecoveryError("quarantined request already has recovery lineage; new activation requires a separate reconciled authority")
 
     parent_terminal_ref = original_terminal.ref
     semantic_id = recovery_semantic_id(
