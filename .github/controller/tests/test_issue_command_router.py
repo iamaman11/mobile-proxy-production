@@ -562,7 +562,7 @@ def test_generic_dispatcher_resolves_only_registry_read_only_routes() -> None:
         ("reconcile-phone-release", '{"release":"v0.1.7","target":"phone-production"}'),
         ("observe-runner-transport", '{}'),
         ("deploy-product-release", '{"release":"v0.1.4","target":"phone-production"}'),
-        ("recover-quarantined-product-release", '{"quarantined_request_id":"req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7","release":"v0.1.7","target":"phone-production"}'),
+        ("recover-quarantined-product-release", '{"quarantined_request_id":"req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a","release":"v0.1.8","target":"phone-production"}'),
     ):
         try:
             dispatcher.build_dispatch(route_id, arguments)
@@ -620,28 +620,31 @@ def test_runner_tooling_route_is_exact_and_bounded() -> None:
 
 
 def test_quarantine_recovery_route_is_exact_and_destructive() -> None:
-    request_id = "req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7"
-    route = accepted(f"/recover-quarantined phone-production v0.1.7 {request_id}")
+    request_id = "req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a"
+    old_request_id = "req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7"
+    route = accepted(f"/recover-quarantined phone-production v0.1.8 {request_id}")
     assert route.route_id == "recover-quarantined-product-release"
     assert route.handler == "workflow_call"
     assert route.workflow == ".github/workflows/quarantined-release-recovery.yml"
     assert route.operation == "recover-quarantined-product-release"
     assert route.operation_class == "RECOVER"
     assert route.target == "phone-production"
-    assert route.release_tag == "v0.1.7"
+    assert route.release_tag == "v0.1.8"
     assert route.destructive is True and route.read_only is False
-    assert "semantic" in route.idempotency_policy
+    assert route.idempotency_policy == "single-run-attempt+durable-semantic-quarantine-recovery-ledger+no-repeat-after-lineage"
+    assert route.semantic_identity_policy == "quarantined-deployment-terminal+command-arguments"
     assert "UNKNOWN" in route.recovery_policy and "no-blind-retry" in route.recovery_policy
     assert json.loads(route.arguments_json) == {
         "quarantined_request_id": request_id,
-        "release": "v0.1.7",
+        "release": "v0.1.8",
         "target": "phone-production",
     }
-    refused(f"/recover-quarantined phone-production v0.1.8 {request_id}")
-    refused(f"/recover-quarantined vm-production v0.1.7 {request_id}")
-    refused("/recover-quarantined phone-production v0.1.7 req-sha256:" + "0" * 64)
-    refused(f"/recover-quarantined phone-production v0.1.7 {request_id} extra")
-    refused(f"/recover-quarantined phone-production v0.1.7 {request_id}", run_attempt=2)
+    refused(f"/recover-quarantined phone-production v0.1.7 {request_id}")
+    refused(f"/recover-quarantined phone-production v0.1.7 {old_request_id}")
+    refused(f"/recover-quarantined vm-production v0.1.8 {request_id}")
+    refused("/recover-quarantined phone-production v0.1.8 req-sha256:" + "0" * 64)
+    refused(f"/recover-quarantined phone-production v0.1.8 {request_id} extra")
+    refused(f"/recover-quarantined phone-production v0.1.8 {request_id}", run_attempt=2)
 
 
 def test_repository_issue_author_sha_and_clean_line_are_fail_closed() -> None:
