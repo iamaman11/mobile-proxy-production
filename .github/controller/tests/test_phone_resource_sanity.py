@@ -217,7 +217,7 @@ def test_adapter_writes_secret_safe_measured_and_unknown_evidence() -> None:
         text = (root / "measured.json").read_text(encoding="utf-8")
         assert "registered-secret" not in text and "admin-secret" not in text
 
-        failure = controller.PhoneResourceSanityUnavailable("RESOURCE_MEMORY_SAMPLE_INVALID")
+        failure = adapter.PhoneResourceSanityUnavailable("RESOURCE_MEMORY_SAMPLE_INVALID")
         with patch.object(adapter, "observe_phone_resource_sanity", side_effect=failure):
             payload = adapter.observe(
                 target="phone-production",
