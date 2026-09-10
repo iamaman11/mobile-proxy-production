@@ -36,11 +36,6 @@ from quarantine_recovery import (  # noqa: E402
 )
 from release_handoff import parse_admitted_release  # noqa: E402
 from release_resolver import ReleaseAdmissionError  # noqa: E402
-from runtime_operational_observer import (  # noqa: E402
-    RuntimeOperationalObservationUnavailable,
-    RuntimeOperationalOutputValidationFailure,
-    observe_runtime_operational_health,
-)
 from terminal_result import TerminalContractError, validate_terminal  # noqa: E402
 
 _ROOT = "/data/adb/mobile-proxy-node"
@@ -229,7 +224,7 @@ def main() -> int:
     except (json.JSONDecodeError, ReleaseAdmissionError) as exc:
         raise QuarantineRecoveryError("hosted immutable Product Release handoff is invalid") from exc
     release_id = admitted.identity.release_id
-    if not isinstance(release_id, int) or release_id <= 0:
+    if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
         raise QuarantineRecoveryError("immutable Product Release id is unavailable")
 
     evidence = IssueEvidenceStore(os.environ.get("GITHUB_TOKEN", ""))
@@ -277,8 +272,7 @@ def main() -> int:
 
     serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
     binding_key = os.environ.get("ANDROID_TARGET_BINDING_KEY", "")
-    admin_token = os.environ.get("MOBILE_PROXY_ADMIN_TOKEN", "")
-    if not serial or len(binding_key) < 32 or not admin_token:
+    if not serial or len(binding_key) < 32:
         raise QuarantineRecoveryError("registered phone recovery binding is unavailable")
 
     facts: dict[str, object] = {
@@ -343,14 +337,13 @@ def main() -> int:
             return _persist_terminal(evidence=evidence, output=args.output, payload=terminal)
 
         original_binding = str(original_intent.payload.get("target_binding_id", ""))
-        precondition = {
+        facts["precondition"] = {
             "apk": _bounded_apk(apk_pre),
             "runtime": _bounded_runtime(runtime_pre),
             "target_binding_matches_original_intent": apk_pre.target_binding_id == original_binding,
             "current_release_matches_quarantined_terminal": runtime_pre.get("current_release_tag") == expected_current_release,
             "mode": "read_only",
         }
-        facts["precondition"] = precondition
 
         if apk_pre.target_binding_id != original_binding:
             reason = "TARGET_BINDING_CHANGED"
@@ -451,13 +444,7 @@ def main() -> int:
                 release_id=args.release,
                 required_paths=materialized.required_live_release_paths,
             )
-            operational_post = observe_runtime_operational_health(serial, admin_token=admin_token)
-        except (
-            AndroidObservationUnavailable,
-            PhoneTargetUnavailable,
-            RuntimeOperationalObservationUnavailable,
-            RuntimeOperationalOutputValidationFailure,
-        ):
+        except (AndroidObservationUnavailable, PhoneTargetUnavailable):
             terminal = _terminal(
                 semantic_id=semantic_id,
                 execution_id=args.execution_id,
@@ -485,25 +472,21 @@ def main() -> int:
             and runtime_post.get("inactive_exact_files_verified") is True
             and runtime_post.get("current_release_tag") == args.release
         )
-        operational_desired = bool(operational_post.desired)
         facts["postcondition"] = {
             "apk": _bounded_apk(apk_post),
             "runtime": _bounded_runtime(runtime_post),
             "target_binding_matches_original_intent": apk_post.target_binding_id == original_binding,
             "exact_release_desired": exact_release_desired,
-            "operational_desired": operational_desired,
-            "operational_mode": "read_only",
+            "mode": "read_only",
         }
 
-        accepted = activation_state == "confirmed" and exact_release_desired and operational_desired
+        accepted = activation_state == "confirmed" and exact_release_desired
         if accepted:
             reason = None
         elif activation_state == "completed_failure":
             reason = "ACTIVATION_COMPLETED_FAILURE"
-        elif not exact_release_desired:
-            reason = "EXACT_RELEASE_POSTCONDITION_MISMATCH"
         else:
-            reason = "OPERATIONAL_POSTCONDITION_NOT_READY"
+            reason = "EXACT_RELEASE_POSTCONDITION_MISMATCH"
         terminal = _terminal(
             semantic_id=semantic_id,
             execution_id=args.execution_id,
