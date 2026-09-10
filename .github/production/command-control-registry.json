@@ -186,7 +186,7 @@
       "handler": "dispatch_workflow",
       "id": "observe-phone-resource-sanity",
       "idempotency_policy": "single-run-attempt",
-      "operation": "observe-phone-operational",
+      "operation": "observe-phone-resource-sanity",
       "operation_class": "OBSERVE",
       "pattern": "^/observe-phone-resource-sanity (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
       "physical_domains": [],
@@ -198,7 +198,7 @@
       "requires_release": true,
       "requires_vm": false,
       "semantic_identity_policy": "command-arguments",
-      "target_capability_policy": "phone-production-operational-observation",
+      "target_capability_policy": "phone-production-resource-sanity-observation",
       "workflow": ".github/workflows/phone-resource-sanity-observation.yml"
     },
     {
