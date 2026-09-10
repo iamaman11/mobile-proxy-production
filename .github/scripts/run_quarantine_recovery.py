@@ -12,54 +12,45 @@ from typing import Mapping
 CONTROLLER = Path(__file__).resolve().parents[1] / "controller"
 sys.path.insert(0, str(CONTROLLER))
 
-from android_target import AndroidArtifactRefused, AndroidObservationUnavailable, observe  # noqa: E402
-from durable_release_identity import payload_matches_release_identity  # noqa: E402
+from android_target import AndroidObservationUnavailable, observe  # noqa: E402
+from durable_release_identity import durable_release_identity, payload_matches_release_identity  # noqa: E402
 from evidence_store import EvidenceError, EvidenceWriteAmbiguous, IssueEvidenceStore, evidence_identity  # noqa: E402
+from phone_release_state import prepare_verified_release_runtime  # noqa: E402
 from phone_runtime import PhoneRuntimeRefused  # noqa: E402
-from phone_target import (  # noqa: E402
-    PhoneTargetMutationOutcomeUnknown,
-    PhoneTargetUnavailable,
-    _activate,
-    _files,
-    _run_root_script,
-)
+from phone_target import PhoneTargetMutationOutcomeUnknown, PhoneTargetUnavailable, _activate  # noqa: E402
+from quarantine_phone_observer import observe_exact_inactive_runtime  # noqa: E402
 from quarantine_recovery import (  # noqa: E402
-    QUARANTINED_INTENT_REF,
-    QUARANTINED_REQUEST_ID,
-    QUARANTINED_TERMINAL_REF,
     RECOVERY_INTENT_HEADING,
     RECOVERY_INTENT_SCHEMA,
     RECOVERY_OPERATION,
-    RECOVERY_RECONCILED_REFUSED_TERMINAL_REF,
-    RECOVERY_RELEASE,
-    RECOVERY_RELEASE_ID,
     RECOVERY_TARGET,
     RECOVERY_TERMINAL_HEADING,
     RECOVERY_TERMINAL_SCHEMA,
-    RECOVERY_UNKNOWN_TERMINAL_REF,
     QuarantineRecoveryError,
+    quarantined_current_release,
     recovery_semantic_id,
+    validate_quarantined_deployment_intent,
+    validate_quarantined_deployment_terminal,
     validate_recovery_intent,
     validate_recovery_terminal,
 )
 from release_handoff import parse_admitted_release  # noqa: E402
 from release_resolver import ReleaseAdmissionError  # noqa: E402
-from run_phone_release_deployment import (  # noqa: E402
-    _materialize_verified_release_apk,
-    _materialize_verified_release_runtime,
+from runtime_operational_observer import (  # noqa: E402
+    RuntimeOperationalObservationUnavailable,
+    RuntimeOperationalOutputValidationFailure,
+    observe_runtime_operational_health,
 )
 from terminal_result import TerminalContractError, validate_terminal  # noqa: E402
 
 _ROOT = "/data/adb/mobile-proxy-node"
-
-
-def _semantic(parent: str | None = None) -> str:
-    return recovery_semantic_id(
-        target=RECOVERY_TARGET,
-        release=RECOVERY_RELEASE,
-        quarantined_request_id=QUARANTINED_REQUEST_ID,
-        parent_recovery_terminal_ref=parent,
-    )
+_TERMINAL_TOP_LEVEL_RELEASE_FIELDS = (
+    "target",
+    "product_release",
+    "release_id",
+    "release_source_sha",
+    "artifact_digest",
+)
 
 
 def _records(evidence: IssueEvidenceStore, heading: str, semantic_id: str):
@@ -108,103 +99,68 @@ def _persist_exact(
             raise QuarantineRecoveryError("recovery terminal write remains ambiguous after bounded reconciliation") from second_error
 
 
-def _exact_reconciled_state(payload: Mapping[str, object]) -> bool:
-    facts = payload.get("facts")
-    post = facts.get("postcondition") if isinstance(facts, Mapping) else None
-    if not isinstance(post, Mapping):
+def _terminal_matches_release_identity(payload: Mapping[str, object], identity: object, *, target: str) -> bool:
+    expected = durable_release_identity(identity, target=target)
+    if any(payload.get(field) != expected[field] for field in _TERMINAL_TOP_LEVEL_RELEASE_FIELDS):
         return False
-    apk = post.get("apk")
-    runtime = post.get("runtime")
+    facts = payload.get("facts")
+    release_admission = facts.get("release_admission") if isinstance(facts, Mapping) else None
     return bool(
-        isinstance(apk, Mapping)
-        and apk.get("desired") is True
-        and apk.get("exact_artifact_verified") is True
-        and isinstance(runtime, Mapping)
-        and runtime.get("target_release_exists") is True
-        and runtime.get("inactive_exact_files_verified") is True
-        and runtime.get("mismatch_count") == 0
-        and runtime.get("current_relation") == "other-managed"
-        and post.get("target_binding_matches_original_intent") is True
+        isinstance(release_admission, Mapping)
+        and payload_matches_release_identity(release_admission, identity, target=target)
     )
 
 
-def _validated_parent_recovery(evidence: IssueEvidenceStore):
-    reconciliation_id = _semantic(RECOVERY_UNKNOWN_TERMINAL_REF)
-    if _existing_unique(evidence, RECOVERY_INTENT_HEADING, reconciliation_id) is not None:
-        raise QuarantineRecoveryError("read-only reconciliation unexpectedly has a mutation intent")
-    parent = _existing_unique(evidence, RECOVERY_TERMINAL_HEADING, reconciliation_id)
-    if parent is None or parent.ref != RECOVERY_RECONCILED_REFUSED_TERMINAL_REF:
-        raise QuarantineRecoveryError("exact reconciled Stage 3 parent is unavailable under target lock")
-    validate_recovery_terminal(parent.payload)
-    if (
-        parent.payload.get("parent_recovery_terminal_ref") != RECOVERY_UNKNOWN_TERMINAL_REF
-        or parent.payload.get("state") != "REFUSED"
-        or parent.payload.get("mutation_performed") is not False
-        or parent.payload.get("postcondition_verified") is not True
-        or parent.payload.get("recovery_intent_ref") is not None
-        or not _exact_reconciled_state(parent.payload)
-    ):
-        raise QuarantineRecoveryError("reconciled Stage 3 parent is not the exact known safe state")
-    return parent
-
-
-def _root_runtime_observation(
-    *, serial: str, release_root: Path, release_id: str, required_paths: tuple[str, ...]
-) -> dict[str, object]:
-    files = _files(release_root, required_paths)
-    target = f"{_ROOT}/releases/{release_id}"
-    script_lines = [
-        "set -eu",
-        f"ROOT='{_ROOT}'",
-        f"TARGET='{target}'",
-        "if [ -d \"$TARGET\" ]; then echo target=present; else echo target=absent; fi",
-        "if [ -L \"$ROOT/current\" ]; then printf 'current='; readlink \"$ROOT/current\"; elif [ -e \"$ROOT/current\" ]; then echo current=invalid; else echo current=absent; fi",
-        "command -v sha256sum >/dev/null",
-    ]
-    for index, (relative, _local, _expected) in enumerate(files):
-        remote = f"{target}/{relative}"
-        script_lines.append(
-            f"if [ -f '{remote}' ]; then printf 'h{index}='; sha256sum '{remote}' | awk '{{print $1}}'; else echo 'h{index}=missing'; fi"
-        )
-    result = _run_root_script(serial, ("\n".join(script_lines) + "\n").encode("utf-8"), timeout=60)
-    if result.status != "completed" or result.returncode != 0 or result.stderr:
-        raise PhoneTargetUnavailable("rooted inactive runtime observation failed")
-    try:
-        lines = result.stdout.decode("utf-8").splitlines()
-    except UnicodeDecodeError as exc:
-        raise PhoneTargetUnavailable("rooted inactive runtime observation is malformed") from exc
-    values: dict[str, str] = {}
-    for line in lines:
-        key, sep, value = line.strip().partition("=")
-        if sep and key not in values:
-            values[key] = value
-    if values.get("target") not in {"present", "absent"} or "current" not in values:
-        raise PhoneTargetUnavailable("rooted inactive runtime observation is malformed")
-    exists = values["target"] == "present"
-    exact = exists and all(
-        values.get(f"h{index}") == expected
-        for index, (_relative, _local, expected) in enumerate(files)
-    )
-    current_raw = values["current"]
-    current = None if current_raw == "absent" else current_raw
-    current_managed = isinstance(current, str) and current.startswith(f"{_ROOT}/releases/")
-    desired = exact and current == target
+def _bounded_runtime(value: Mapping[str, object]) -> dict[str, object]:
     return {
-        "mode": "read_only",
-        "target_release": target,
-        "target_release_exists": exists,
-        "inactive_exact_files_verified": exact,
-        "required_file_count": len(files),
-        "current_target": current,
-        "current_managed": current_managed,
-        "desired": desired,
+        "target_release_exists": value.get("target_release_exists") is True,
+        "inactive_exact_files_verified": value.get("inactive_exact_files_verified") is True,
+        "required_file_count": value.get("required_file_count"),
+        "mismatch_count": value.get("mismatch_count"),
+        "current_relation": value.get("current_relation"),
+        "current_release_tag": value.get("current_release_tag"),
+        "desired": value.get("desired") is True,
+        "mode": value.get("mode"),
+        "raw_current_target_path_recorded": False,
+        "raw_runtime_release_paths_recorded": False,
+        "expected_file_digests_recorded": False,
+        "observed_file_digests_recorded": False,
+    }
+
+
+def _bounded_apk(value: object) -> dict[str, object]:
+    raw = value.to_dict()
+    return {
+        "package_name": raw.get("package_name"),
+        "installed": raw.get("installed"),
+        "version_name": raw.get("version_name"),
+        "version_code": raw.get("version_code"),
+        "exact_artifact_verified": raw.get("exact_artifact_verified"),
+        "desired": raw.get("desired"),
+        "mode": raw.get("mode"),
+        "raw_device_identifier_recorded": False,
+        "artifact_digest_recorded": False,
+        "target_binding_id_recorded": False,
     }
 
 
 def _terminal(
-    *, semantic_id: str, execution_id: str, controller_revision: str,
-    state: str, mutation_performed: bool, postcondition_verified: bool,
-    facts: Mapping[str, object], intent_ref: str | None, reason: str | None,
+    *,
+    semantic_id: str,
+    execution_id: str,
+    controller_revision: str,
+    target: str,
+    release: str,
+    release_id: int,
+    quarantined_request_id: str,
+    quarantined_terminal_ref: str,
+    parent_terminal_ref: str,
+    state: str,
+    mutation_performed: bool,
+    postcondition_verified: bool,
+    facts: Mapping[str, object],
+    intent_ref: str | None,
+    reason: str | None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": RECOVERY_TERMINAL_SCHEMA,
@@ -212,12 +168,12 @@ def _terminal(
         "operation": RECOVERY_OPERATION,
         "execution_id": execution_id,
         "controller_revision": controller_revision,
-        "target": RECOVERY_TARGET,
-        "product_release": RECOVERY_RELEASE,
-        "release_id": RECOVERY_RELEASE_ID,
-        "quarantined_request_id": QUARANTINED_REQUEST_ID,
-        "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
-        "parent_recovery_terminal_ref": RECOVERY_RECONCILED_REFUSED_TERMINAL_REF,
+        "target": target,
+        "product_release": release,
+        "release_id": release_id,
+        "quarantined_request_id": quarantined_request_id,
+        "quarantined_terminal_ref": quarantined_terminal_ref,
+        "parent_recovery_terminal_ref": parent_terminal_ref,
         "recovery_intent_ref": intent_ref,
         "state": state,
         "mutation_performed": mutation_performed,
@@ -234,11 +190,24 @@ def _write_output(path: Path, payload: Mapping[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _persist_terminal(
+    *,
+    evidence: IssueEvidenceStore,
+    output: Path,
+    payload: Mapping[str, object],
+) -> int:
+    _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, payload, retry_safe=True)
+    _write_output(output, payload)
+    return 0 if payload.get("state") == "ACCEPTED" else 2
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
     parser.add_argument("--release", required=True)
     parser.add_argument("--quarantined-request-id", required=True)
+    parser.add_argument("--quarantined-intent-ref", required=True)
+    parser.add_argument("--quarantined-terminal-ref", required=True)
     parser.add_argument("--recovery-parent-terminal-ref", required=True)
     parser.add_argument("--admitted-release-json", required=True)
     parser.add_argument("--execution-id", required=True)
@@ -248,77 +217,98 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    if args.target != RECOVERY_TARGET or args.release != RECOVERY_RELEASE or args.quarantined_request_id != QUARANTINED_REQUEST_ID:
-        raise QuarantineRecoveryError("runtime recovery inputs differ from exact authorized quarantine")
-    if args.recovery_parent_terminal_ref != RECOVERY_RECONCILED_REFUSED_TERMINAL_REF:
-        raise QuarantineRecoveryError("runtime recovery parent differs from hosted final admission")
+    if args.target != RECOVERY_TARGET:
+        raise QuarantineRecoveryError("runtime recovery target differs from phone-production")
     if os.environ.get("GITHUB_SHA") != args.controller_revision:
         raise QuarantineRecoveryError("runtime recovery controller revision differs")
+    if args.recovery_parent_terminal_ref != args.quarantined_terminal_ref:
+        raise QuarantineRecoveryError("first bounded recovery parent must be the quarantined deployment terminal")
 
     try:
-        admitted = parse_admitted_release(json.loads(args.admitted_release_json), tag=RECOVERY_RELEASE, target=RECOVERY_TARGET)
+        admitted = parse_admitted_release(json.loads(args.admitted_release_json), tag=args.release, target=args.target)
     except (json.JSONDecodeError, ReleaseAdmissionError) as exc:
-        raise QuarantineRecoveryError("hosted immutable Release handoff is invalid") from exc
-    if admitted.identity.release_id != RECOVERY_RELEASE_ID:
-        raise QuarantineRecoveryError("immutable Release id differs from authorized recovery")
+        raise QuarantineRecoveryError("hosted immutable Product Release handoff is invalid") from exc
+    release_id = admitted.identity.release_id
+    if not isinstance(release_id, int) or release_id <= 0:
+        raise QuarantineRecoveryError("immutable Product Release id is unavailable")
 
     evidence = IssueEvidenceStore(os.environ.get("GITHUB_TOKEN", ""))
-    original_intent, original_terminal = evidence.request_history(QUARANTINED_REQUEST_ID)
-    if original_intent is None or original_intent.ref != QUARANTINED_INTENT_REF:
-        raise QuarantineRecoveryError("exact original deployment intent is unavailable under target lock")
-    if original_terminal is None or original_terminal.ref != QUARANTINED_TERMINAL_REF:
-        raise QuarantineRecoveryError("exact original deployment terminal is unavailable under target lock")
+    original_intent, original_terminal = evidence.request_history(args.quarantined_request_id)
+    if original_intent is None or original_intent.ref != args.quarantined_intent_ref:
+        raise QuarantineRecoveryError("exact quarantined deployment intent changed under target lock")
+    if original_terminal is None or original_terminal.ref != args.quarantined_terminal_ref:
+        raise QuarantineRecoveryError("exact quarantined deployment terminal changed under target lock")
+
+    validate_quarantined_deployment_intent(
+        original_intent.payload,
+        target=args.target,
+        release=args.release,
+        request_id=args.quarantined_request_id,
+        release_id=release_id,
+    )
     try:
         validate_terminal(original_terminal.payload)
     except TerminalContractError as exc:
-        raise QuarantineRecoveryError("original quarantined terminal contract is invalid") from exc
-    if original_terminal.payload.get("state") != "QUARANTINED":
-        raise QuarantineRecoveryError("original deployment terminal is not QUARANTINED")
-    if not payload_matches_release_identity(original_intent.payload, admitted.identity, target=RECOVERY_TARGET):
-        raise QuarantineRecoveryError("original intent differs from immutable Release identity")
+        raise QuarantineRecoveryError("quarantined deployment terminal contract is invalid") from exc
+    validate_quarantined_deployment_terminal(
+        original_terminal.payload,
+        target=args.target,
+        release=args.release,
+        request_id=args.quarantined_request_id,
+        release_id=release_id,
+    )
+    if not payload_matches_release_identity(original_intent.payload, admitted.identity, target=args.target):
+        raise QuarantineRecoveryError("quarantined deployment intent differs from immutable Product Release identity")
+    if not _terminal_matches_release_identity(original_terminal.payload, admitted.identity, target=args.target):
+        raise QuarantineRecoveryError("quarantined deployment terminal differs from immutable Product Release identity")
 
-    parent = _validated_parent_recovery(evidence)
-    if parent.ref != args.recovery_parent_terminal_ref:
-        raise QuarantineRecoveryError("final recovery parent changed under target lock")
-    semantic_id = _semantic(parent.ref)
-    existing_terminal = _existing_unique(evidence, RECOVERY_TERMINAL_HEADING, semantic_id)
-    if existing_terminal is not None:
-        validate_recovery_terminal(existing_terminal.payload)
-        _write_output(args.output, existing_terminal.payload)
-        return 0 if existing_terminal.payload.get("state") == "ACCEPTED" else 2
-    existing_intent = _existing_unique(evidence, RECOVERY_INTENT_HEADING, semantic_id)
-    if existing_intent is not None:
-        validate_recovery_intent(existing_intent.payload)
-        raise QuarantineRecoveryError("final recovery intent already exists without terminal; activation will not be repeated")
+    expected_current_release = quarantined_current_release(original_terminal.payload, release=args.release)
+    semantic_id = recovery_semantic_id(
+        target=args.target,
+        release=args.release,
+        quarantined_request_id=args.quarantined_request_id,
+        quarantined_terminal_ref=args.quarantined_terminal_ref,
+        parent_recovery_terminal_ref=args.recovery_parent_terminal_ref,
+    )
+    if _existing_unique(evidence, RECOVERY_INTENT_HEADING, semantic_id) is not None:
+        raise QuarantineRecoveryError("recovery intent already exists; activation will not be repeated")
+    if _existing_unique(evidence, RECOVERY_TERMINAL_HEADING, semantic_id) is not None:
+        raise QuarantineRecoveryError("recovery terminal already exists; duplicate execution is forbidden")
 
     serial = os.environ.get("ANDROID_PRODUCTION_SERIAL", "")
     binding_key = os.environ.get("ANDROID_TARGET_BINDING_KEY", "")
-    if not serial or not binding_key:
-        raise QuarantineRecoveryError("registered phone target binding is unavailable")
+    admin_token = os.environ.get("MOBILE_PROXY_ADMIN_TOKEN", "")
+    if not serial or len(binding_key) < 32 or not admin_token:
+        raise QuarantineRecoveryError("registered phone recovery binding is unavailable")
 
     facts: dict[str, object] = {
-        "original_quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
-        "original_quarantined_intent_ref": QUARANTINED_INTENT_REF,
-        "parent_recovery_terminal_ref": parent.ref,
-        "vm_provider_access_performed": False,
+        "quarantined_intent_ref": args.quarantined_intent_ref,
+        "quarantined_terminal_ref": args.quarantined_terminal_ref,
+        "parent_recovery_terminal_ref": args.recovery_parent_terminal_ref,
+        "expected_runtime_prepared_locally": False,
+        "phone_runtime_bytes_rematerialized": False,
         "apk_mutation_performed": False,
-        "runtime_bytes_rematerialized": False,
+        "provider_access_performed": False,
+        "provider_mutation_performed": False,
+        "vm_access_performed": False,
+        "vm_mutation_performed": False,
+        "blind_retry_performed": False,
     }
-    with tempfile.TemporaryDirectory(prefix="mobile-proxy-final-stage3-recovery-") as td:
+
+    with tempfile.TemporaryDirectory(prefix="mobile-proxy-quarantine-recovery-") as td:
         root = Path(td)
-        apk = root / admitted.identity.artifact_name
-        runtime_archive = root / str(admitted.identity.phone_runtime_artifact_name)
+        materialization_facts: dict[str, object] = {}
         try:
-            _materialize_verified_release_apk(admitted, apk, facts)
-            materialized = _materialize_verified_release_runtime(
+            materialized = prepare_verified_release_runtime(
                 admitted,
-                archive=runtime_archive,
+                archive=root / "phone-runtime.tar.gz",
                 work_root=root / "runtime",
                 product_root=args.product_root,
                 runtime_manifest_path=args.runtime_manifest,
                 binding_key=binding_key,
-                facts=facts,
+                facts=materialization_facts,
             )
+            facts["expected_runtime_prepared_locally"] = True
             apk_pre = observe(
                 serial=serial,
                 binding_key=binding_key,
@@ -326,60 +316,74 @@ def main() -> int:
                 expected_version_code=int(admitted.android_version_code or 0),
                 expected_artifact_sha256=admitted.artifact_transport_sha256,
             )
-            runtime_pre = _root_runtime_observation(
+            runtime_pre = observe_exact_inactive_runtime(
                 serial=serial,
                 release_root=materialized.release_root,
-                release_id=RECOVERY_RELEASE,
+                release_id=args.release,
                 required_paths=materialized.required_live_release_paths,
             )
-        except (AndroidArtifactRefused, PhoneRuntimeRefused, AndroidObservationUnavailable, PhoneTargetUnavailable) as exc:
+        except (PhoneRuntimeRefused, AndroidObservationUnavailable, PhoneTargetUnavailable):
             terminal = _terminal(
-                semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
-                state="REFUSED", mutation_performed=False, postcondition_verified=False,
-                facts=facts | {"precondition_available": False}, intent_ref=None, reason=str(exc),
+                semantic_id=semantic_id,
+                execution_id=args.execution_id,
+                controller_revision=args.controller_revision,
+                target=args.target,
+                release=args.release,
+                release_id=release_id,
+                quarantined_request_id=args.quarantined_request_id,
+                quarantined_terminal_ref=args.quarantined_terminal_ref,
+                parent_terminal_ref=args.recovery_parent_terminal_ref,
+                state="REFUSED",
+                mutation_performed=False,
+                postcondition_verified=False,
+                facts=facts | {"precondition_available": False},
+                intent_ref=None,
+                reason="PRECONDITION_OBSERVATION_UNAVAILABLE",
             )
-            _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, terminal, retry_safe=True)
-            _write_output(args.output, terminal)
-            return 2
+            return _persist_terminal(evidence=evidence, output=args.output, payload=terminal)
 
-        facts["precondition"] = {
-            "apk": apk_pre.to_dict(),
-            "runtime": runtime_pre,
-            "exact_release_identity": True,
-            "target_binding_matches_original_intent": apk_pre.target_binding_id == str(original_intent.payload.get("target_binding_id", "")),
+        original_binding = str(original_intent.payload.get("target_binding_id", ""))
+        precondition = {
+            "apk": _bounded_apk(apk_pre),
+            "runtime": _bounded_runtime(runtime_pre),
+            "target_binding_matches_original_intent": apk_pre.target_binding_id == original_binding,
+            "current_release_matches_quarantined_terminal": runtime_pre.get("current_release_tag") == expected_current_release,
             "mode": "read_only",
         }
-        original_binding = str(original_intent.payload.get("target_binding_id", ""))
-        target = str(runtime_pre["target_release"])
+        facts["precondition"] = precondition
+
         if apk_pre.target_binding_id != original_binding:
-            reason = "registered phone target binding differs from original deployment intent"
-        elif not apk_pre.desired:
-            reason = "installed APK is not exact admitted v0.1.7"
-        elif runtime_pre["target_release_exists"] is not True or runtime_pre["inactive_exact_files_verified"] is not True:
-            reason = "inactive v0.1.7 rooted runtime is missing or differs from immutable Release"
-        elif runtime_pre["current_target"] != target and runtime_pre["current_managed"] is not True:
-            reason = "runtime current relation is not an existing managed release"
+            reason = "TARGET_BINDING_CHANGED"
+        elif not apk_pre.desired or not apk_pre.exact_artifact_verified:
+            reason = "APK_NOT_EXACT"
+        elif runtime_pre.get("target_release_exists") is not True or runtime_pre.get("inactive_exact_files_verified") is not True:
+            reason = "INACTIVE_RUNTIME_NOT_EXACT"
+        elif runtime_pre.get("current_release_tag") != expected_current_release:
+            reason = "CURRENT_RUNTIME_CHANGED"
+        elif runtime_pre.get("current_relation") != "other-managed":
+            reason = "CURRENT_RUNTIME_RELATION_INVALID"
         else:
             reason = None
+
         if reason is not None:
             terminal = _terminal(
-                semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
-                state="REFUSED", mutation_performed=False, postcondition_verified=False,
-                facts=facts, intent_ref=None, reason=reason,
+                semantic_id=semantic_id,
+                execution_id=args.execution_id,
+                controller_revision=args.controller_revision,
+                target=args.target,
+                release=args.release,
+                release_id=release_id,
+                quarantined_request_id=args.quarantined_request_id,
+                quarantined_terminal_ref=args.quarantined_terminal_ref,
+                parent_terminal_ref=args.recovery_parent_terminal_ref,
+                state="REFUSED",
+                mutation_performed=False,
+                postcondition_verified=False,
+                facts=facts,
+                intent_ref=None,
+                reason=reason,
             )
-            _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, terminal, retry_safe=True)
-            _write_output(args.output, terminal)
-            return 2
-
-        if runtime_pre["desired"] is True:
-            terminal = _terminal(
-                semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
-                state="ACCEPTED", mutation_performed=False, postcondition_verified=True,
-                facts=facts | {"postcondition": facts["precondition"]}, intent_ref=None, reason=None,
-            )
-            _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, terminal, retry_safe=True)
-            _write_output(args.output, terminal)
-            return 0
+            return _persist_terminal(evidence=evidence, output=args.output, payload=terminal)
 
         intent_payload: dict[str, object] = {
             "schema": RECOVERY_INTENT_SCHEMA,
@@ -387,17 +391,17 @@ def main() -> int:
             "operation": RECOVERY_OPERATION,
             "execution_id": args.execution_id,
             "controller_revision": args.controller_revision,
-            "target": RECOVERY_TARGET,
+            "target": args.target,
             "target_binding_id": apk_pre.target_binding_id,
-            "product_release": RECOVERY_RELEASE,
-            "release_id": RECOVERY_RELEASE_ID,
-            "quarantined_request_id": QUARANTINED_REQUEST_ID,
-            "quarantined_intent_ref": QUARANTINED_INTENT_REF,
-            "quarantined_terminal_ref": QUARANTINED_TERMINAL_REF,
-            "parent_recovery_terminal_ref": parent.ref,
+            "product_release": args.release,
+            "release_id": release_id,
+            "quarantined_request_id": args.quarantined_request_id,
+            "quarantined_intent_ref": args.quarantined_intent_ref,
+            "quarantined_terminal_ref": args.quarantined_terminal_ref,
+            "parent_recovery_terminal_ref": args.recovery_parent_terminal_ref,
             "apk_exact": True,
             "inactive_runtime_exact": True,
-            "current_before": runtime_pre["current_target"],
+            "current_before_release": expected_current_release,
             "activation_may_reach_target": True,
             "blind_retry_allowed": False,
             "mutation_performed": False,
@@ -406,22 +410,31 @@ def main() -> int:
         intent_record = _persist_exact(evidence, RECOVERY_INTENT_HEADING, intent_payload, retry_safe=False)
         facts["recovery_intent_ref"] = intent_record.ref
 
+        target_path = f"{_ROOT}/releases/{args.release}"
         activation_state = "confirmed"
         try:
-            _activate(serial=serial, release_id=RECOVERY_RELEASE, target=target)
+            _activate(serial=serial, release_id=args.release, target=target_path)
         except PhoneTargetMutationOutcomeUnknown:
             terminal = _terminal(
-                semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
-                state="UNKNOWN", mutation_performed=True, postcondition_verified=False,
-                facts=facts | {"activation_outcome": "unknown"}, intent_ref=intent_record.ref,
-                reason="activation transport outcome is unknown",
+                semantic_id=semantic_id,
+                execution_id=args.execution_id,
+                controller_revision=args.controller_revision,
+                target=args.target,
+                release=args.release,
+                release_id=release_id,
+                quarantined_request_id=args.quarantined_request_id,
+                quarantined_terminal_ref=args.quarantined_terminal_ref,
+                parent_terminal_ref=args.recovery_parent_terminal_ref,
+                state="UNKNOWN",
+                mutation_performed=True,
+                postcondition_verified=False,
+                facts=facts | {"activation_outcome": "unknown"},
+                intent_ref=intent_record.ref,
+                reason="ACTIVATION_OUTCOME_UNKNOWN",
             )
-            _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, terminal, retry_safe=True)
-            _write_output(args.output, terminal)
-            return 2
-        except PhoneTargetUnavailable as exc:
+            return _persist_terminal(evidence=evidence, output=args.output, payload=terminal)
+        except PhoneTargetUnavailable:
             activation_state = "completed_failure"
-            facts["activation_error"] = str(exc)
         facts["activation_outcome"] = activation_state
 
         try:
@@ -432,48 +445,83 @@ def main() -> int:
                 expected_version_code=int(admitted.android_version_code or 0),
                 expected_artifact_sha256=admitted.artifact_transport_sha256,
             )
-            runtime_post = _root_runtime_observation(
+            runtime_post = observe_exact_inactive_runtime(
                 serial=serial,
                 release_root=materialized.release_root,
-                release_id=RECOVERY_RELEASE,
+                release_id=args.release,
                 required_paths=materialized.required_live_release_paths,
             )
-        except (AndroidObservationUnavailable, PhoneTargetUnavailable):
+            operational_post = observe_runtime_operational_health(serial, admin_token=admin_token)
+        except (
+            AndroidObservationUnavailable,
+            PhoneTargetUnavailable,
+            RuntimeOperationalObservationUnavailable,
+            RuntimeOperationalOutputValidationFailure,
+        ):
             terminal = _terminal(
-                semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
-                state="UNKNOWN", mutation_performed=True, postcondition_verified=False,
-                facts=facts | {"postcondition_available": False}, intent_ref=intent_record.ref,
-                reason="post-activation observation unavailable",
+                semantic_id=semantic_id,
+                execution_id=args.execution_id,
+                controller_revision=args.controller_revision,
+                target=args.target,
+                release=args.release,
+                release_id=release_id,
+                quarantined_request_id=args.quarantined_request_id,
+                quarantined_terminal_ref=args.quarantined_terminal_ref,
+                parent_terminal_ref=args.recovery_parent_terminal_ref,
+                state="UNKNOWN",
+                mutation_performed=True,
+                postcondition_verified=False,
+                facts=facts | {"postcondition_available": False},
+                intent_ref=intent_record.ref,
+                reason="POSTCONDITION_OBSERVATION_UNAVAILABLE",
             )
-            _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, terminal, retry_safe=True)
-            _write_output(args.output, terminal)
-            return 2
+            return _persist_terminal(evidence=evidence, output=args.output, payload=terminal)
 
-        facts["postcondition"] = {
-            "apk": apk_post.to_dict(),
-            "runtime": runtime_post,
-            "target_binding_matches_original_intent": apk_post.target_binding_id == original_binding,
-            "mode": "read_only",
-        }
-        desired = bool(
+        exact_release_desired = bool(
             apk_post.desired
+            and apk_post.exact_artifact_verified
             and apk_post.target_binding_id == original_binding
-            and runtime_post["desired"] is True
-            and runtime_post["inactive_exact_files_verified"] is True
+            and runtime_post.get("desired") is True
+            and runtime_post.get("inactive_exact_files_verified") is True
+            and runtime_post.get("current_release_tag") == args.release
         )
-        accepted = activation_state == "confirmed" and desired
+        operational_desired = bool(operational_post.desired)
+        facts["postcondition"] = {
+            "apk": _bounded_apk(apk_post),
+            "runtime": _bounded_runtime(runtime_post),
+            "target_binding_matches_original_intent": apk_post.target_binding_id == original_binding,
+            "exact_release_desired": exact_release_desired,
+            "operational_desired": operational_desired,
+            "operational_mode": "read_only",
+        }
+
+        accepted = activation_state == "confirmed" and exact_release_desired and operational_desired
+        if accepted:
+            reason = None
+        elif activation_state == "completed_failure":
+            reason = "ACTIVATION_COMPLETED_FAILURE"
+        elif not exact_release_desired:
+            reason = "EXACT_RELEASE_POSTCONDITION_MISMATCH"
+        else:
+            reason = "OPERATIONAL_POSTCONDITION_NOT_READY"
         terminal = _terminal(
-            semantic_id=semantic_id, execution_id=args.execution_id, controller_revision=args.controller_revision,
-            state="ACCEPTED" if accepted else "QUARANTINED", mutation_performed=True,
-            postcondition_verified=True, facts=facts, intent_ref=intent_record.ref,
-            reason=None if accepted else (
-                "activation command completed with failure" if activation_state == "completed_failure"
-                else "recovery postcondition mismatch"
-            ),
+            semantic_id=semantic_id,
+            execution_id=args.execution_id,
+            controller_revision=args.controller_revision,
+            target=args.target,
+            release=args.release,
+            release_id=release_id,
+            quarantined_request_id=args.quarantined_request_id,
+            quarantined_terminal_ref=args.quarantined_terminal_ref,
+            parent_terminal_ref=args.recovery_parent_terminal_ref,
+            state="ACCEPTED" if accepted else "QUARANTINED",
+            mutation_performed=True,
+            postcondition_verified=True,
+            facts=facts,
+            intent_ref=intent_record.ref,
+            reason=reason,
         )
-        _persist_exact(evidence, RECOVERY_TERMINAL_HEADING, terminal, retry_safe=True)
-        _write_output(args.output, terminal)
-        return 0 if accepted else 2
+        return _persist_terminal(evidence=evidence, output=args.output, payload=terminal)
 
 
 if __name__ == "__main__":
