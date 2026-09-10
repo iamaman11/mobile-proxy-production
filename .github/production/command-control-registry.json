@@ -174,6 +174,47 @@
           "type": "semver"
         }
       ],
+      "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-phone-resource-sanity",
+      "concurrency_domain": "production-target-phone-production",
+      "destructive": false,
+      "dispatch_inputs": {
+        "release_tag": "release",
+        "target": "target"
+      },
+      "enabled": true,
+      "evidence_policy": "mandatory-bounded-phone-resource-sanity",
+      "handler": "dispatch_workflow",
+      "id": "observe-phone-resource-sanity",
+      "idempotency_policy": "single-run-attempt",
+      "operation": "observe-phone-operational",
+      "operation_class": "OBSERVE",
+      "pattern": "^/observe-phone-resource-sanity (?P<target>phone-production) (?P<release>v0\\.1\\.7)$",
+      "physical_domains": [],
+      "read_only": true,
+      "recovery_policy": "fail-closed-on-ambiguous-observation",
+      "ref": "main",
+      "ref_policy": "controller-main-exact",
+      "requires_phone": true,
+      "requires_release": true,
+      "requires_vm": false,
+      "semantic_identity_policy": "command-arguments",
+      "target_capability_policy": "phone-production-operational-observation",
+      "workflow": ".github/workflows/phone-resource-sanity-observation.yml"
+    },
+    {
+      "allowed_targets": [
+        "phone-production"
+      ],
+      "arguments": [
+        {
+          "name": "target",
+          "type": "target"
+        },
+        {
+          "name": "release",
+          "type": "semver"
+        }
+      ],
       "authority_policy": "private-issue1-owner+controller-main-exact+stage4-v017-fixed-runtime-recovery-exercise",
       "concurrency_domain": "production-target-phone-production",
       "destructive": true,

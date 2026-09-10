@@ -1,0 +1,267 @@
+name: Stage 4 phone resource sanity observation
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  admit:
+    name: Admit exact Stage 4 resource sanity identity without phone access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact dispatched Controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate exact main and immutable Stage 4 Release
+        env:
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          current_main_sha="$(gh api --method GET \
+            repos/iamaman11/mobile-proxy-production/commits/main --jq '.sha')"
+          test "$current_main_sha" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          if os.environ['TARGET'] != 'phone-production':
+              raise SystemExit('Stage 4 resource target differs')
+          if os.environ['RELEASE_TAG'] != 'v0.1.7':
+              raise SystemExit('Stage 4 resource Release differs')
+          sys.path.insert(0, str(Path('.github/controller').resolve()))
+          from release_resolver import resolve_release
+
+          admitted = resolve_release(tag='v0.1.7', target='phone-production')
+          if admitted.identity.tag != 'v0.1.7' or admitted.identity.immutable is not True:
+              raise SystemExit('Stage 4 resource Release admission differs')
+          print('STAGE4_PHONE_RESOURCE_ADMISSION_ACCEPTED target=phone-production release=v0.1.7 phone_access=false')
+          PY
+
+  observe-phone:
+    name: Observe bounded phone-local resource headroom read-only
+    needs: admit
+    runs-on: [self-hosted, Linux, X64, android-production]
+    timeout-minutes: 10
+    concurrency:
+      group: production-target-phone-production
+      cancel-in-progress: false
+    environment: phone-production
+    env:
+      ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+      MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+    steps:
+      - name: Check out exact dispatched Controller revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Observe one bounded resource snapshot
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/observe_phone_resource_sanity.py \
+            --target "$TARGET" \
+            --release-tag "$RELEASE_TAG" \
+            --controller-revision "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/stage4-phone-resource-sanity.json"
+
+      - name: Preserve mandatory bounded resource evidence — primary transport
+        id: evidence_upload_primary
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stage4-phone-resource-sanity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage4-phone-resource-sanity.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retry only evidence transport without re-observing phone
+        id: evidence_upload_retry
+        if: always() && steps.evidence_upload_primary.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stage4-phone-resource-sanity-${{ github.run_id }}-${{ github.run_attempt }}-retry1
+          path: ${{ runner.temp }}/stage4-phone-resource-sanity.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Validate bounded resource result and separation invariants
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'stage4-phone-resource-sanity.json'
+          if not path.is_file():
+              raise SystemExit('Stage 4 resource evidence is unavailable')
+          text = path.read_text(encoding='utf-8')
+          serial = os.environ.get('ANDROID_PRODUCTION_SERIAL', '')
+          admin_token = os.environ.get('MOBILE_PROXY_ADMIN_TOKEN', '')
+          if serial and serial in text:
+              raise SystemExit('Stage 4 resource evidence exposed target identifier')
+          if admin_token and admin_token in text:
+              raise SystemExit('Stage 4 resource evidence exposed secret')
+
+          value = json.loads(text)
+          if value.get('schema') != 'stage4-phone-resource-sanity.v1':
+              raise SystemExit('Stage 4 resource schema differs')
+          if value.get('target') != 'phone-production' or value.get('release_tag') != 'v0.1.7':
+              raise SystemExit('Stage 4 resource identity differs')
+          if value.get('controller_revision') != os.environ['GITHUB_SHA']:
+              raise SystemExit('Stage 4 resource Controller identity differs')
+          classification = value.get('classification')
+          if classification not in {'MEASURED', 'BUSY', 'UNKNOWN'}:
+              raise SystemExit('Stage 4 resource classification differs')
+
+          safety = value.get('safety')
+          if not isinstance(safety, dict) or safety.get('phone_access_performed') is not True:
+              raise SystemExit('Stage 4 resource phone-access evidence differs')
+          if safety.get('exact_phone_release_state_observed') is not False:
+              raise SystemExit('Stage 4 resource observer crossed Release-state boundary')
+          for field in (
+              'phone_mutation_performed',
+              'deployment_created',
+              'deployment_intent_created',
+              'provider_access_performed',
+              'provider_mutation_performed',
+              'synthetic_load_performed',
+              'performance_threshold_applied',
+              'raw_status_json_recorded',
+              'raw_config_recorded',
+              'secret_values_recorded',
+              'process_ids_recorded',
+              'process_cmdlines_recorded',
+          ):
+              if safety.get(field) is not False:
+                  raise SystemExit(f'Stage 4 resource safety field differs: {field}')
+
+          observation = value.get('observation')
+          if not isinstance(observation, dict):
+              raise SystemExit('Stage 4 resource observation is malformed')
+          if observation.get('queue_authority') != 'product-v1-status-current-job':
+              raise SystemExit('Stage 4 resource queue authority differs')
+          if observation.get('performance_threshold_applied') is not False:
+              raise SystemExit('Stage 4 resource unexpectedly applied performance threshold')
+          if observation.get('synthetic_load_performed') is not False:
+              raise SystemExit('Stage 4 resource unexpectedly generated synthetic load')
+
+          if classification == 'MEASURED':
+              if value.get('failure_code') is not None or value.get('phone_failure_phase') is not None:
+                  raise SystemExit('Stage 4 measured resource evidence retained failure metadata')
+              if observation.get('queue_clear') is not True or observation.get('process_set_exact') is not True:
+                  raise SystemExit('Stage 4 measured resource preconditions differ')
+              if observation.get('sample_count') != 1 or observation.get('resource_headroom_measured') is not True:
+                  raise SystemExit('Stage 4 measured resource sampling contract differs')
+              for field in ('watchdog_count', 'runtime_supervisor_count', 'host_daemon_count', 'sing_box_count'):
+                  if observation.get(field) != 1:
+                      raise SystemExit(f'Stage 4 measured process count differs: {field}')
+              integer_fields = (
+                  'memory_total_kib',
+                  'memory_available_kib',
+                  'data_total_kib',
+                  'data_available_kib',
+                  'runtime_rss_kib',
+                  'runtime_fd_count',
+                  'logs_kib',
+                  'memory_available_basis_points',
+                  'data_available_basis_points',
+                  'memory_headroom_to_runtime_rss_milli',
+              )
+              if any(not isinstance(observation.get(field), int) for field in integer_fields):
+                  raise SystemExit('Stage 4 measured resource numeric evidence differs')
+              if observation['memory_total_kib'] <= 0 or observation['memory_available_kib'] <= 0:
+                  raise SystemExit('Stage 4 measured memory has no observable headroom')
+              if observation['memory_available_kib'] > observation['memory_total_kib']:
+                  raise SystemExit('Stage 4 measured memory evidence is contradictory')
+              if observation['data_total_kib'] <= 0 or observation['data_available_kib'] <= 0:
+                  raise SystemExit('Stage 4 measured data filesystem has no observable headroom')
+              if observation['data_available_kib'] > observation['data_total_kib']:
+                  raise SystemExit('Stage 4 measured filesystem evidence is contradictory')
+              if observation['runtime_rss_kib'] <= 0 or observation['runtime_fd_count'] <= 0:
+                  raise SystemExit('Stage 4 measured runtime footprint is invalid')
+              print(
+                  'STAGE4_PHONE_RESOURCE_MEASURED '
+                  f"memory_available_kib={observation['memory_available_kib']} "
+                  f"memory_available_bp={observation['memory_available_basis_points']} "
+                  f"data_available_kib={observation['data_available_kib']} "
+                  f"data_available_bp={observation['data_available_basis_points']} "
+                  f"runtime_rss_kib={observation['runtime_rss_kib']} "
+                  f"runtime_fd_count={observation['runtime_fd_count']} "
+                  f"logs_kib={observation['logs_kib']} "
+                  f"memory_headroom_runtime_milli={observation['memory_headroom_to_runtime_rss_milli']}"
+              )
+          elif classification == 'BUSY':
+              if value.get('failure_code') is not None or value.get('phone_failure_phase') is not None:
+                  raise SystemExit('Stage 4 BUSY resource evidence retained failure metadata')
+              if observation.get('queue_clear') is not False or observation.get('resource_headroom_measured') is not False:
+                  raise SystemExit('Stage 4 BUSY resource evidence differs')
+              if observation.get('sample_count') != 0 or observation.get('process_set_exact') is not None:
+                  raise SystemExit('Stage 4 BUSY resource sampling contract differs')
+              print('STAGE4_PHONE_RESOURCE_BUSY queue_clear=false phone_mutation=false')
+          else:
+              if value.get('failure_code') not in {
+                  'RESOURCE_BINDING_INVALID',
+                  'RESOURCE_QUEUE_STATUS_UNAVAILABLE',
+                  'RESOURCE_PROCESS_SET_NOT_EXACT',
+                  'RESOURCE_MEMORY_SAMPLE_INVALID',
+                  'RESOURCE_FILESYSTEM_SAMPLE_INVALID',
+                  'RESOURCE_PROCESS_SAMPLE_INVALID',
+                  'RESOURCE_LOG_SAMPLE_INVALID',
+                  'RESOURCE_OUTPUT_MALFORMED',
+                  'PHONE_TARGET_UNAVAILABLE',
+              }:
+                  raise SystemExit('Stage 4 resource UNKNOWN lacks bounded failure code')
+              if observation.get('evaluated') is not False or observation.get('resource_headroom_measured') is not False:
+                  raise SystemExit('Stage 4 resource UNKNOWN observation differs')
+              print(
+                  'STAGE4_PHONE_RESOURCE_UNKNOWN '
+                  f"failure_code={value.get('failure_code')} "
+                  f"phone_failure_phase={value.get('phone_failure_phase')}"
+              )
+          PY
+
+      - name: Require at least one mandatory artifact transport success
+        if: always()
+        env:
+          PRIMARY_OUTCOME: ${{ steps.evidence_upload_primary.outcome }}
+          RETRY_OUTCOME: ${{ steps.evidence_upload_retry.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PRIMARY_OUTCOME" != 'success' && "$RETRY_OUTCOME" != 'success' ]]; then
+            echo 'Stage 4 resource evidence transport failed after bounded retry' >&2
+            exit 1
+          fi
+          echo "STAGE4_PHONE_RESOURCE_EVIDENCE_TRANSPORT_ACCEPTED primary=$PRIMARY_OUTCOME retry=$RETRY_OUTCOME"
