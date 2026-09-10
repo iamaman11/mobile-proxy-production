@@ -343,7 +343,7 @@ jobs:
               raise SystemExit('Stage 4 phone resource sanity route is missing')
           if (
               resource.get('handler') != 'dispatch_workflow'
-              or resource.get('operation') != 'observe-phone-operational'
+              or resource.get('operation') != 'observe-phone-resource-sanity'
               or resource.get('operation_class') != 'OBSERVE'
               or resource.get('read_only') is not True
               or resource.get('destructive') is not False
@@ -354,7 +354,7 @@ jobs:
               or resource.get('physical_domains') != []
               or resource.get('concurrency_domain') != 'production-target-phone-production'
               or resource.get('authority_policy') != 'private-issue1-owner+controller-main-exact+stage4-v017-phone-resource-sanity'
-              or resource.get('target_capability_policy') != 'phone-production-operational-observation'
+              or resource.get('target_capability_policy') != 'phone-production-resource-sanity-observation'
               or resource.get('evidence_policy') != 'mandatory-bounded-phone-resource-sanity'
               or resource.get('workflow') != '.github/workflows/phone-resource-sanity-observation.yml'
               or resource.get('ref_policy') != 'controller-main-exact'
@@ -542,6 +542,7 @@ jobs:
               'verify-product-release',
               'observe-phone-release',
               'observe-phone-operational',
+              'observe-phone-resource-sanity',
               'exercise-runtime-recovery',
               'exercise-runtime-restart',
               'exercise-phone-reboot',
