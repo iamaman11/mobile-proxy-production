@@ -1,4 +1,4 @@
-name: Stage 3 quarantine recovery policy
+name: Quarantine recovery policy
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-stage3-quarantine-recovery:
-    name: Validate final Stage 3 bounded recovery
+  validate-quarantine-recovery:
+    name: Validate bounded generic quarantine recovery
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,87 +19,235 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prove exact reconciled lineage and final mutation boundary
+      - name: Compile and run recovery contract tests
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m py_compile \
+            .github/controller/quarantine_recovery.py \
+            .github/controller/quarantine_phone_observer.py \
+            .github/scripts/prepare_quarantine_recovery.py \
+            .github/scripts/run_quarantine_recovery.py \
+            .github/scripts/verify_quarantine_recovery_postconditions.py \
+            .github/controller/tests/test_quarantine_recovery.py \
+            .github/controller/tests/test_stage3_activation_switch.py
           python3 .github/controller/tests/test_quarantine_recovery.py
           python3 .github/controller/tests/test_stage3_activation_switch.py
-          python3 .github/controller/tests/test_unknown_reconciliation.py
+
+      - name: Prove exact ingress and generic recovery mechanism boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import json
+          import re
           from pathlib import Path
 
-          registry = json.loads(Path('.github/production/command-control-registry.json').read_text(encoding='utf-8'))
-          targets = json.loads(Path('.github/production/targets.json').read_text(encoding='utf-8'))
-          router = Path('.github/workflows/production-control-router.yml').read_text(encoding='utf-8')
-          workflow = Path('.github/workflows/quarantined-release-recovery.yml').read_text(encoding='utf-8')
-          prepare = Path('.github/scripts/prepare_quarantine_recovery.py').read_text(encoding='utf-8')
-          runner = Path('.github/scripts/run_quarantine_recovery.py').read_text(encoding='utf-8')
-          adapter = Path('.github/controller/phone_target.py').read_text(encoding='utf-8')
-          ledger = Path('.github/controller/quarantine_recovery.py').read_text(encoding='utf-8')
+          production = Path('.github/production')
+          workflows = Path('.github/workflows')
+          scripts = Path('.github/scripts')
+          controller = Path('.github/controller')
 
-          routes = [r for r in registry['routes'] if r['id'] == 'recover-quarantined-product-release']
+          registry = json.loads((production / 'command-control-registry.json').read_text(encoding='utf-8'))
+          targets = json.loads((production / 'targets.json').read_text(encoding='utf-8'))
+          router = (workflows / 'production-control-router.yml').read_text(encoding='utf-8')
+          workflow = (workflows / 'quarantined-release-recovery.yml').read_text(encoding='utf-8')
+          prepare = (scripts / 'prepare_quarantine_recovery.py').read_text(encoding='utf-8')
+          runner = (scripts / 'run_quarantine_recovery.py').read_text(encoding='utf-8')
+          independent = (scripts / 'verify_quarantine_recovery_postconditions.py').read_text(encoding='utf-8')
+          core = (controller / 'quarantine_recovery.py').read_text(encoding='utf-8')
+          observer = (controller / 'quarantine_phone_observer.py').read_text(encoding='utf-8')
+          adapter = (controller / 'phone_target.py').read_text(encoding='utf-8')
+
+          routes = [
+              item for item in registry.get('routes', [])
+              if isinstance(item, dict)
+              and item.get('id') == 'recover-quarantined-product-release'
+              and item.get('enabled') is True
+          ]
           if len(routes) != 1:
-              raise SystemExit('exact Stage 3 recovery route is missing or duplicated')
+              raise SystemExit('exactly one enabled quarantine recovery route is required')
           route = routes[0]
-          if route['operation_class'] != 'RECOVER' or not route['destructive'] or route['read_only']:
-              raise SystemExit('Stage 3 recovery ingress classification drifted')
-          if route['concurrency_domain'] != 'target-global-mutation':
-              raise SystemExit('Stage 3 recovery lost target-global serialization')
-          if '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in route['pattern'] or 'v0\\.1\\.7' not in route['pattern']:
-              raise SystemExit('Stage 3 route is not exact request/release bound')
+          expected_route = {
+              'handler': 'workflow_call',
+              'workflow': '.github/workflows/quarantined-release-recovery.yml',
+              'ref': 'main',
+              'operation': 'recover-quarantined-product-release',
+              'operation_class': 'RECOVER',
+              'read_only': False,
+              'destructive': True,
+              'allowed_targets': ['phone-production'],
+              'physical_domains': ['runtime'],
+              'concurrency_domain': 'target-global-mutation',
+              'recovery_policy': 'UNKNOWN-no-blind-retry-owner-checkpoint-required',
+              'requires_phone': True,
+              'requires_release': True,
+              'requires_vm': False,
+          }
+          for field, expected in expected_route.items():
+              if route.get(field) != expected:
+                  raise SystemExit(f'quarantine recovery route contract drifted: {field}')
           if 'recover-quarantined-product-release' not in targets['targets']['phone-production']['allowed_operations']:
-              raise SystemExit('phone target does not admit the Stage 3 recovery route')
-          if 'recover-quarantined-v017' not in router or 'quarantined-release-recovery.yml' not in router:
-              raise SystemExit('sole Issue #1 router does not own Stage 3 invocation')
+              raise SystemExit('phone target does not admit the quarantine recovery operation')
+
+          pattern = route.get('pattern', '')
+          target_match = re.search(r'\(\?P<target>([^)]+)\)', pattern)
+          release_match = re.search(r'\(\?P<release>([^)]+)\)', pattern)
+          request_match = re.search(r'\(\?P<quarantined_request_id>([^)]+)\)', pattern)
+          if not target_match or target_match.group(1) != 'phone-production':
+              raise SystemExit('recovery ingress target is not exact phone-production')
+          if not release_match or re.fullmatch(r'v[0-9]+\\\.[0-9]+\\\.[0-9]+', release_match.group(1)) is None:
+              raise SystemExit('recovery ingress release is not one exact semver literal')
+          if not request_match or re.fullmatch(r'req-sha256:[0-9a-f]{64}', request_match.group(1)) is None:
+              raise SystemExit('recovery ingress request is not one exact semantic request literal')
+          if '[0-9]+' in request_match.group(1) or '{64}' in request_match.group(1):
+              raise SystemExit('recovery ingress request unexpectedly exposes a generic selector')
+          if not pattern.startswith('^/recover-quarantined ') or not pattern.endswith('$'):
+              raise SystemExit('recovery ingress is not whole-command bounded')
 
           for required in (
-              'production-target-phone-production',
+              "needs.route.outputs.route_id == 'recover-quarantined-product-release'",
+              'uses: ./.github/workflows/quarantined-release-recovery.yml',
+          ):
+              if required not in router:
+                  raise SystemExit('sole Issue #1 router lost quarantine recovery ownership')
+
+          workflow_required = (
+              'workflow_call:',
+              'group: production-target-phone-production',
+              'cancel-in-progress: false',
+              'environment: phone-production',
               'prepare_quarantine_recovery.py',
               'run_quarantine_recovery.py',
-              'issue-comment:5563105912',
-              'STAGE3_FINAL_RECOVERY_ACCEPTED',
-              'continue-on-error: true',
-          ):
-              if required not in workflow:
-                  raise SystemExit('final Stage 3 workflow contract missing ' + required)
-
-          for required in (
-              'RECOVERY_UNKNOWN_TERMINAL_REF',
-              'RECOVERY_RECONCILED_REFUSED_TERMINAL_REF',
-              'read-only reconciliation is not the exact known safe Stage 3 state',
-              'STAGE3_FINAL_RECOVERY_ADMITTED',
-          ):
-              if required not in prepare + ledger:
-                  raise SystemExit('final Stage 3 lineage contract missing ' + required)
-
-          for required in (
-              'PhoneTargetMutationOutcomeUnknown',
-              'activation_state = "completed_failure"',
-              'parent_recovery_terminal_ref',
-              '_activate(',
-              'postcondition',
-          ):
-              if required not in runner:
-                  raise SystemExit('final recovery transaction contract missing ' + required)
-
-          forbidden_runner = (
-              'dispatch_install_once(', '_stage_runtime(', '_materialize_inactive(',
-              'pm install', 'adb install', 'rm -rf /data/adb/mobile-proxy-node/releases',
+              'verify_quarantine_recovery_postconditions.py',
+              'Execute exactly one bounded activation-only recovery transaction',
+              'Observe independent exact-release and operational postconditions once',
+              "steps.terminal_upload_primary.outcome != 'success'",
+              "steps.postcondition_upload_primary.outcome != 'success'",
+              'QUARANTINE_RECOVERY_ACCEPTED_WITH_INDEPENDENT_POSTCONDITION',
           )
-          present = [item for item in forbidden_runner if item in runner]
-          if present:
-              raise SystemExit(f'final recovery exposes forbidden materialization/install capability: {present!r}')
+          missing = [item for item in workflow_required if item not in workflow]
+          if missing:
+              raise SystemExit('quarantine recovery workflow contract incomplete: ' + ', '.join(missing))
+          for forbidden in ('workflow_dispatch:', 'issue_comment:', 'cancel-in-progress: true'):
+              if forbidden in workflow:
+                  raise SystemExit('quarantine recovery workflow gained forbidden ingress/control: ' + forbidden)
+
+          generic_sources = {
+              'core': core,
+              'prepare': prepare,
+              'runner': runner,
+              'independent': independent,
+          }
+          literal_release = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+')
+          for name, source in generic_sources.items():
+              match = literal_release.search(source)
+              if match:
+                  raise SystemExit(f'generic recovery {name} contains concrete release literal: {match.group(0)}')
+          for forbidden_name in (
+              'RECOVERY_RELEASE',
+              'RECOVERY_RELEASE_ID',
+              'RECOVERY_PREVIOUS_RELEASE',
+              'QUARANTINED_REQUEST_ID',
+              'QUARANTINED_INTENT_REF',
+              'QUARANTINED_TERMINAL_REF',
+          ):
+              if forbidden_name in core + prepare + runner + independent:
+                  raise SystemExit('generic recovery implementation reintroduced incident constant ' + forbidden_name)
+
+          for required in (
+              'validate_quarantined_deployment_intent(',
+              'validate_quarantined_deployment_terminal(',
+              'recovery_semantic_id(',
+              'quarantined_current_release(',
+          ):
+              if required not in core:
+                  raise SystemExit('generic recovery domain contract missing ' + required)
+          if '_request_recovery_records(' not in prepare or 'quarantined request already has recovery lineage' not in prepare:
+              raise SystemExit('hosted recovery admission lacks existing-lineage fail-closed gate')
+          for forbidden in (
+              'ANDROID_PRODUCTION_SERIAL',
+              'ANDROID_TARGET_BINDING_KEY',
+              '_activate(',
+              'adb ',
+              'self-hosted',
+          ):
+              if forbidden in prepare:
+                  raise SystemExit('hosted recovery admission gained target capability: ' + forbidden)
+
+          runner_required = (
+              'prepare_verified_release_runtime(',
+              'observe_exact_inactive_runtime(',
+              'current_release_matches_quarantined_terminal',
+              'recovery intent already exists; activation will not be repeated',
+              'duplicate execution is forbidden',
+              '"phone_runtime_bytes_rematerialized": False',
+              '"apk_mutation_performed": False',
+              '"blind_retry_performed": False',
+              'PhoneTargetMutationOutcomeUnknown',
+              '"exact_release_desired": exact_release_desired',
+          )
+          missing = [item for item in runner_required if item not in runner]
+          if missing:
+              raise SystemExit('activation-only recovery runner incomplete: ' + ', '.join(missing))
+          if runner.count('_activate(') != 1:
+              raise SystemExit('recovery runner must contain exactly one activation callsite')
+          for forbidden in (
+              'dispatch_install_once(',
+              'dispatch_release_once(',
+              '_stage_runtime(',
+              '_materialize_inactive(',
+              'pm install',
+              'adb install',
+              'observe_runtime_operational_health(',
+          ):
+              if forbidden in runner:
+                  raise SystemExit('recovery runner crossed ownership boundary: ' + forbidden)
+
+          independent_required = (
+              'observe_exact_phone_release(',
+              'observe_runtime_operational_health(',
+              '"phone_mutation_performed": False',
+              '"provider_mutation_performed": False',
+              '"vm_mutation_performed": False',
+          )
+          missing = [item for item in independent_required if item not in independent]
+          if missing:
+              raise SystemExit('independent recovery postcondition incomplete: ' + ', '.join(missing))
+          for forbidden in (
+              '_activate(',
+              'dispatch_install_once(',
+              'dispatch_release_once(',
+              '_stage_runtime(',
+              '_materialize_inactive(',
+              'pm install',
+              'adb install',
+          ):
+              if forbidden in independent:
+                  raise SystemExit('independent recovery postcondition gained mutation capability: ' + forbidden)
+
+          if 'current_release_tag' not in observer or 'read_only_reconciliation' not in observer:
+              raise SystemExit('root-only recovery observer lacks bounded current-release fact')
+          observer_forbidden = ('mkdir ', 'cp ', 'rm ', 'mv ', 'ln ', 'kill ', 'chmod ', 'pm install')
+          generated = observer.split('script_lines = [', 1)[-1]
+          if any(item in generated for item in observer_forbidden):
+              raise SystemExit('root-only recovery observer gained mutation primitive')
 
           if 'ln -sfn "$TARGET" "$ROOT/current"' not in adapter:
-              raise SystemExit('Android 11 compatible current cutover is missing')
+              raise SystemExit('Android-compatible current cutover is missing')
           if '[ "$(readlink "$ROOT/current")" = "$TARGET" ]' not in adapter:
               raise SystemExit('current cutover lacks immediate readlink assertion')
-          if 'mv -Tf' in adapter or 'CURRENT_TMP' in adapter:
-              raise SystemExit('unsupported temporary mv cutover remains active')
           if 'raise PhoneTargetMutationOutcomeUnknown' not in adapter:
-              raise SystemExit('transport ambiguity no longer has a distinct UNKNOWN class')
+              raise SystemExit('activation transport ambiguity lost distinct UNKNOWN class')
 
-          print('STAGE3_FINAL_RECOVERY_POLICY_OK')
+          obsolete = (
+              scripts / 'prepare_quarantine_reconciliation.py',
+              scripts / 'run_quarantine_reconciliation.py',
+              controller / 'tests' / 'test_unknown_reconciliation.py',
+          )
+          present = [str(path) for path in obsolete if path.exists()]
+          if present:
+              raise SystemExit('obsolete Stage 3 reconciliation owner remains: ' + ', '.join(present))
+
+          print('GENERIC_QUARANTINE_RECOVERY_POLICY_OK')
           PY
