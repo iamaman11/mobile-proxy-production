@@ -98,6 +98,7 @@ def test_registry_and_target_contracts_are_complete() -> None:
         "verify-product-release",
         "observe-phone-release",
         "observe-phone-operational",
+        "observe-phone-resource-sanity",
         "exercise-runtime-recovery",
         "exercise-runtime-restart",
         "exercise-phone-reboot",
