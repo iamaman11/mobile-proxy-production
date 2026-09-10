@@ -19,7 +19,8 @@ from phone_resource_sanity import (
 )
 
 _SHA = re.compile(r"[0-9a-f]{40}")
-_SCHEMA = "stage4-phone-resource-sanity.v1"
+_SCHEMA = "stage4-phone-resource-sanity.v2"
+_EXERCISE_REQUEST_COUNT = 12
 
 
 def _atomic_write(path: Path, value: dict[str, object]) -> None:
@@ -53,11 +54,18 @@ def _base_safety(*, synthetic_load_performed: bool | None) -> dict[str, object]:
     }
 
 
-def _unknown_observation() -> dict[str, object]:
+def _unknown_observation(
+    *,
+    exercise_requests_attempted: int | None,
+    exercise_requests_succeeded: int | None,
+) -> dict[str, object]:
     return {
         "evaluated": False,
         "queue_authority": "product-v1-status-current-job",
         "resource_headroom_measured": False,
+        "exercise_request_count": _EXERCISE_REQUEST_COUNT,
+        "exercise_requests_attempted": exercise_requests_attempted,
+        "exercise_requests_succeeded": exercise_requests_succeeded,
         "bounded_local_exercise_completed": None,
         "synthetic_load_performed": None,
         "production_scale_load_performed": False,
@@ -96,19 +104,28 @@ def observe(
     except PhoneResourceSanityUnavailable as exc:
         classification = "UNKNOWN"
         failure_code = exc.failure_code
-        observation = _unknown_observation()
+        observation = _unknown_observation(
+            exercise_requests_attempted=exc.exercise_requests_attempted,
+            exercise_requests_succeeded=exc.exercise_requests_succeeded,
+        )
         synthetic_load_performed = None
     except phone_target.PhoneTargetDiagnosticFailure as exc:
         classification = "UNKNOWN"
         failure_code = "PHONE_TARGET_UNAVAILABLE"
         phone_failure_phase = exc.phase.value
-        observation = _unknown_observation()
+        observation = _unknown_observation(
+            exercise_requests_attempted=None,
+            exercise_requests_succeeded=None,
+        )
         synthetic_load_performed = None
     except phone_target.PhoneTargetUnavailable:
         classification = "UNKNOWN"
         failure_code = "PHONE_TARGET_UNAVAILABLE"
         phone_failure_phase = "UNKNOWN"
-        observation = _unknown_observation()
+        observation = _unknown_observation(
+            exercise_requests_attempted=None,
+            exercise_requests_succeeded=None,
+        )
         synthetic_load_performed = None
 
     payload: dict[str, object] = {
@@ -167,6 +184,17 @@ def main(argv: list[str] | None = None) -> int:
     phone_failure_phase = payload.get("phone_failure_phase")
     if phone_failure_phase is not None:
         fields.append(f"phone_failure_phase={phone_failure_phase}")
+    observation = payload.get("observation")
+    if isinstance(observation, dict):
+        attempted = observation.get("exercise_requests_attempted")
+        succeeded = observation.get("exercise_requests_succeeded")
+        if isinstance(attempted, int) and isinstance(succeeded, int):
+            fields.extend(
+                (
+                    f"exercise_requests_attempted={attempted}",
+                    f"exercise_requests_succeeded={succeeded}",
+                )
+            )
     print(" ".join(fields))
     return 0
 
