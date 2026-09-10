@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from phone_target import PhoneTargetUnavailable, _files, _run_root_script
 
 _ROOT = "/data/adb/mobile-proxy-node"
 _MAX_MISMATCH_IDENTIFIERS = 8
+_SEMVER = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def _managed_release_tag(current_target: str) -> str | None:
+    prefix = f"{_ROOT}/releases/"
+    if not current_target.startswith(prefix):
+        return None
+    tag = current_target[len(prefix):]
+    return tag if _SEMVER.fullmatch(tag) is not None else None
 
 
 def observe_exact_inactive_runtime(
@@ -51,13 +61,14 @@ def observe_exact_inactive_runtime(
     exact = exists and not mismatches
 
     current_raw = values["current"]
+    current_release_tag = _managed_release_tag(current_raw)
     if current_raw == target:
         current_relation = "target"
     elif current_raw == "absent":
         current_relation = "absent"
     elif current_raw == "invalid":
         current_relation = "invalid"
-    elif current_raw.startswith(f"{_ROOT}/releases/"):
+    elif current_release_tag is not None:
         current_relation = "other-managed"
     else:
         current_relation = "unmanaged"
@@ -70,5 +81,6 @@ def observe_exact_inactive_runtime(
         "mismatch_count": len(mismatches),
         "mismatch_files": mismatches[:_MAX_MISMATCH_IDENTIFIERS],
         "current_relation": current_relation,
+        "current_release_tag": current_release_tag,
         "desired": exact and current_relation == "target",
     }

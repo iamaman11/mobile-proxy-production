@@ -1,4 +1,4 @@
-name: Stage 3 quarantined v0.1.7 final recovery
+name: Bounded quarantined Product Release recovery
 
 on:
   workflow_call:
@@ -39,13 +39,15 @@ env:
 
 jobs:
   authorize:
-    name: Bind exact reconciled REFUSED parent and immutable Release
+    name: Bind authorized command to durable quarantine and immutable Release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       admitted_release_json: ${{ steps.gate.outputs.admitted_release_json }}
       release_source_sha: ${{ steps.gate.outputs.release_source_sha }}
       semantic_recovery_id: ${{ steps.gate.outputs.semantic_recovery_id }}
+      original_intent_ref: ${{ steps.gate.outputs.original_intent_ref }}
+      original_terminal_ref: ${{ steps.gate.outputs.original_terminal_ref }}
       recovery_parent_terminal_ref: ${{ steps.gate.outputs.recovery_parent_terminal_ref }}
     steps:
       - name: Check out exact controller revision
@@ -54,7 +56,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Admit only exact final Stage 3 recovery lineage
+      - name: Admit exact durable quarantine lineage and immutable Release
         id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -69,10 +71,10 @@ jobs:
             --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
 
   recover:
-    name: Execute one final activation-only Stage 3 recovery
+    name: Execute one activation-only recovery and independent postcondition
     needs: authorize
     runs-on: [self-hosted, Linux, X64, android-production]
-    timeout-minutes: 20
+    timeout-minutes: 25
     concurrency:
       group: production-target-phone-production
       cancel-in-progress: false
@@ -116,14 +118,13 @@ jobs:
           } >> "$GITHUB_ENV"
           printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Execute one bounded final recovery transaction
+      - name: Execute exactly one bounded activation-only recovery transaction
         id: recovery
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
           ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
-          MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
           MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
           MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
           MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
@@ -136,6 +137,8 @@ jobs:
             --target '${{ inputs.target }}' \
             --release '${{ inputs.release_tag }}' \
             --quarantined-request-id '${{ inputs.quarantined_request_id }}' \
+            --quarantined-intent-ref '${{ needs.authorize.outputs.original_intent_ref }}' \
+            --quarantined-terminal-ref '${{ needs.authorize.outputs.original_terminal_ref }}' \
             --recovery-parent-terminal-ref '${{ needs.authorize.outputs.recovery_parent_terminal_ref }}' \
             --admitted-release-json '${{ needs.authorize.outputs.admitted_release_json }}' \
             --execution-id "gh-run:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
@@ -146,6 +149,7 @@ jobs:
 
       - name: Preserve bounded recovery terminal artifact
         if: always()
+        id: terminal_upload_primary
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -154,52 +158,136 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
-      - name: Enforce canonical Stage 3 ACCEPTED
+      - name: Retry only recovery terminal artifact transport
+        if: always() && steps.terminal_upload_primary.outcome != 'success'
+        id: terminal_upload_retry
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quarantine-recovery-terminal-retry-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quarantine-recovery-terminal.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Observe independent exact-release and operational postconditions once
         if: always()
+        id: independent_postcondition
+        continue-on-error: true
+        env:
+          ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
+          ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
+          MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
+          MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
+          MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
+          MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
+          MOBILE_PROXY_RELAY_PASSWORD: ${{ secrets.MOBILE_PROXY_RELAY_PASSWORD }}
+          MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64: ${{ secrets.MOBILE_PROXY_REVERSE_TUNNEL_CERT_DER_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_quarantine_recovery_postconditions.py \
+            --target '${{ inputs.target }}' \
+            --release '${{ inputs.release_tag }}' \
+            --admitted-release-json '${{ needs.authorize.outputs.admitted_release_json }}' \
+            --controller-revision "$GITHUB_SHA" \
+            --product-root "$GITHUB_WORKSPACE/product-source" \
+            --runtime-manifest "$GITHUB_WORKSPACE/.github/production/runtime-reconstruction-manifest.json" \
+            --output "$RUNNER_TEMP/quarantine-recovery-independent-postcondition.json"
+
+      - name: Preserve independent postcondition artifact
+        if: always()
+        id: postcondition_upload_primary
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quarantine-recovery-postcondition-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quarantine-recovery-independent-postcondition.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Retry only independent postcondition artifact transport
+        if: always() && steps.postcondition_upload_primary.outcome != 'success'
+        id: postcondition_upload_retry
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quarantine-recovery-postcondition-retry-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quarantine-recovery-independent-postcondition.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Enforce recovery terminal and independent acceptance
+        if: always()
+        env:
+          EXPECTED_TARGET: ${{ inputs.target }}
+          EXPECTED_RELEASE: ${{ inputs.release_tag }}
+          EXPECTED_REQUEST_ID: ${{ inputs.quarantined_request_id }}
+          EXPECTED_SEMANTIC_ID: ${{ needs.authorize.outputs.semantic_recovery_id }}
+          EXPECTED_TERMINAL_REF: ${{ needs.authorize.outputs.original_terminal_ref }}
+          TERMINAL_UPLOAD_PRIMARY: ${{ steps.terminal_upload_primary.outcome }}
+          TERMINAL_UPLOAD_RETRY: ${{ steps.terminal_upload_retry.outcome }}
+          POST_UPLOAD_PRIMARY: ${{ steps.postcondition_upload_primary.outcome }}
+          POST_UPLOAD_RETRY: ${{ steps.postcondition_upload_retry.outcome }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, os
           from pathlib import Path
-          path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-recovery-terminal.json'
-          if not path.is_file():
-              raise SystemExit('Stage 3 final recovery terminal is unavailable')
-          value = json.loads(path.read_text(encoding='utf-8'))
-          if value.get('schema') != 'production-quarantine-recovery-terminal.v1':
-              raise SystemExit('Stage 3 final recovery terminal schema differs')
-          if value.get('parent_recovery_terminal_ref') != 'issue-comment:5563105912':
-              raise SystemExit('Stage 3 final recovery parent differs')
-          if value.get('state') != 'ACCEPTED' or value.get('postcondition_verified') is not True:
-              raise SystemExit('Stage 3 final recovery did not reach ACCEPTED')
-          if value.get('blind_retry_allowed') is not False:
-              raise SystemExit('Stage 3 final recovery blind-retry boundary differs')
-          facts = value.get('facts') or {}
-          if facts.get('apk_mutation_performed') is not False or facts.get('runtime_bytes_rematerialized') is not False:
-              raise SystemExit('Stage 3 final recovery crossed a forbidden materialization boundary')
-          if facts.get('vm_provider_access_performed') is not False:
-              raise SystemExit('Stage 3 final recovery crossed VM/provider boundary')
-          if value.get('mutation_performed') is True:
-              if not value.get('recovery_intent_ref') or facts.get('activation_outcome') != 'confirmed':
-                  raise SystemExit('Stage 3 final mutation lacks durable intent or confirmed activation')
-          elif value.get('mutation_performed') is False:
-              if value.get('recovery_intent_ref') is not None:
-                  raise SystemExit('Stage 3 no-op ACCEPTED unexpectedly references mutation intent')
-          else:
-              raise SystemExit('Stage 3 mutation boolean differs')
-          post = facts.get('postcondition')
-          if not isinstance(post, dict):
-              raise SystemExit('Stage 3 final recovery lacks postcondition evidence')
-          apk = post.get('apk') or {}
-          runtime = post.get('runtime') or {}
-          if apk.get('desired') is not True or apk.get('exact_artifact_verified') is not True:
-              raise SystemExit('Stage 3 final recovery lacks exact APK proof')
-          if runtime.get('desired') is not True or runtime.get('inactive_exact_files_verified') is not True:
-              raise SystemExit('Stage 3 final recovery lacks exact rooted runtime proof')
-          if runtime.get('current_target') != '/data/adb/mobile-proxy-node/releases/v0.1.7':
-              raise SystemExit('Stage 3 final recovery current runtime differs')
-          if post.get('target_binding_matches_original_intent') is not True:
-              raise SystemExit('Stage 3 final recovery target binding differs')
-          print('STAGE3_FINAL_RECOVERY_ACCEPTED')
+
+          terminal_path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-recovery-terminal.json'
+          if not terminal_path.is_file():
+              raise SystemExit('quarantine recovery terminal is unavailable')
+          terminal = json.loads(terminal_path.read_text(encoding='utf-8'))
+          if terminal.get('schema') != 'production-quarantine-recovery-terminal.v1':
+              raise SystemExit('quarantine recovery terminal schema differs')
+          if terminal.get('semantic_recovery_id') != os.environ['EXPECTED_SEMANTIC_ID']:
+              raise SystemExit('quarantine recovery semantic identity differs')
+          if terminal.get('target') != os.environ['EXPECTED_TARGET'] or terminal.get('product_release') != os.environ['EXPECTED_RELEASE']:
+              raise SystemExit('quarantine recovery target/Release differs')
+          if terminal.get('quarantined_request_id') != os.environ['EXPECTED_REQUEST_ID']:
+              raise SystemExit('quarantine recovery request lineage differs')
+          if terminal.get('quarantined_terminal_ref') != os.environ['EXPECTED_TERMINAL_REF']:
+              raise SystemExit('quarantine recovery terminal lineage differs')
+          if terminal.get('state') != 'ACCEPTED' or terminal.get('mutation_performed') is not True or terminal.get('postcondition_verified') is not True:
+              raise SystemExit('quarantine recovery transaction did not reach ACCEPTED')
+          if terminal.get('blind_retry_allowed') is not False or not terminal.get('recovery_intent_ref'):
+              raise SystemExit('quarantine recovery exactly-once boundary differs')
+          facts = terminal.get('facts') or {}
+          if facts.get('phone_runtime_bytes_rematerialized') is not False or facts.get('apk_mutation_performed') is not False:
+              raise SystemExit('quarantine recovery crossed forbidden phone materialization/install boundary')
+          if facts.get('provider_access_performed') is not False or facts.get('vm_access_performed') is not False:
+              raise SystemExit('quarantine recovery crossed provider/VM boundary')
+          if facts.get('activation_outcome') != 'confirmed':
+              raise SystemExit('quarantine recovery activation was not confirmed')
+          transaction_post = facts.get('postcondition') or {}
+          if transaction_post.get('exact_release_desired') is not True:
+              raise SystemExit('quarantine recovery terminal lacks exact activation postcondition')
+
+          post_path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-recovery-independent-postcondition.json'
+          if not post_path.is_file():
+              raise SystemExit('independent recovery postcondition is unavailable')
+          independent = json.loads(post_path.read_text(encoding='utf-8'))
+          if independent.get('schema') != 'production-quarantine-recovery-independent-postcondition.v1':
+              raise SystemExit('independent recovery postcondition schema differs')
+          if independent.get('target') != os.environ['EXPECTED_TARGET'] or independent.get('product_release') != os.environ['EXPECTED_RELEASE']:
+              raise SystemExit('independent recovery postcondition target/Release differs')
+          if independent.get('classification') != 'ACCEPTED':
+              raise SystemExit('independent recovery postcondition did not reach ACCEPTED')
+          exact = independent.get('exact_release') or {}
+          operational = independent.get('operational') or {}
+          if exact.get('desired') is not True or operational.get('desired') is not True:
+              raise SystemExit('independent recovery postcondition lacks exact/operational proof')
+          safety = independent.get('safety') or {}
+          if safety.get('phone_mutation_performed') is not False or safety.get('provider_mutation_performed') is not False or safety.get('vm_mutation_performed') is not False:
+              raise SystemExit('independent recovery postcondition crossed mutation boundary')
+
+          terminal_transport_ok = os.environ.get('TERMINAL_UPLOAD_PRIMARY') == 'success' or os.environ.get('TERMINAL_UPLOAD_RETRY') == 'success'
+          post_transport_ok = os.environ.get('POST_UPLOAD_PRIMARY') == 'success' or os.environ.get('POST_UPLOAD_RETRY') == 'success'
+          if not terminal_transport_ok or not post_transport_ok:
+              raise SystemExit('bounded recovery evidence artifact transport failed')
+          print('QUARANTINE_RECOVERY_ACCEPTED_WITH_INDEPENDENT_POSTCONDITION')
+          # Compatibility output consumed by the existing top-level Issue command policy.
+          # It does not define recovery semantics and can be removed when that policy is converged.
           print('STAGE3_QUARANTINE_RECOVERY_ACCEPTED')
           PY
