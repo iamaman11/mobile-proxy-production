@@ -46,6 +46,12 @@ def _require_ref(value: str, *, label: str) -> str:
     return value
 
 
+def _require_release_id(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise QuarantineRecoveryError(f"{label} Release id is invalid")
+    return value
+
+
 def managed_release_tag(current_target: object) -> str | None:
     if not isinstance(current_target, str):
         return None
@@ -112,9 +118,10 @@ def validate_quarantined_deployment_intent(
         raise QuarantineRecoveryError("quarantined deployment intent target differs")
     _require_release(release)
     _require_request(request_id)
+    _require_release_id(release_id, label="quarantined deployment intent")
     if payload.get("semantic_request_id") != request_id or payload.get("product_release") != release:
         raise QuarantineRecoveryError("quarantined deployment intent identity differs")
-    if not isinstance(release_id, int) or release_id <= 0 or payload.get("release_id") != release_id:
+    if payload.get("release_id") != release_id:
         raise QuarantineRecoveryError("quarantined deployment intent Release id differs")
     if _BINDING.fullmatch(str(payload.get("target_binding_id", ""))) is None:
         raise QuarantineRecoveryError("quarantined deployment intent target binding is invalid")
@@ -165,9 +172,10 @@ def validate_quarantined_deployment_terminal(
         raise QuarantineRecoveryError("quarantined deployment terminal target differs")
     _require_release(release)
     _require_request(request_id)
+    _require_release_id(release_id, label="quarantined deployment terminal")
     if payload.get("semantic_request_id") != request_id or payload.get("product_release") != release:
         raise QuarantineRecoveryError("quarantined deployment terminal identity differs")
-    if not isinstance(release_id, int) or release_id <= 0 or payload.get("release_id") != release_id:
+    if payload.get("release_id") != release_id:
         raise QuarantineRecoveryError("quarantined deployment terminal Release id differs")
     if (
         payload.get("state") != "QUARANTINED"
@@ -187,8 +195,7 @@ def validate_recovery_intent(payload: Mapping[str, object]) -> None:
         raise QuarantineRecoveryError("recovery intent operation/target differs")
     _require_release(str(payload.get("product_release", "")))
     _require_request(str(payload.get("quarantined_request_id", "")))
-    if not isinstance(payload.get("release_id"), int) or int(payload["release_id"]) <= 0:
-        raise QuarantineRecoveryError("recovery intent Release id is invalid")
+    _require_release_id(payload.get("release_id"), label="recovery intent")
     _require_ref(str(payload.get("quarantined_intent_ref", "")), label="quarantined intent")
     _require_ref(str(payload.get("quarantined_terminal_ref", "")), label="quarantined terminal")
     _require_ref(str(payload.get("parent_recovery_terminal_ref", "")), label="parent terminal")
@@ -216,8 +223,7 @@ def validate_recovery_terminal(payload: Mapping[str, object]) -> None:
         raise QuarantineRecoveryError("recovery terminal operation/target differs")
     _require_release(str(payload.get("product_release", "")))
     _require_request(str(payload.get("quarantined_request_id", "")))
-    if not isinstance(payload.get("release_id"), int) or int(payload["release_id"]) <= 0:
-        raise QuarantineRecoveryError("recovery terminal Release id is invalid")
+    _require_release_id(payload.get("release_id"), label="recovery terminal")
     _require_ref(str(payload.get("quarantined_terminal_ref", "")), label="quarantined terminal")
     _require_ref(str(payload.get("parent_recovery_terminal_ref", "")), label="parent terminal")
     _validate_semantic_identity(payload, kind="terminal")
@@ -232,6 +238,11 @@ def validate_recovery_terminal(payload: Mapping[str, object]) -> None:
         raise QuarantineRecoveryError("recovery terminal boolean contract differs")
     if payload.get("blind_retry_allowed") is not False:
         raise QuarantineRecoveryError("recovery terminal blind-retry boundary differs")
+    intent_ref = payload.get("recovery_intent_ref")
+    if mutation_performed:
+        _require_ref(str(intent_ref or ""), label="intent")
+    elif intent_ref is not None:
+        raise QuarantineRecoveryError("non-mutating recovery terminal cannot reference a mutation intent")
     if state == "ACCEPTED" and (mutation_performed is not True or postcondition_verified is not True):
         raise QuarantineRecoveryError("ACCEPTED recovery requires verified activation postcondition")
     if state == "REFUSED" and mutation_performed is not False:
