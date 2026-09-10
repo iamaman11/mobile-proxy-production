@@ -656,7 +656,7 @@ jobs:
               'environment: phone-production',
               '.github/scripts/observe_phone_resource_sanity.py',
               'stage4-phone-resource-sanity.v1',
-              'stage4-phone-resource-sanity-${{ github.run_id }}-${{ github.run_attempt }}',
+              'stage4-phone-resource-sanity-' + expression_open + ' github.run_id }}-' + expression_open + ' github.run_attempt }}',
               'retention-days: 90',
               'synthetic_load_performed',
               'performance_threshold_applied',
