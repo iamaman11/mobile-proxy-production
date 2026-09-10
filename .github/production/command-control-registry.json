@@ -547,18 +547,18 @@
           "type": "identifier"
         }
       ],
-      "authority_policy": "private-issue1-owner+controller-main-exact+exact-quarantined-v017+exact-prior-recovery-terminal",
+      "authority_policy": "private-issue1-owner+controller-main-exact+exact-quarantined-v018-request+durable-terminal-lineage",
       "concurrency_domain": "target-global-mutation",
       "destructive": true,
       "dispatch_inputs": {},
       "enabled": true,
-      "evidence_policy": "RECOVERY_INTENT+RECOVERY_TERMINAL+POSTCONDITION",
+      "evidence_policy": "RECOVERY_INTENT+RECOVERY_TERMINAL+INDEPENDENT_POSTCONDITION",
       "handler": "workflow_call",
       "id": "recover-quarantined-product-release",
-      "idempotency_policy": "single-run-attempt+bounded-lineage-generation+durable-semantic-quarantine-recovery-ledger",
+      "idempotency_policy": "single-run-attempt+durable-semantic-quarantine-recovery-ledger+no-repeat-after-lineage",
       "operation": "recover-quarantined-product-release",
       "operation_class": "RECOVER",
-      "pattern": "^/recover-quarantined (?P<target>phone-production) (?P<release>v0\\.1\\.7) (?P<quarantined_request_id>req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7)$",
+      "pattern": "^/recover-quarantined (?P<target>phone-production) (?P<release>v0\\.1\\.8) (?P<quarantined_request_id>req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a)$",
       "physical_domains": [
         "runtime"
       ],
@@ -569,7 +569,7 @@
       "requires_phone": true,
       "requires_release": true,
       "requires_vm": false,
-      "semantic_identity_policy": "quarantined-deployment-terminal+prior-recovery-terminal+command-arguments",
+      "semantic_identity_policy": "quarantined-deployment-terminal+command-arguments",
       "target_capability_policy": "phone-production-quarantine-recovery",
       "workflow": ".github/workflows/quarantined-release-recovery.yml"
     }
