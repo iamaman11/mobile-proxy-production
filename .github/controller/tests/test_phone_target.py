@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 
 fake_android = ModuleType("android_target")
 
@@ -399,14 +399,15 @@ def test_materialize_and_activate_share_root_script_primitive() -> None:
 
     def fake_root_script(serial, script, timeout=30):
         calls.append((serial, script, timeout))
+        if len(calls) == 2:
+            return root_result(stdout=b"0=exact\n")
         return root_result()
-
-    def fake_read(serial, args, timeout=30, input_text=None):
-        return SimpleNamespace(returncode=0, stdout=f"{expected}  file\n")
 
     originals = (phone_target._run_root_script, phone_target._read)
     phone_target._run_root_script = fake_root_script
-    phone_target._read = fake_read
+    phone_target._read = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("protected runtime used unprivileged adb")
+    )
     try:
         target = phone_target._materialize_inactive(
             serial="serial", release_id="v0.1.6", stage="/data/local/tmp/stage", files=files
@@ -415,12 +416,14 @@ def test_materialize_and_activate_share_root_script_primitive() -> None:
     finally:
         phone_target._run_root_script, phone_target._read = originals
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0][0] == "serial" and calls[0][2] == 180
     assert b"set -eu" in calls[0][1] and b"mkdir -p" in calls[0][1] and b"cp -pR" in calls[0][1]
-    assert calls[1][0] == "serial" and calls[1][2] == 150
-    assert b"set -eu" in calls[1][1] and b"MOBILE_PROXY_BOOT" in calls[1][1]
-    assert b'sh "$ROOT/current/service.sh"' in calls[1][1]
+    assert calls[1][0] == "serial" and calls[1][2] == 60 and b"check_file" in calls[1][1]
+    assert b"/data/adb/mobile-proxy-node/releases/v0.1.6" in calls[1][1]
+    assert calls[2][0] == "serial" and calls[2][2] == 150
+    assert b"set -eu" in calls[2][1] and b"MOBILE_PROXY_BOOT" in calls[2][1]
+    assert b'sh "$ROOT/current/service.sh"' in calls[2][1]
 
 
 def test_composite_dispatch_calls_apk_then_runtime_once() -> None:
@@ -466,6 +469,54 @@ def test_composite_dispatch_calls_apk_then_runtime_once() -> None:
             ) = originals
         assert result.confirmed is True and result.outcome_unknown is False
         assert calls == ["apk", "stage", "runtime", "activate"]
+
+
+def test_composite_dispatch_classifies_pre_activation_failure() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        apk = Path(raw) / "app.apk"
+        apk.write_bytes(b"apk")
+        activated: list[bool] = []
+        originals = (phone_target._stage_runtime, phone_target._materialize_inactive, phone_target._activate)
+        phone_target._stage_runtime = lambda **kwargs: ("/stage", tuple())
+        phone_target._materialize_inactive = lambda **kwargs: (_ for _ in ()).throw(
+            phone_target.PhoneTargetUnavailable("deterministic pre-activation failure")
+        )
+        phone_target._activate = lambda **kwargs: activated.append(True)
+        try:
+            result = phone_target.dispatch_release_once(
+                serial="serial", apk=apk, release_root=release, release_id="v0.1.6",
+                required_paths=required, install_apk=False, install_runtime=True,
+            )
+        finally:
+            phone_target._stage_runtime, phone_target._materialize_inactive, phone_target._activate = originals
+        assert result.confirmed is False
+        assert result.outcome_unknown is True
+        assert result.error_class == "ROOTED_RUNTIME_PRE_ACTIVATION_FAILURE"
+        assert activated == []
+
+
+def test_composite_dispatch_classifies_completed_activation_failure() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        release, required = runtime_release(Path(raw))
+        apk = Path(raw) / "app.apk"
+        apk.write_bytes(b"apk")
+        originals = (phone_target._stage_runtime, phone_target._materialize_inactive, phone_target._activate)
+        phone_target._stage_runtime = lambda **kwargs: ("/stage", tuple())
+        phone_target._materialize_inactive = lambda **kwargs: "/data/adb/mobile-proxy-node/releases/v0.1.6"
+        phone_target._activate = lambda **kwargs: (_ for _ in ()).throw(
+            phone_target.PhoneTargetUnavailable("completed activation failure")
+        )
+        try:
+            result = phone_target.dispatch_release_once(
+                serial="serial", apk=apk, release_root=release, release_id="v0.1.6",
+                required_paths=required, install_apk=False, install_runtime=True,
+            )
+        finally:
+            phone_target._stage_runtime, phone_target._materialize_inactive, phone_target._activate = originals
+        assert result.confirmed is False
+        assert result.outcome_unknown is True
+        assert result.error_class == "ROOTED_RUNTIME_ACTIVATION_FAILED"
 
 
 def test_rooted_runtime_timeout_remains_unknown_after_mutation_boundary() -> None:
