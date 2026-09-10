@@ -42,9 +42,12 @@ def test_resource_route_has_independent_operation_identity() -> None:
     )
 
     assert route.route_id == "observe-phone-resource-sanity"
+    assert route.handler == "dispatch_workflow"
     assert route.operation == "observe-phone-resource-sanity"
     assert route.operation != "observe-phone-operational"
     assert route.operation in targets["phone-production"]["allowed_operations"]
+    assert route.target == "phone-production"
+    assert route.release_tag == "v0.1.7"
     assert route.target_capability_policy == "phone-production-resource-sanity-observation"
     assert route.workflow == ".github/workflows/phone-resource-sanity-observation.yml"
     assert route.read_only is True
