@@ -485,7 +485,7 @@ def test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence() -> None
         assert payload["observation"]["exercise_requests_succeeded"] is None
 
 
-def test_registry_uses_existing_read_only_extension_point_only() -> None:
+def test_registry_uses_independent_read_only_resource_operation() -> None:
     registry = json.loads(
         (PRODUCTION / "command-control-registry.json").read_text(
             encoding="utf-8"
@@ -499,8 +499,10 @@ def test_registry_uses_existing_read_only_extension_point_only() -> None:
     assert len(routes) == 1
     route = routes[0]
     assert route["handler"] == "dispatch_workflow"
-    assert route["operation"] == "observe-phone-operational"
+    assert route["operation"] == "observe-phone-resource-sanity"
+    assert route["operation"] != "observe-phone-operational"
     assert route["operation_class"] == "OBSERVE"
+    assert route["target_capability_policy"] == "phone-production-resource-sanity-observation"
     assert route["read_only"] is True and route["destructive"] is False
     assert route["allowed_targets"] == ["phone-production"]
     assert route["physical_domains"] == []
@@ -574,7 +576,7 @@ def main() -> int:
         test_request_failures_preserve_only_bounded_progress_and_classification,
         test_malformed_request_progress_fails_closed_without_raw_leak,
         test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence,
-        test_registry_uses_existing_read_only_extension_point_only,
+        test_registry_uses_independent_read_only_resource_operation,
         test_resource_workflow_is_standalone_serialized_and_bounded,
     )
     for test in tests:
