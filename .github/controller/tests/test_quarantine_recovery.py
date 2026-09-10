@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,10 +83,7 @@ def deployment_terminal(
         "next_allowed_operation": "read-only-observation-or-approved-recovery",
         "facts": {
             "recovery_observation": {
-                "apk": {
-                    "desired": True,
-                    "exact_artifact_verified": True,
-                },
+                "apk": {"desired": True, "exact_artifact_verified": True},
                 "runtime": {
                     "target_release": f"/data/adb/mobile-proxy-node/releases/{release}",
                     "target_release_exists": True,
@@ -103,7 +99,7 @@ def deployment_terminal(
 def recovery_intent(
     *, release: str, release_id: int, request_id: str, quarantined_ref: str, current_release: str
 ) -> dict[str, object]:
-    payload = {
+    return {
         "schema": RECOVERY_INTENT_SCHEMA,
         "semantic_recovery_id": recovery_id(
             release=release,
@@ -128,7 +124,6 @@ def recovery_intent(
         "blind_retry_allowed": False,
         "mutation_performed": False,
     }
-    return payload
 
 
 def recovery_terminal(
@@ -224,6 +219,32 @@ def test_deployment_eligibility_works_for_multiple_release_identities() -> None:
         assert quarantined_current_release(terminal, release=release) == current_release
 
 
+def test_release_ids_reject_bool_and_nonpositive_values() -> None:
+    release = "v2.3.4"
+    request_id = request("5")
+    intent = deployment_intent(release=release, release_id=234, request_id=request_id)
+    terminal = deployment_terminal(
+        release=release,
+        release_id=234,
+        request_id=request_id,
+        current_release="v2.3.3",
+    )
+    expect_error(lambda: validate_quarantined_deployment_intent(
+        dict(intent, release_id=True),
+        target=RECOVERY_TARGET,
+        release=release,
+        request_id=request_id,
+        release_id=True,
+    ))
+    expect_error(lambda: validate_quarantined_deployment_terminal(
+        dict(terminal, release_id=0),
+        target=RECOVERY_TARGET,
+        release=release,
+        request_id=request_id,
+        release_id=0,
+    ))
+
+
 def test_quarantine_eligibility_rejects_nonrecoverable_or_changed_shapes() -> None:
     release = "v2.3.4"
     request_id = request("5")
@@ -313,6 +334,14 @@ def test_recovery_terminal_contract_preserves_ambiguity_boundary() -> None:
         mutation_performed=True,
         postcondition_verified=False,
     )))
+    refused = recovery_terminal(
+        **base,
+        state="REFUSED",
+        mutation_performed=False,
+        postcondition_verified=False,
+    )
+    refused["recovery_intent_ref"] = "issue-comment:99"
+    expect_error(lambda: validate_recovery_terminal(refused))
 
 
 def test_managed_release_tag_is_bounded_to_semver_release_paths() -> None:
@@ -383,16 +412,17 @@ def test_runner_is_activation_only_and_reuses_existing_observers() -> None:
     for required in (
         "prepare_verified_release_runtime(",
         "observe_exact_inactive_runtime(",
-        "observe_runtime_operational_health(",
         "current_release_matches_quarantined_terminal",
         "_activate(",
         "recovery intent already exists; activation will not be repeated",
         '"blind_retry_performed": False',
         '"phone_runtime_bytes_rematerialized": False',
         '"apk_mutation_performed": False',
+        '"exact_release_desired": exact_release_desired',
     ):
         assert required in source
     assert source.count("_activate(") == 1
+    assert "observe_runtime_operational_health(" not in source
     for forbidden in (
         "dispatch_install_once(",
         "dispatch_release_once(",
@@ -402,6 +432,12 @@ def test_runner_is_activation_only_and_reuses_existing_observers() -> None:
         "adb install",
     ):
         assert forbidden not in source
+
+
+def test_prepare_refuses_any_existing_request_recovery_lineage() -> None:
+    source = PREPARE.read_text(encoding="utf-8")
+    assert "_request_recovery_records(" in source
+    assert "quarantined request already has recovery lineage" in source
 
 
 def test_independent_postcondition_adapter_has_no_mutation_capability() -> None:
