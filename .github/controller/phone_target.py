@@ -465,13 +465,13 @@ find "$TARGET" -type f -exec chmod 0600 {{}} +
 chmod 0700 "$TARGET/service.sh" "$TARGET/bin/runtime-supervisor" "$TARGET/bin/host-daemon" "$TARGET/bin/sing-box"
 """.encode()
     result = _run_root_script(serial, script, timeout=180)
-    if result.status != "completed" or result.returncode != 0:
+    if result.status != "completed":
+        raise PhoneTargetMutationOutcomeUnknown("rooted runtime inactive release materialization outcome is unknown")
+    if result.returncode != 0:
         raise PhoneTargetUnavailable("rooted runtime inactive release materialization failed")
-    for relative, _local, expected in files:
-        result = _read(serial, ["shell", "sha256sum", f"{target}/{relative}"])
-        actual = result.stdout.split()[0] if result.returncode == 0 and result.stdout.split() else ""
-        if actual != expected:
-            raise PhoneTargetUnavailable("rooted runtime materialized bytes differ before activation")
+    statuses = _observe_runtime_file_statuses(serial=serial, target=target, files=files)
+    if any(status != "exact" for status in statuses):
+        raise PhoneTargetUnavailable("rooted runtime materialized bytes differ before activation")
     return target
 
 
@@ -547,7 +547,14 @@ def dispatch_release_once(
                 serial=serial, release_root=release_root, release_id=release_id, required_paths=required_paths,
             )
             target = _materialize_inactive(serial=serial, release_id=release_id, stage=stage, files=files)
-            _activate(serial=serial, release_id=release_id, target=target)
-        except PhoneTargetUnavailable:
+        except PhoneTargetMutationOutcomeUnknown:
             return DispatchResult(False, True, "ROOTED_RUNTIME_MUTATION_OUTCOME_UNKNOWN")
+        except PhoneTargetUnavailable:
+            return DispatchResult(False, True, "ROOTED_RUNTIME_PRE_ACTIVATION_FAILURE")
+        try:
+            _activate(serial=serial, release_id=release_id, target=target)
+        except PhoneTargetMutationOutcomeUnknown:
+            return DispatchResult(False, True, "ROOTED_RUNTIME_MUTATION_OUTCOME_UNKNOWN")
+        except PhoneTargetUnavailable:
+            return DispatchResult(False, True, "ROOTED_RUNTIME_ACTIVATION_FAILED")
     return DispatchResult(True, False, None)
