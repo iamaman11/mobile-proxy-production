@@ -60,7 +60,7 @@ jobs:
           PY
 
   observe-phone:
-    name: Observe bounded phone-local resource headroom read-only
+    name: Observe bounded phone-local resource exercise read-only
     needs: admit
     runs-on: [self-hosted, Linux, X64, android-production]
     timeout-minutes: 10
@@ -78,7 +78,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Observe one bounded resource snapshot
+      - name: Run one bounded read-only local resource exercise
         shell: bash
         env:
           TARGET: ${{ inputs.target }}
@@ -156,7 +156,8 @@ jobs:
               'deployment_intent_created',
               'provider_access_performed',
               'provider_mutation_performed',
-              'synthetic_load_performed',
+              'production_scale_load_performed',
+              'external_network_traffic_performed',
               'performance_threshold_applied',
               'raw_status_json_recorded',
               'raw_config_recorded',
@@ -172,22 +173,37 @@ jobs:
               raise SystemExit('Stage 4 resource observation is malformed')
           if observation.get('queue_authority') != 'product-v1-status-current-job':
               raise SystemExit('Stage 4 resource queue authority differs')
-          if observation.get('performance_threshold_applied') is not False:
-              raise SystemExit('Stage 4 resource unexpectedly applied performance threshold')
-          if observation.get('synthetic_load_performed') is not False:
-              raise SystemExit('Stage 4 resource unexpectedly generated synthetic load')
+          for field in (
+              'production_scale_load_performed',
+              'external_network_traffic_performed',
+              'performance_threshold_applied',
+          ):
+              if observation.get(field) is not False:
+                  raise SystemExit(f'Stage 4 resource separation field differs: {field}')
 
           if classification == 'MEASURED':
               if value.get('failure_code') is not None or value.get('phone_failure_phase') is not None:
                   raise SystemExit('Stage 4 measured resource evidence retained failure metadata')
-              if observation.get('queue_clear') is not True or observation.get('process_set_exact') is not True:
-                  raise SystemExit('Stage 4 measured resource preconditions differ')
-              if observation.get('sample_count') != 1 or observation.get('resource_headroom_measured') is not True:
+              if safety.get('synthetic_load_performed') is not True:
+                  raise SystemExit('Stage 4 measured exercise did not truthfully record generated local load')
+              for field in ('queue_clear', 'process_set_exact', 'process_identity_stable'):
+                  if observation.get(field) is not True:
+                      raise SystemExit(f'Stage 4 measured resource precondition differs: {field}')
+              if observation.get('sample_count') != 3 or observation.get('resource_headroom_measured') is not True:
                   raise SystemExit('Stage 4 measured resource sampling contract differs')
+              if observation.get('bounded_local_exercise_completed') is not True:
+                  raise SystemExit('Stage 4 bounded resource exercise did not complete')
+              if observation.get('synthetic_load_performed') is not True:
+                  raise SystemExit('Stage 4 measured observation load evidence differs')
+              if observation.get('exercise_request_count') != 12 or observation.get('exercise_requests_succeeded') != 12:
+                  raise SystemExit('Stage 4 bounded exercise request count differs')
+              if observation.get('recovery_wait_seconds') != 2:
+                  raise SystemExit('Stage 4 bounded recovery window differs')
               for field in ('watchdog_count', 'runtime_supervisor_count', 'host_daemon_count', 'sing_box_count'):
                   if observation.get(field) != 1:
                       raise SystemExit(f'Stage 4 measured process count differs: {field}')
-              integer_fields = (
+
+              sample_fields = (
                   'memory_total_kib',
                   'memory_available_kib',
                   'data_total_kib',
@@ -195,40 +211,88 @@ jobs:
                   'runtime_rss_kib',
                   'runtime_fd_count',
                   'logs_kib',
+                  'runtime_cpu_ticks',
+                  'system_cpu_ticks',
+              )
+              for prefix in ('baseline', 'exercise', 'recovery'):
+                  for field in sample_fields:
+                      if not isinstance(observation.get(f'{prefix}_{field}'), int):
+                          raise SystemExit(f'Stage 4 measured sample field differs: {prefix}_{field}')
+                  if observation[f'{prefix}_memory_total_kib'] <= 0 or observation[f'{prefix}_memory_available_kib'] <= 0:
+                      raise SystemExit('Stage 4 measured memory has no observable headroom')
+                  if observation[f'{prefix}_memory_available_kib'] > observation[f'{prefix}_memory_total_kib']:
+                      raise SystemExit('Stage 4 measured memory evidence is contradictory')
+                  if observation[f'{prefix}_data_total_kib'] <= 0 or observation[f'{prefix}_data_available_kib'] <= 0:
+                      raise SystemExit('Stage 4 measured data filesystem has no observable headroom')
+                  if observation[f'{prefix}_data_available_kib'] > observation[f'{prefix}_data_total_kib']:
+                      raise SystemExit('Stage 4 measured filesystem evidence is contradictory')
+                  if observation[f'{prefix}_runtime_rss_kib'] <= 0 or observation[f'{prefix}_runtime_fd_count'] <= 0:
+                      raise SystemExit('Stage 4 measured runtime footprint is invalid')
+
+              if not (
+                  observation['baseline_memory_total_kib'] == observation['exercise_memory_total_kib'] == observation['recovery_memory_total_kib']
+                  and observation['baseline_data_total_kib'] == observation['exercise_data_total_kib'] == observation['recovery_data_total_kib']
+              ):
+                  raise SystemExit('Stage 4 measured resource totals drifted during bounded exercise')
+
+              integer_fields = (
                   'memory_available_basis_points',
                   'data_available_basis_points',
                   'memory_headroom_to_runtime_rss_milli',
+                  'minimum_memory_available_kib',
+                  'minimum_data_available_kib',
+                  'peak_runtime_rss_kib',
+                  'peak_runtime_fd_count',
+                  'exercise_runtime_cpu_delta_ticks',
+                  'exercise_system_cpu_delta_ticks',
+                  'exercise_cpu_basis_points',
+                  'recovery_runtime_cpu_delta_ticks',
+                  'recovery_system_cpu_delta_ticks',
+                  'recovery_cpu_basis_points',
+                  'rss_exercise_delta_kib',
+                  'rss_recovery_delta_kib',
+                  'fd_exercise_delta',
+                  'fd_recovery_delta',
+                  'log_exercise_delta_kib',
+                  'log_recovery_delta_kib',
               )
               if any(not isinstance(observation.get(field), int) for field in integer_fields):
-                  raise SystemExit('Stage 4 measured resource numeric evidence differs')
-              if observation['memory_total_kib'] <= 0 or observation['memory_available_kib'] <= 0:
-                  raise SystemExit('Stage 4 measured memory has no observable headroom')
-              if observation['memory_available_kib'] > observation['memory_total_kib']:
-                  raise SystemExit('Stage 4 measured memory evidence is contradictory')
-              if observation['data_total_kib'] <= 0 or observation['data_available_kib'] <= 0:
-                  raise SystemExit('Stage 4 measured data filesystem has no observable headroom')
-              if observation['data_available_kib'] > observation['data_total_kib']:
-                  raise SystemExit('Stage 4 measured filesystem evidence is contradictory')
-              if observation['runtime_rss_kib'] <= 0 or observation['runtime_fd_count'] <= 0:
-                  raise SystemExit('Stage 4 measured runtime footprint is invalid')
+                  raise SystemExit('Stage 4 measured derived resource evidence differs')
+              if observation['exercise_runtime_cpu_delta_ticks'] < 0 or observation['recovery_runtime_cpu_delta_ticks'] < 0:
+                  raise SystemExit('Stage 4 runtime CPU evidence regressed')
+              if observation['exercise_system_cpu_delta_ticks'] <= 0 or observation['recovery_system_cpu_delta_ticks'] <= 0:
+                  raise SystemExit('Stage 4 system CPU sample interval is invalid')
+              for field in ('rss_monotonic_growth', 'fd_monotonic_growth', 'log_monotonic_growth'):
+                  if not isinstance(observation.get(field), bool):
+                      raise SystemExit(f'Stage 4 monotonic-growth diagnostic differs: {field}')
+
               print(
                   'STAGE4_PHONE_RESOURCE_MEASURED '
-                  f"memory_available_kib={observation['memory_available_kib']} "
+                  f"memory_min_kib={observation['minimum_memory_available_kib']} "
                   f"memory_available_bp={observation['memory_available_basis_points']} "
-                  f"data_available_kib={observation['data_available_kib']} "
+                  f"data_min_kib={observation['minimum_data_available_kib']} "
                   f"data_available_bp={observation['data_available_basis_points']} "
-                  f"runtime_rss_kib={observation['runtime_rss_kib']} "
-                  f"runtime_fd_count={observation['runtime_fd_count']} "
-                  f"logs_kib={observation['logs_kib']} "
-                  f"memory_headroom_runtime_milli={observation['memory_headroom_to_runtime_rss_milli']}"
+                  f"runtime_rss_peak_kib={observation['peak_runtime_rss_kib']} "
+                  f"runtime_fd_peak={observation['peak_runtime_fd_count']} "
+                  f"exercise_cpu_bp={observation['exercise_cpu_basis_points']} "
+                  f"recovery_cpu_bp={observation['recovery_cpu_basis_points']} "
+                  f"rss_recovery_delta_kib={observation['rss_recovery_delta_kib']} "
+                  f"fd_recovery_delta={observation['fd_recovery_delta']} "
+                  f"log_recovery_delta_kib={observation['log_recovery_delta_kib']} "
+                  f"rss_monotonic={str(observation['rss_monotonic_growth']).lower()} "
+                  f"fd_monotonic={str(observation['fd_monotonic_growth']).lower()}"
               )
           elif classification == 'BUSY':
               if value.get('failure_code') is not None or value.get('phone_failure_phase') is not None:
                   raise SystemExit('Stage 4 BUSY resource evidence retained failure metadata')
+              if safety.get('synthetic_load_performed') is not False:
+                  raise SystemExit('Stage 4 BUSY resource evidence incorrectly claims local load')
               if observation.get('queue_clear') is not False or observation.get('resource_headroom_measured') is not False:
                   raise SystemExit('Stage 4 BUSY resource evidence differs')
               if observation.get('sample_count') != 0 or observation.get('process_set_exact') is not None:
                   raise SystemExit('Stage 4 BUSY resource sampling contract differs')
+              if observation.get('bounded_local_exercise_completed') is not False:
+                  raise SystemExit('Stage 4 BUSY unexpectedly completed exercise')
               print('STAGE4_PHONE_RESOURCE_BUSY queue_clear=false phone_mutation=false')
           else:
               if value.get('failure_code') not in {
@@ -239,12 +303,20 @@ jobs:
                   'RESOURCE_FILESYSTEM_SAMPLE_INVALID',
                   'RESOURCE_PROCESS_SAMPLE_INVALID',
                   'RESOURCE_LOG_SAMPLE_INVALID',
+                  'RESOURCE_EXERCISE_REQUEST_FAILED',
+                  'RESOURCE_CPU_SAMPLE_INVALID',
+                  'RESOURCE_PROCESS_IDENTITY_CHANGED',
+                  'RESOURCE_QUEUE_CHANGED',
                   'RESOURCE_OUTPUT_MALFORMED',
                   'PHONE_TARGET_UNAVAILABLE',
               }:
                   raise SystemExit('Stage 4 resource UNKNOWN lacks bounded failure code')
+              if safety.get('synthetic_load_performed') is not None:
+                  raise SystemExit('Stage 4 UNKNOWN made an unsupported claim about partial exercise load')
               if observation.get('evaluated') is not False or observation.get('resource_headroom_measured') is not False:
                   raise SystemExit('Stage 4 resource UNKNOWN observation differs')
+              if observation.get('bounded_local_exercise_completed') is not None:
+                  raise SystemExit('Stage 4 UNKNOWN made an unsupported exercise-completion claim')
               print(
                   'STAGE4_PHONE_RESOURCE_UNKNOWN '
                   f"failure_code={value.get('failure_code')} "

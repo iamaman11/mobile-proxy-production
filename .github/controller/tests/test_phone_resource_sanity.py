@@ -44,65 +44,119 @@ def load_adapter():
 
 
 def _measured_output() -> bytes:
-    return b"""classification=MEASURED
-queue_clear=true
-process_set_exact=true
-watchdog_count=1
-runtime_supervisor_count=1
-host_daemon_count=1
-sing_box_count=1
-memory_total_kib=8000000
-memory_available_kib=4000000
-data_total_kib=64000000
-data_available_kib=32000000
-runtime_rss_kib=100000
-runtime_fd_count=120
-logs_kib=4096
-sample_count=1
-"""
+    lines = [
+        "classification=MEASURED",
+        "queue_clear=true",
+        "process_set_exact=true",
+        "process_identity_stable=true",
+        "watchdog_count=1",
+        "runtime_supervisor_count=1",
+        "host_daemon_count=1",
+        "sing_box_count=1",
+        "sample_count=3",
+        "exercise_request_count=12",
+        "exercise_requests_succeeded=12",
+        "recovery_wait_seconds=2",
+        "bounded_local_exercise_completed=true",
+    ]
+    fields = (
+        "memory_total_kib",
+        "memory_available_kib",
+        "data_total_kib",
+        "data_available_kib",
+        "runtime_rss_kib",
+        "runtime_fd_count",
+        "logs_kib",
+        "runtime_cpu_ticks",
+        "system_cpu_ticks",
+    )
+    samples = {
+        "baseline": (
+            8_000_000,
+            4_000_000,
+            64_000_000,
+            32_000_000,
+            100_000,
+            120,
+            4096,
+            1000,
+            100_000,
+        ),
+        "exercise": (
+            8_000_000,
+            3_900_000,
+            64_000_000,
+            31_999_000,
+            102_000,
+            122,
+            4097,
+            1025,
+            100_500,
+        ),
+        "recovery": (
+            8_000_000,
+            4_100_000,
+            64_000_000,
+            31_999_500,
+            100_500,
+            120,
+            4097,
+            1030,
+            102_500,
+        ),
+    }
+    for prefix, values in samples.items():
+        lines.extend(
+            f"{prefix}_{field}={value}"
+            for field, value in zip(fields, values)
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _busy_output() -> bytes:
     return b"""classification=BUSY
 queue_clear=false
 process_set_exact=unknown
+process_identity_stable=unknown
 watchdog_count=unknown
 runtime_supervisor_count=unknown
 host_daemon_count=unknown
 sing_box_count=unknown
-memory_total_kib=unknown
-memory_available_kib=unknown
-data_total_kib=unknown
-data_available_kib=unknown
-runtime_rss_kib=unknown
-runtime_fd_count=unknown
-logs_kib=unknown
 sample_count=0
+exercise_request_count=12
+exercise_requests_succeeded=0
+recovery_wait_seconds=2
+bounded_local_exercise_completed=false
 """
 
 
-def test_script_is_single_snapshot_read_only_and_headroom_focused() -> None:
+def test_script_is_bounded_read_only_exercise_with_safe_cpu_parser() -> None:
     module = load_controller()
     source = module._resource_script("safe-admin-token").decode("utf-8")
     assert len(source.encode("utf-8")) <= 16 * 1024
     for required in (
+        "EXERCISE_REQUEST_COUNT=12",
+        "RECOVERY_WAIT_SECONDS=2",
         "GET /v1/status",
         "current_job",
+        '"$BB_BIN" sleep "$RECOVERY_WAIT_SECONDS"',
         "MemTotal:",
         "MemAvailable:",
         'df -Pk /data',
         "VmRSS:",
         '"/proc/$sample_pid/fd"/*',
+        '"/proc/$sample_pid/stat"',
+        'stat_rest="${stat_line##*) }"',
+        'utime="${12}"',
+        'stime="${13}"',
         'du -sk "$ROOT/logs"',
-        "sample_count=1",
-        "process_set_exact=true",
+        "sample_count=3",
+        "bounded_local_exercise_completed=true",
     ):
         assert required in source, required
     for forbidden in (
-        "GET /v1/health",
         "POST ",
         "/v1/ip/rotate",
-        " sleep ",
         "kill ",
         "reboot",
         "setprop sys.powerctl",
@@ -114,28 +168,42 @@ def test_script_is_single_snapshot_read_only_and_headroom_focused() -> None:
         "service.sh",
         "adb install",
         "adb push",
-        "/proc/$pid/stat",
-        "${14}",
-        "${15}",
-        "${22}",
+        "set -- $stat_line",
     ):
         assert forbidden not in source, forbidden
 
 
-def test_parser_preserves_only_bounded_aggregate_headroom() -> None:
+def test_parser_preserves_bounded_exercise_and_recovery_evidence() -> None:
     module = load_controller()
     observation = module._parse_output(_measured_output())
     bounded = observation.to_bounded_dict()
     assert bounded["classification"] == "MEASURED"
     assert bounded["queue_clear"] is True
     assert bounded["process_set_exact"] is True
-    assert bounded["sample_count"] == 1
-    assert bounded["memory_available_basis_points"] == 5000
-    assert bounded["data_available_basis_points"] == 5000
-    assert bounded["memory_headroom_to_runtime_rss_milli"] == 40000
-    assert bounded["queue_authority"] == "product-v1-status-current-job"
+    assert bounded["process_identity_stable"] is True
+    assert bounded["sample_count"] == 3
+    assert bounded["exercise_request_count"] == 12
+    assert bounded["exercise_requests_succeeded"] == 12
+    assert bounded["recovery_wait_seconds"] == 2
+    assert bounded["bounded_local_exercise_completed"] is True
+    assert bounded["memory_available_basis_points"] == 5125
+    assert bounded["data_available_basis_points"] == 4999
+    assert bounded["minimum_memory_available_kib"] == 3_900_000
+    assert bounded["peak_runtime_rss_kib"] == 102_000
+    assert bounded["exercise_runtime_cpu_delta_ticks"] == 25
+    assert bounded["exercise_system_cpu_delta_ticks"] == 500
+    assert bounded["exercise_cpu_basis_points"] == 500
+    assert bounded["recovery_cpu_basis_points"] == 25
+    assert bounded["rss_exercise_delta_kib"] == 2000
+    assert bounded["rss_recovery_delta_kib"] == 500
+    assert bounded["fd_exercise_delta"] == 2
+    assert bounded["fd_recovery_delta"] == 0
+    assert bounded["rss_monotonic_growth"] is False
+    assert bounded["fd_monotonic_growth"] is False
+    assert bounded["synthetic_load_performed"] is True
+    assert bounded["production_scale_load_performed"] is False
+    assert bounded["external_network_traffic_performed"] is False
     assert bounded["performance_threshold_applied"] is False
-    assert bounded["synthetic_load_performed"] is False
     assert "pid" not in bounded and "pids" not in bounded
     assert "cmdline" not in bounded and "cmdlines" not in bounded
     serialized = json.dumps(bounded, sort_keys=True)
@@ -143,28 +211,47 @@ def test_parser_preserves_only_bounded_aggregate_headroom() -> None:
     assert '"current_job": "' not in serialized
 
 
-def test_busy_queue_refuses_to_mix_resource_sample_with_active_operation() -> None:
+def test_busy_queue_refuses_to_start_exercise() -> None:
     module = load_controller()
-    observation = module._parse_output(_busy_output())
-    bounded = observation.to_bounded_dict()
+    bounded = module._parse_output(_busy_output()).to_bounded_dict()
     assert bounded["classification"] == "BUSY"
     assert bounded["queue_clear"] is False
     assert bounded["process_set_exact"] is None
     assert bounded["sample_count"] == 0
+    assert bounded["bounded_local_exercise_completed"] is False
+    assert bounded["synthetic_load_performed"] is False
     assert bounded["resource_headroom_measured"] is False
-    assert bounded["memory_available_kib"] is None
-    assert bounded["runtime_rss_kib"] is None
 
 
 def test_malformed_or_contradictory_output_fails_closed() -> None:
     module = load_controller()
     cases = (
         _measured_output() + b"raw_pid=123\n",
-        _measured_output().replace(b"sample_count=1", b"sample_count=0"),
-        _measured_output().replace(b"watchdog_count=1", b"watchdog_count=2"),
-        _measured_output().replace(b"memory_available_kib=4000000", b"memory_available_kib=9000000"),
-        _measured_output().replace(b"runtime_fd_count=120", b"runtime_fd_count=0"),
-        _busy_output().replace(b"process_set_exact=unknown", b"process_set_exact=true"),
+        _measured_output().replace(b"sample_count=3", b"sample_count=2"),
+        _measured_output().replace(
+            b"exercise_requests_succeeded=12",
+            b"exercise_requests_succeeded=11",
+        ),
+        _measured_output().replace(
+            b"process_identity_stable=true",
+            b"process_identity_stable=false",
+        ),
+        _measured_output().replace(
+            b"exercise_memory_available_kib=3900000",
+            b"exercise_memory_available_kib=9000000",
+        ),
+        _measured_output().replace(
+            b"exercise_runtime_cpu_ticks=1025",
+            b"exercise_runtime_cpu_ticks=999",
+        ),
+        _measured_output().replace(
+            b"recovery_system_cpu_ticks=102500",
+            b"recovery_system_cpu_ticks=100400",
+        ),
+        _busy_output().replace(
+            b"process_set_exact=unknown",
+            b"process_set_exact=true",
+        ),
     )
     for raw in cases:
         try:
@@ -177,34 +264,60 @@ def test_malformed_or_contradictory_output_fails_closed() -> None:
 
 def test_transport_and_sampler_failures_remain_bounded() -> None:
     module = load_controller()
-
-    result = SimpleNamespace(
-        status="completed",
-        returncode=22,
-        stdout=b"sensitive raw sample",
-        stderr=b"",
-        stdout_truncated=False,
-        stderr_truncated=False,
-    )
-    with patch.object(module.phone_target, "_probe_root_capability", return_value=None), patch.object(
-        module.phone_target, "_run_root_script", return_value=result
+    for returncode, expected in (
+        (22, "RESOURCE_PROCESS_SET_NOT_EXACT"),
+        (27, "RESOURCE_EXERCISE_REQUEST_FAILED"),
+        (28, "RESOURCE_CPU_SAMPLE_INVALID"),
+        (29, "RESOURCE_PROCESS_IDENTITY_CHANGED"),
+        (30, "RESOURCE_QUEUE_CHANGED"),
     ):
-        try:
-            module.observe_phone_resource_sanity("registered-secret", admin_token="admin-secret")
-        except module.PhoneResourceSanityUnavailable as exc:
-            assert exc.failure_code == "RESOURCE_PROCESS_SET_NOT_EXACT"
-            assert "sensitive" not in str(exc)
-        else:
-            raise AssertionError("nonzero resource sampler unexpectedly accepted")
+        result = SimpleNamespace(
+            status="completed",
+            returncode=returncode,
+            stdout=b"sensitive raw sample",
+            stderr=b"",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+        with patch.object(
+            module.phone_target,
+            "_probe_root_capability",
+            return_value=None,
+        ), patch.object(
+            module.phone_target,
+            "_run_root_script",
+            return_value=result,
+        ), patch.object(
+            module.phone_target,
+            "_root_transport_failure_phase",
+            return_value=None,
+        ):
+            try:
+                module.observe_phone_resource_sanity(
+                    "registered-secret",
+                    admin_token="admin-secret",
+                )
+            except module.PhoneResourceSanityUnavailable as exc:
+                assert exc.failure_code == expected
+                assert "sensitive" not in str(exc)
+            else:
+                raise AssertionError(
+                    "nonzero resource sampler unexpectedly accepted"
+                )
 
 
-def test_adapter_writes_secret_safe_measured_and_unknown_evidence() -> None:
+def test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence() -> None:
     controller = load_controller()
     adapter = load_adapter()
     measured = controller._parse_output(_measured_output())
+    busy = controller._parse_output(_busy_output())
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        with patch.object(adapter, "observe_phone_resource_sanity", return_value=measured):
+        with patch.object(
+            adapter,
+            "observe_phone_resource_sanity",
+            return_value=measured,
+        ):
             payload = adapter.observe(
                 target="phone-production",
                 release_tag="v0.1.7",
@@ -214,29 +327,62 @@ def test_adapter_writes_secret_safe_measured_and_unknown_evidence() -> None:
                 output=root / "measured.json",
             )
         assert payload["classification"] == "MEASURED"
+        assert payload["safety"]["synthetic_load_performed"] is True
+        assert payload["safety"]["production_scale_load_performed"] is False
         text = (root / "measured.json").read_text(encoding="utf-8")
         assert "registered-secret" not in text and "admin-secret" not in text
 
-        failure = adapter.PhoneResourceSanityUnavailable("RESOURCE_MEMORY_SAMPLE_INVALID")
-        with patch.object(adapter, "observe_phone_resource_sanity", side_effect=failure):
+        with patch.object(
+            adapter,
+            "observe_phone_resource_sanity",
+            return_value=busy,
+        ):
             payload = adapter.observe(
                 target="phone-production",
                 release_tag="v0.1.7",
                 controller_revision="b" * 40,
                 serial="registered-secret",
                 admin_token="admin-secret",
+                output=root / "busy.json",
+            )
+        assert payload["classification"] == "BUSY"
+        assert payload["safety"]["synthetic_load_performed"] is False
+
+        failure = adapter.PhoneResourceSanityUnavailable(
+            "RESOURCE_CPU_SAMPLE_INVALID"
+        )
+        with patch.object(
+            adapter,
+            "observe_phone_resource_sanity",
+            side_effect=failure,
+        ):
+            payload = adapter.observe(
+                target="phone-production",
+                release_tag="v0.1.7",
+                controller_revision="c" * 40,
+                serial="registered-secret",
+                admin_token="admin-secret",
                 output=root / "unknown.json",
             )
         assert payload["classification"] == "UNKNOWN"
-        assert payload["failure_code"] == "RESOURCE_MEMORY_SAMPLE_INVALID"
-        assert payload["observation"]["resource_headroom_measured"] is False
+        assert payload["failure_code"] == "RESOURCE_CPU_SAMPLE_INVALID"
+        assert payload["safety"]["synthetic_load_performed"] is None
+        assert payload["observation"]["bounded_local_exercise_completed"] is None
         text = (root / "unknown.json").read_text(encoding="utf-8")
         assert "registered-secret" not in text and "admin-secret" not in text
 
 
 def test_registry_uses_existing_read_only_extension_point_only() -> None:
-    registry = json.loads((PRODUCTION / "command-control-registry.json").read_text(encoding="utf-8"))
-    routes = [item for item in registry["routes"] if item.get("id") == "observe-phone-resource-sanity"]
+    registry = json.loads(
+        (PRODUCTION / "command-control-registry.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    routes = [
+        item
+        for item in registry["routes"]
+        if item.get("id") == "observe-phone-resource-sanity"
+    ]
     assert len(routes) == 1
     route = routes[0]
     assert route["handler"] == "dispatch_workflow"
@@ -247,13 +393,21 @@ def test_registry_uses_existing_read_only_extension_point_only() -> None:
     assert route["physical_domains"] == []
     assert route["ref"] == "main"
     assert route["ref_policy"] == "controller-main-exact"
-    assert route["dispatch_inputs"] == {"release_tag": "release", "target": "target"}
+    assert route["dispatch_inputs"] == {
+        "release_tag": "release",
+        "target": "target",
+    }
     assert route["workflow"] == ".github/workflows/phone-resource-sanity-observation.yml"
-    assert route["pattern"] == r"^/observe-phone-resource-sanity (?P<target>phone-production) (?P<release>v0\.1\.7)$"
+    assert route["pattern"] == (
+        r"^/observe-phone-resource-sanity "
+        r"(?P<target>phone-production) (?P<release>v0\.1\.7)$"
+    )
 
 
-def test_resource_workflow_is_standalone_serialized_and_read_only() -> None:
-    source = (WORKFLOWS / "phone-resource-sanity-observation.yml").read_text(encoding="utf-8")
+def test_resource_workflow_is_standalone_serialized_and_bounded() -> None:
+    source = (WORKFLOWS / "phone-resource-sanity-observation.yml").read_text(
+        encoding="utf-8"
+    )
     for required in (
         "workflow_dispatch:",
         "runs-on: [self-hosted, Linux, X64, android-production]",
@@ -261,11 +415,20 @@ def test_resource_workflow_is_standalone_serialized_and_read_only() -> None:
         "cancel-in-progress: false",
         "environment: phone-production",
         ".github/scripts/observe_phone_resource_sanity.py",
+        "Run one bounded read-only local resource exercise",
         "stage4-phone-resource-sanity.v1",
         "stage4-phone-resource-sanity-${{ github.run_id }}-${{ github.run_attempt }}",
         "retention-days: 90",
-        "performance_threshold_applied",
+        "sample_count') != 3",
+        "exercise_request_count') != 12",
+        "recovery_wait_seconds') != 2",
         "synthetic_load_performed",
+        "production_scale_load_performed",
+        "external_network_traffic_performed",
+        "performance_threshold_applied",
+        "RESOURCE_CPU_SAMPLE_INVALID",
+        "RESOURCE_PROCESS_IDENTITY_CHANGED",
+        "RESOURCE_QUEUE_CHANGED",
     ):
         assert required in source, required
     for forbidden in (
@@ -286,14 +449,14 @@ def test_resource_workflow_is_standalone_serialized_and_read_only() -> None:
 
 def main() -> int:
     tests = (
-        test_script_is_single_snapshot_read_only_and_headroom_focused,
-        test_parser_preserves_only_bounded_aggregate_headroom,
-        test_busy_queue_refuses_to_mix_resource_sample_with_active_operation,
+        test_script_is_bounded_read_only_exercise_with_safe_cpu_parser,
+        test_parser_preserves_bounded_exercise_and_recovery_evidence,
+        test_busy_queue_refuses_to_start_exercise,
         test_malformed_or_contradictory_output_fails_closed,
         test_transport_and_sampler_failures_remain_bounded,
-        test_adapter_writes_secret_safe_measured_and_unknown_evidence,
+        test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence,
         test_registry_uses_existing_read_only_extension_point_only,
-        test_resource_workflow_is_standalone_serialized_and_read_only,
+        test_resource_workflow_is_standalone_serialized_and_bounded,
     )
     for test in tests:
         test()
