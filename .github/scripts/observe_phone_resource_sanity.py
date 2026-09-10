@@ -32,7 +32,7 @@ def _atomic_write(path: Path, value: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def _base_safety() -> dict[str, object]:
+def _base_safety(*, synthetic_load_performed: bool | None) -> dict[str, object]:
     return {
         "phone_access_performed": True,
         "exact_phone_release_state_observed": False,
@@ -41,13 +41,28 @@ def _base_safety() -> dict[str, object]:
         "deployment_intent_created": False,
         "provider_access_performed": False,
         "provider_mutation_performed": False,
-        "synthetic_load_performed": False,
+        "synthetic_load_performed": synthetic_load_performed,
+        "production_scale_load_performed": False,
+        "external_network_traffic_performed": False,
         "performance_threshold_applied": False,
         "raw_status_json_recorded": False,
         "raw_config_recorded": False,
         "secret_values_recorded": False,
         "process_ids_recorded": False,
         "process_cmdlines_recorded": False,
+    }
+
+
+def _unknown_observation() -> dict[str, object]:
+    return {
+        "evaluated": False,
+        "queue_authority": "product-v1-status-current-job",
+        "resource_headroom_measured": False,
+        "bounded_local_exercise_completed": None,
+        "synthetic_load_performed": None,
+        "production_scale_load_performed": False,
+        "external_network_traffic_performed": False,
+        "performance_threshold_applied": False,
     }
 
 
@@ -70,42 +85,31 @@ def observe(
     failure_code: str | None = None
     phone_failure_phase: str | None = None
     observation: dict[str, object]
+    synthetic_load_performed: bool | None
     try:
         measured = observe_phone_resource_sanity(serial, admin_token=admin_token)
         classification = measured.classification
         observation = measured.to_bounded_dict()
+        synthetic_load_performed = (
+            True if measured.bounded_local_exercise_completed else False
+        )
     except PhoneResourceSanityUnavailable as exc:
         classification = "UNKNOWN"
         failure_code = exc.failure_code
-        observation = {
-            "evaluated": False,
-            "queue_authority": "product-v1-status-current-job",
-            "resource_headroom_measured": False,
-            "performance_threshold_applied": False,
-            "synthetic_load_performed": False,
-        }
+        observation = _unknown_observation()
+        synthetic_load_performed = None
     except phone_target.PhoneTargetDiagnosticFailure as exc:
         classification = "UNKNOWN"
         failure_code = "PHONE_TARGET_UNAVAILABLE"
         phone_failure_phase = exc.phase.value
-        observation = {
-            "evaluated": False,
-            "queue_authority": "product-v1-status-current-job",
-            "resource_headroom_measured": False,
-            "performance_threshold_applied": False,
-            "synthetic_load_performed": False,
-        }
+        observation = _unknown_observation()
+        synthetic_load_performed = None
     except phone_target.PhoneTargetUnavailable:
         classification = "UNKNOWN"
         failure_code = "PHONE_TARGET_UNAVAILABLE"
         phone_failure_phase = "UNKNOWN"
-        observation = {
-            "evaluated": False,
-            "queue_authority": "product-v1-status-current-job",
-            "resource_headroom_measured": False,
-            "performance_threshold_applied": False,
-            "synthetic_load_performed": False,
-        }
+        observation = _unknown_observation()
+        synthetic_load_performed = None
 
     payload: dict[str, object] = {
         "schema": _SCHEMA,
@@ -116,7 +120,9 @@ def observe(
         "failure_code": failure_code,
         "phone_failure_phase": phone_failure_phase,
         "observation": observation,
-        "safety": _base_safety(),
+        "safety": _base_safety(
+            synthetic_load_performed=synthetic_load_performed
+        ),
     }
     _atomic_write(output, payload)
     return payload
@@ -143,12 +149,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"STAGE4_PHONE_RESOURCE_SANITY_REFUSED reason={exc}", file=sys.stderr)
         return 2
 
+    synthetic = payload["safety"].get("synthetic_load_performed")
+    synthetic_text = "unknown" if synthetic is None else str(synthetic).lower()
     fields = [
         "STAGE4_PHONE_RESOURCE_SANITY_CLASSIFIED",
         f"classification={payload['classification']}",
         "phone_mutation=false",
         "provider_access=false",
-        "synthetic_load=false",
+        f"synthetic_load={synthetic_text}",
+        "production_scale_load=false",
+        "external_network_traffic=false",
         "performance_threshold=false",
     ]
     failure_code = payload.get("failure_code")
