@@ -55,6 +55,7 @@ def _measured_output() -> bytes:
         "sing_box_count=1",
         "sample_count=3",
         "exercise_request_count=12",
+        "exercise_requests_attempted=12",
         "exercise_requests_succeeded=12",
         "recovery_wait_seconds=2",
         "bounded_local_exercise_completed=true",
@@ -124,10 +125,18 @@ host_daemon_count=unknown
 sing_box_count=unknown
 sample_count=0
 exercise_request_count=12
+exercise_requests_attempted=0
 exercise_requests_succeeded=0
 recovery_wait_seconds=2
 bounded_local_exercise_completed=false
 """
+
+
+def _progress_output(attempted: int, succeeded: int) -> bytes:
+    return (
+        f"exercise_requests_attempted={attempted}\n"
+        f"exercise_requests_succeeded={succeeded}\n"
+    ).encode("utf-8")
 
 
 def test_script_is_bounded_read_only_exercise_with_safe_cpu_parser() -> None:
@@ -139,6 +148,10 @@ def test_script_is_bounded_read_only_exercise_with_safe_cpu_parser() -> None:
         "RECOVERY_WAIT_SECONDS=2",
         "GET /v1/status",
         "current_job",
+        "return 31",
+        "return 32",
+        "fail_with_request_progress",
+        "exercise_requests_attempted=$((exercise_requests_attempted + 1))",
         '"$BB_BIN" sleep "$RECOVERY_WAIT_SECONDS"',
         "MemTotal:",
         "MemAvailable:",
@@ -151,9 +164,11 @@ def test_script_is_bounded_read_only_exercise_with_safe_cpu_parser() -> None:
         'stime="${13}"',
         'du -sk "$ROOT/logs"',
         "sample_count=3",
+        "exercise_requests_attempted=%s",
         "bounded_local_exercise_completed=true",
     ):
         assert required in source, required
+    assert source.count('"$BB_BIN" sleep "$RECOVERY_WAIT_SECONDS"') == 1
     for forbidden in (
         "POST ",
         "/v1/ip/rotate",
@@ -168,6 +183,7 @@ def test_script_is_bounded_read_only_exercise_with_safe_cpu_parser() -> None:
         "service.sh",
         "adb install",
         "adb push",
+        "backoff",
         "set -- $stat_line",
     ):
         assert forbidden not in source, forbidden
@@ -183,6 +199,7 @@ def test_parser_preserves_bounded_exercise_and_recovery_evidence() -> None:
     assert bounded["process_identity_stable"] is True
     assert bounded["sample_count"] == 3
     assert bounded["exercise_request_count"] == 12
+    assert bounded["exercise_requests_attempted"] == 12
     assert bounded["exercise_requests_succeeded"] == 12
     assert bounded["recovery_wait_seconds"] == 2
     assert bounded["bounded_local_exercise_completed"] is True
@@ -218,6 +235,8 @@ def test_busy_queue_refuses_to_start_exercise() -> None:
     assert bounded["queue_clear"] is False
     assert bounded["process_set_exact"] is None
     assert bounded["sample_count"] == 0
+    assert bounded["exercise_requests_attempted"] == 0
+    assert bounded["exercise_requests_succeeded"] == 0
     assert bounded["bounded_local_exercise_completed"] is False
     assert bounded["synthetic_load_performed"] is False
     assert bounded["resource_headroom_measured"] is False
@@ -228,6 +247,10 @@ def test_malformed_or_contradictory_output_fails_closed() -> None:
     cases = (
         _measured_output() + b"raw_pid=123\n",
         _measured_output().replace(b"sample_count=3", b"sample_count=2"),
+        _measured_output().replace(
+            b"exercise_requests_attempted=12",
+            b"exercise_requests_attempted=11",
+        ),
         _measured_output().replace(
             b"exercise_requests_succeeded=12",
             b"exercise_requests_succeeded=11",
@@ -252,6 +275,10 @@ def test_malformed_or_contradictory_output_fails_closed() -> None:
             b"process_set_exact=unknown",
             b"process_set_exact=true",
         ),
+        _busy_output().replace(
+            b"exercise_requests_attempted=0",
+            b"exercise_requests_attempted=1",
+        ),
     )
     for raw in cases:
         try:
@@ -262,36 +289,43 @@ def test_malformed_or_contradictory_output_fails_closed() -> None:
             raise AssertionError("malformed resource evidence unexpectedly accepted")
 
 
-def test_transport_and_sampler_failures_remain_bounded() -> None:
+def _observe_nonzero(module, *, returncode: int, stdout: bytes):
+    result = SimpleNamespace(
+        status="completed",
+        returncode=returncode,
+        stdout=stdout,
+        stderr=b"",
+        stdout_truncated=False,
+        stderr_truncated=False,
+    )
+    return patch.object(
+        module.phone_target,
+        "_probe_root_capability",
+        return_value=None,
+    ), patch.object(
+        module.phone_target,
+        "_run_root_script",
+        return_value=result,
+    ), patch.object(
+        module.phone_target,
+        "_root_transport_failure_phase",
+        return_value=None,
+    )
+
+
+def test_sampler_failures_remain_bounded_without_parsing_raw_stdout() -> None:
     module = load_controller()
     for returncode, expected in (
         (22, "RESOURCE_PROCESS_SET_NOT_EXACT"),
-        (27, "RESOURCE_EXERCISE_REQUEST_FAILED"),
         (28, "RESOURCE_CPU_SAMPLE_INVALID"),
         (29, "RESOURCE_PROCESS_IDENTITY_CHANGED"),
-        (30, "RESOURCE_QUEUE_CHANGED"),
     ):
-        result = SimpleNamespace(
-            status="completed",
+        patches = _observe_nonzero(
+            module,
             returncode=returncode,
             stdout=b"sensitive raw sample",
-            stderr=b"",
-            stdout_truncated=False,
-            stderr_truncated=False,
         )
-        with patch.object(
-            module.phone_target,
-            "_probe_root_capability",
-            return_value=None,
-        ), patch.object(
-            module.phone_target,
-            "_run_root_script",
-            return_value=result,
-        ), patch.object(
-            module.phone_target,
-            "_root_transport_failure_phase",
-            return_value=None,
-        ):
+        with patches[0], patches[1], patches[2]:
             try:
                 module.observe_phone_resource_sanity(
                     "registered-secret",
@@ -299,11 +333,63 @@ def test_transport_and_sampler_failures_remain_bounded() -> None:
                 )
             except module.PhoneResourceSanityUnavailable as exc:
                 assert exc.failure_code == expected
+                assert exc.exercise_requests_attempted is None
+                assert exc.exercise_requests_succeeded is None
                 assert "sensitive" not in str(exc)
             else:
-                raise AssertionError(
-                    "nonzero resource sampler unexpectedly accepted"
+                raise AssertionError("nonzero resource sampler unexpectedly accepted")
+
+
+def test_request_failures_preserve_only_bounded_progress_and_classification() -> None:
+    module = load_controller()
+    for returncode, expected, attempted, succeeded in (
+        (27, "RESOURCE_EXERCISE_REQUEST_FAILED", 12, 12),
+        (30, "RESOURCE_QUEUE_CHANGED", 5, 4),
+        (31, "HTTP_RESPONSE_UNAVAILABLE_OR_NON_200", 4, 3),
+        (32, "STATUS_PAYLOAD_INVALID", 7, 6),
+    ):
+        patches = _observe_nonzero(
+            module,
+            returncode=returncode,
+            stdout=_progress_output(attempted, succeeded),
+        )
+        with patches[0], patches[1], patches[2]:
+            try:
+                module.observe_phone_resource_sanity(
+                    "registered-secret",
+                    admin_token="admin-secret",
                 )
+            except module.PhoneResourceSanityUnavailable as exc:
+                assert exc.failure_code == expected
+                assert exc.exercise_requests_attempted == attempted
+                assert exc.exercise_requests_succeeded == succeeded
+                assert "registered-secret" not in str(exc)
+                assert "admin-secret" not in str(exc)
+            else:
+                raise AssertionError("request diagnostic failure unexpectedly accepted")
+
+
+def test_malformed_request_progress_fails_closed_without_raw_leak() -> None:
+    module = load_controller()
+    for raw in (
+        b"sensitive raw status body",
+        _progress_output(13, 12),
+        _progress_output(3, 4),
+        _progress_output(3, 2) + b"raw_status=secret\n",
+    ):
+        patches = _observe_nonzero(module, returncode=31, stdout=raw)
+        with patches[0], patches[1], patches[2]:
+            try:
+                module.observe_phone_resource_sanity(
+                    "registered-secret",
+                    admin_token="admin-secret",
+                )
+            except module.PhoneResourceSanityUnavailable as exc:
+                assert exc.failure_code == "RESOURCE_OUTPUT_MALFORMED"
+                assert "sensitive" not in str(exc)
+                assert "secret" not in str(exc)
+            else:
+                raise AssertionError("malformed request progress unexpectedly accepted")
 
 
 def test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence() -> None:
@@ -326,7 +412,9 @@ def test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence() -> None
                 admin_token="admin-secret",
                 output=root / "measured.json",
             )
+        assert payload["schema"] == "stage4-phone-resource-sanity.v2"
         assert payload["classification"] == "MEASURED"
+        assert payload["observation"]["exercise_requests_attempted"] == 12
         assert payload["safety"]["synthetic_load_performed"] is True
         assert payload["safety"]["production_scale_load_performed"] is False
         text = (root / "measured.json").read_text(encoding="utf-8")
@@ -346,10 +434,13 @@ def test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence() -> None
                 output=root / "busy.json",
             )
         assert payload["classification"] == "BUSY"
+        assert payload["observation"]["exercise_requests_attempted"] == 0
         assert payload["safety"]["synthetic_load_performed"] is False
 
         failure = adapter.PhoneResourceSanityUnavailable(
-            "RESOURCE_CPU_SAMPLE_INVALID"
+            "STATUS_PAYLOAD_INVALID",
+            exercise_requests_attempted=4,
+            exercise_requests_succeeded=3,
         )
         with patch.object(
             adapter,
@@ -365,11 +456,33 @@ def test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence() -> None
                 output=root / "unknown.json",
             )
         assert payload["classification"] == "UNKNOWN"
-        assert payload["failure_code"] == "RESOURCE_CPU_SAMPLE_INVALID"
+        assert payload["failure_code"] == "STATUS_PAYLOAD_INVALID"
         assert payload["safety"]["synthetic_load_performed"] is None
+        assert payload["observation"]["exercise_request_count"] == 12
+        assert payload["observation"]["exercise_requests_attempted"] == 4
+        assert payload["observation"]["exercise_requests_succeeded"] == 3
         assert payload["observation"]["bounded_local_exercise_completed"] is None
         text = (root / "unknown.json").read_text(encoding="utf-8")
         assert "registered-secret" not in text and "admin-secret" not in text
+
+        failure = adapter.PhoneResourceSanityUnavailable(
+            "RESOURCE_CPU_SAMPLE_INVALID"
+        )
+        with patch.object(
+            adapter,
+            "observe_phone_resource_sanity",
+            side_effect=failure,
+        ):
+            payload = adapter.observe(
+                target="phone-production",
+                release_tag="v0.1.7",
+                controller_revision="d" * 40,
+                serial="registered-secret",
+                admin_token="admin-secret",
+                output=root / "unknown-no-progress.json",
+            )
+        assert payload["observation"]["exercise_requests_attempted"] is None
+        assert payload["observation"]["exercise_requests_succeeded"] is None
 
 
 def test_registry_uses_existing_read_only_extension_point_only() -> None:
@@ -416,16 +529,20 @@ def test_resource_workflow_is_standalone_serialized_and_bounded() -> None:
         "environment: phone-production",
         ".github/scripts/observe_phone_resource_sanity.py",
         "Run one bounded read-only local resource exercise",
-        "stage4-phone-resource-sanity.v1",
+        "stage4-phone-resource-sanity.v2",
         "stage4-phone-resource-sanity-${{ github.run_id }}-${{ github.run_attempt }}",
         "retention-days: 90",
         "sample_count') != 3",
         "exercise_request_count') != 12",
+        "exercise_requests_attempted",
+        "exercise_requests_succeeded",
         "recovery_wait_seconds') != 2",
         "synthetic_load_performed",
         "production_scale_load_performed",
         "external_network_traffic_performed",
         "performance_threshold_applied",
+        "HTTP_RESPONSE_UNAVAILABLE_OR_NON_200",
+        "STATUS_PAYLOAD_INVALID",
         "RESOURCE_CPU_SAMPLE_INVALID",
         "RESOURCE_PROCESS_IDENTITY_CHANGED",
         "RESOURCE_QUEUE_CHANGED",
@@ -453,7 +570,9 @@ def main() -> int:
         test_parser_preserves_bounded_exercise_and_recovery_evidence,
         test_busy_queue_refuses_to_start_exercise,
         test_malformed_or_contradictory_output_fails_closed,
-        test_transport_and_sampler_failures_remain_bounded,
+        test_sampler_failures_remain_bounded_without_parsing_raw_stdout,
+        test_request_failures_preserve_only_bounded_progress_and_classification,
+        test_malformed_request_progress_fails_closed_without_raw_leak,
         test_adapter_writes_secret_safe_measured_busy_and_unknown_evidence,
         test_registry_uses_existing_read_only_extension_point_only,
         test_resource_workflow_is_standalone_serialized_and_bounded,
