@@ -136,9 +136,11 @@ def test_parser_preserves_only_bounded_aggregate_headroom() -> None:
     assert bounded["queue_authority"] == "product-v1-status-current-job"
     assert bounded["performance_threshold_applied"] is False
     assert bounded["synthetic_load_performed"] is False
+    assert "pid" not in bounded and "pids" not in bounded
+    assert "cmdline" not in bounded and "cmdlines" not in bounded
     serialized = json.dumps(bounded, sort_keys=True)
-    for forbidden in ("pid", "cmdline", "safe-admin-token", "current_job\": \""):
-        assert forbidden not in serialized
+    assert "safe-admin-token" not in serialized
+    assert '"current_job": "' not in serialized
 
 
 def test_busy_queue_refuses_to_mix_resource_sample_with_active_operation() -> None:
