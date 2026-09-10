@@ -256,6 +256,7 @@ jobs:
           if deploy.get('recovery_policy') != 'UNKNOWN-read-only-reconcile-no-blind-retry':
               raise SystemExit('deployment UNKNOWN recovery drifted')
 
+          expected_recovery_pattern = r'^/recover-quarantined (?P<target>phone-production) (?P<release>v0\.1\.8) (?P<quarantined_request_id>req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a)$'
           recover = destructive['recover-quarantined-product-release']
           if (
               recover.get('handler') != 'workflow_call'
@@ -266,15 +267,27 @@ jobs:
               or recover.get('requires_release') is not True
               or recover.get('allowed_targets') != ['phone-production']
               or recover.get('physical_domains') != ['runtime']
-              or recover.get('authority_policy') != 'private-issue1-owner+controller-main-exact+exact-quarantined-v017+exact-prior-recovery-terminal'
-              or recover.get('idempotency_policy') != 'single-run-attempt+bounded-lineage-generation+durable-semantic-quarantine-recovery-ledger'
-              or recover.get('semantic_identity_policy') != 'quarantined-deployment-terminal+prior-recovery-terminal+command-arguments'
+              or recover.get('authority_policy') != 'private-issue1-owner+controller-main-exact+exact-quarantined-v018-request+durable-terminal-lineage'
+              or recover.get('idempotency_policy') != 'single-run-attempt+durable-semantic-quarantine-recovery-ledger+no-repeat-after-lineage'
+              or recover.get('semantic_identity_policy') != 'quarantined-deployment-terminal+command-arguments'
+              or recover.get('evidence_policy') != 'RECOVERY_INTENT+RECOVERY_TERMINAL+INDEPENDENT_POSTCONDITION'
               or recover.get('recovery_policy') != 'UNKNOWN-no-blind-retry-owner-checkpoint-required'
               or recover.get('workflow') != '.github/workflows/quarantined-release-recovery.yml'
-              or 'v0\\.1\\.7' not in recover.get('pattern', '')
-              or '74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7' not in recover.get('pattern', '')
+              or recover.get('pattern') != expected_recovery_pattern
           ):
-              raise SystemExit('Stage 3 quarantine recovery route safety contract differs')
+              raise SystemExit('Stage 5 quarantine recovery ingress safety contract differs')
+          recovery_re = re.compile(expected_recovery_pattern)
+          current_recovery_command = '/recover-quarantined phone-production v0.1.8 req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a'
+          if recovery_re.fullmatch(current_recovery_command) is None:
+              raise SystemExit('current Stage 5 quarantine recovery command is not exactly admitted')
+          for forbidden_recovery_command in (
+              '/recover-quarantined phone-production v0.1.7 req-sha256:74489a27b4c845b9060056af498090beded81db009e05f0290091af846c4e5d7',
+              '/recover-quarantined phone-production v0.1.7 req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a',
+              '/recover-quarantined vm-production v0.1.8 req-sha256:063412d66b1b05a6649ee44dc1f5261696cd7e6be6facbc9a7faf84335f6a95a',
+              '/recover-quarantined phone-production v0.1.8 req-sha256:' + ('0' * 64),
+          ):
+              if recovery_re.fullmatch(forbidden_recovery_command) is not None:
+                  raise SystemExit('quarantine recovery ingress admitted non-current incident')
 
           verify = next((item for item in active if item.get('id') == 'verify-product-release'), None)
           if verify is None:
@@ -931,7 +944,7 @@ jobs:
               'environment: phone-production',
               'prepare_quarantine_recovery.py',
               'run_quarantine_recovery.py',
-              'STAGE3_QUARANTINE_RECOVERY_ACCEPTED',
+              'QUARANTINE_RECOVERY_ACCEPTED_WITH_INDEPENDENT_POSTCONDITION',
           ):
               if required not in quarantine_recovery:
                   raise SystemExit('quarantine recovery workflow invariant missing: ' + required)
@@ -1005,6 +1018,6 @@ jobs:
           print('STAGE4_PHONE_TRANSPORT_PREFLIGHT_BOUNDARY_OK')
           print('STAGE4_RUNNER_TRANSPORT_OBSERVATION_BOUNDARY_OK')
           print('DEPLOYMENT_CONTROLLER_BOUNDARY_OK')
-          print('STAGE3_QUARANTINE_RECOVERY_BOUNDARY_OK')
+          print('STAGE5_QUARANTINE_RECOVERY_INGRESS_BOUNDARY_OK')
           print('VM_TARGET_DEFERRED_OK')
           PY
