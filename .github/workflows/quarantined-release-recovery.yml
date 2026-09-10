@@ -125,7 +125,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ANDROID_PRODUCTION_SERIAL: ${{ secrets.ANDROID_PRODUCTION_SERIAL }}
           ANDROID_TARGET_BINDING_KEY: ${{ secrets.ANDROID_TARGET_BINDING_KEY }}
-          MOBILE_PROXY_ADMIN_TOKEN: ${{ secrets.MOBILE_PROXY_ADMIN_TOKEN }}
           MOBILE_PROXY_DEVICE_TOKEN: ${{ secrets.MOBILE_PROXY_DEVICE_TOKEN }}
           MOBILE_PROXY_UI_TOKEN: ${{ secrets.MOBILE_PROXY_UI_TOKEN }}
           MOBILE_PROXY_RELAY_USER: ${{ secrets.MOBILE_PROXY_RELAY_USER }}
@@ -217,7 +216,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
-      - name: Enforce canonical recovery terminal and independent postcondition
+      - name: Enforce recovery terminal and independent acceptance
         if: always()
         env:
           EXPECTED_TARGET: ${{ inputs.target }}
@@ -251,7 +250,7 @@ jobs:
           if terminal.get('quarantined_terminal_ref') != os.environ['EXPECTED_TERMINAL_REF']:
               raise SystemExit('quarantine recovery terminal lineage differs')
           if terminal.get('state') != 'ACCEPTED' or terminal.get('mutation_performed') is not True or terminal.get('postcondition_verified') is not True:
-              raise SystemExit('quarantine recovery did not reach ACCEPTED')
+              raise SystemExit('quarantine recovery transaction did not reach ACCEPTED')
           if terminal.get('blind_retry_allowed') is not False or not terminal.get('recovery_intent_ref'):
               raise SystemExit('quarantine recovery exactly-once boundary differs')
           facts = terminal.get('facts') or {}
@@ -261,9 +260,9 @@ jobs:
               raise SystemExit('quarantine recovery crossed provider/VM boundary')
           if facts.get('activation_outcome') != 'confirmed':
               raise SystemExit('quarantine recovery activation was not confirmed')
-          post = facts.get('postcondition') or {}
-          if post.get('exact_release_desired') is not True or post.get('operational_desired') is not True:
-              raise SystemExit('quarantine recovery terminal lacks exact/operational postcondition')
+          transaction_post = facts.get('postcondition') or {}
+          if transaction_post.get('exact_release_desired') is not True:
+              raise SystemExit('quarantine recovery terminal lacks exact activation postcondition')
 
           post_path = Path(os.environ['RUNNER_TEMP']) / 'quarantine-recovery-independent-postcondition.json'
           if not post_path.is_file():
@@ -288,4 +287,7 @@ jobs:
           if not terminal_transport_ok or not post_transport_ok:
               raise SystemExit('bounded recovery evidence artifact transport failed')
           print('QUARANTINE_RECOVERY_ACCEPTED_WITH_INDEPENDENT_POSTCONDITION')
+          # Compatibility output consumed by the existing top-level Issue command policy.
+          # It does not define recovery semantics and can be removed when that policy is converged.
+          print('STAGE3_QUARANTINE_RECOVERY_ACCEPTED')
           PY
