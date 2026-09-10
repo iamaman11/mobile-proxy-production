@@ -29,7 +29,10 @@ _RETURN_CODE_FAILURE = {
     28: "RESOURCE_CPU_SAMPLE_INVALID",
     29: "RESOURCE_PROCESS_IDENTITY_CHANGED",
     30: "RESOURCE_QUEUE_CHANGED",
+    31: "HTTP_RESPONSE_UNAVAILABLE_OR_NON_200",
+    32: "STATUS_PAYLOAD_INVALID",
 }
+_PROGRESS_RETURN_CODES = frozenset({27, 30, 31, 32})
 
 _SAMPLE_FIELDS = (
     "memory_total_kib",
@@ -45,9 +48,17 @@ _SAMPLE_FIELDS = (
 
 
 class PhoneResourceSanityUnavailable(phone_target.PhoneTargetUnavailable):
-    def __init__(self, failure_code: str) -> None:
+    def __init__(
+        self,
+        failure_code: str,
+        *,
+        exercise_requests_attempted: int | None = None,
+        exercise_requests_succeeded: int | None = None,
+    ) -> None:
         super().__init__(_UNAVAILABLE)
         self.failure_code = failure_code
+        self.exercise_requests_attempted = exercise_requests_attempted
+        self.exercise_requests_succeeded = exercise_requests_succeeded
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class PhoneResourceSanityObservation:
     sing_box_count: int | None
     sample_count: int
     exercise_request_count: int
+    exercise_requests_attempted: int
     exercise_requests_succeeded: int
     recovery_wait_seconds: int
     bounded_local_exercise_completed: bool
@@ -369,6 +381,8 @@ ROOT={shlex.quote(_ROOT)}
 ADMIN_TOKEN={token}
 EXERCISE_REQUEST_COUNT={_EXERCISE_REQUEST_COUNT}
 RECOVERY_WAIT_SECONDS={_RECOVERY_WAIT_SECONDS}
+exercise_requests_attempted=0
+exercise_requests_succeeded=0
 
 BB_BIN=""
 if [ -x /data/adb/magisk/busybox ]; then
@@ -412,7 +426,7 @@ read_queue_state() {{
   status_line="$(printf '%s\\n' "$status_raw" | "$BB_BIN" head -n 1 | "$BB_BIN" tr -d '\\r')"
   case "$status_line" in
     'HTTP/1.1 200 '*|'HTTP/1.0 200 '*) ;;
-    *) status_raw=''; return 21 ;;
+    *) status_raw=''; return 31 ;;
   esac
   if printf '%s' "$status_raw" | "$BB_BIN" grep -Eq '\"current_job\"[[:space:]]*:[[:space:]]*null'; then
     status_raw=''
@@ -425,7 +439,15 @@ read_queue_state() {{
     return 0
   fi
   status_raw=''
-  return 21
+  return 32
+}}
+
+fail_with_request_progress() {{
+  failure_rc="$1"
+  ADMIN_TOKEN=''
+  printf 'exercise_requests_attempted=%s\\n' "$exercise_requests_attempted"
+  printf 'exercise_requests_succeeded=%s\\n' "$exercise_requests_succeeded"
+  exit "$failure_rc"
 }}
 
 find_processes() {{
@@ -568,7 +590,7 @@ collect_snapshot() {{
 
 queue_state="$(read_queue_state)"
 queue_rc=$?
-[ "$queue_rc" -eq 0 ] || exit "$queue_rc"
+[ "$queue_rc" -eq 0 ] || fail_with_request_progress "$queue_rc"
 if [ "$queue_state" = busy ]; then
   ADMIN_TOKEN=''
   printf 'classification=BUSY\\n'
@@ -581,6 +603,7 @@ if [ "$queue_state" = busy ]; then
   printf 'sing_box_count=unknown\\n'
   printf 'sample_count=0\\n'
   printf 'exercise_request_count=%s\\n' "$EXERCISE_REQUEST_COUNT"
+  printf 'exercise_requests_attempted=0\\n'
   printf 'exercise_requests_succeeded=0\\n'
   printf 'recovery_wait_seconds=%s\\n' "$RECOVERY_WAIT_SECONDS"
   printf 'bounded_local_exercise_completed=false\\n'
@@ -604,12 +627,12 @@ baseline_logs_kib="$logs_kib"
 baseline_runtime_cpu_ticks="$runtime_cpu_ticks"
 baseline_system_cpu_ticks="$system_cpu_ticks"
 
-exercise_requests_succeeded=0
-while [ "$exercise_requests_succeeded" -lt "$EXERCISE_REQUEST_COUNT" ]; do
+while [ "$exercise_requests_attempted" -lt "$EXERCISE_REQUEST_COUNT" ]; do
+  exercise_requests_attempted=$((exercise_requests_attempted + 1))
   queue_state="$(read_queue_state)"
   queue_rc=$?
-  [ "$queue_rc" -eq 0 ] || exit 27
-  [ "$queue_state" = clear ] || exit 30
+  [ "$queue_rc" -eq 0 ] || fail_with_request_progress "$queue_rc"
+  [ "$queue_state" = clear ] || fail_with_request_progress 30
   exercise_requests_succeeded=$((exercise_requests_succeeded + 1))
 done
 
@@ -630,11 +653,11 @@ exercise_logs_kib="$logs_kib"
 exercise_runtime_cpu_ticks="$runtime_cpu_ticks"
 exercise_system_cpu_ticks="$system_cpu_ticks"
 
-"$BB_BIN" sleep "$RECOVERY_WAIT_SECONDS" || exit 27
+"$BB_BIN" sleep "$RECOVERY_WAIT_SECONDS" || fail_with_request_progress 27
 queue_state="$(read_queue_state)"
 queue_rc=$?
-[ "$queue_rc" -eq 0 ] || exit "$queue_rc"
-[ "$queue_state" = clear ] || exit 30
+[ "$queue_rc" -eq 0 ] || fail_with_request_progress "$queue_rc"
+[ "$queue_state" = clear ] || fail_with_request_progress 30
 
 collect_snapshot
 snapshot_rc=$?
@@ -673,6 +696,7 @@ printf 'host_daemon_count=%s\\n' "$host_daemon_count"
 printf 'sing_box_count=%s\\n' "$sing_box_count"
 printf 'sample_count=3\\n'
 printf 'exercise_request_count=%s\\n' "$EXERCISE_REQUEST_COUNT"
+printf 'exercise_requests_attempted=%s\\n' "$exercise_requests_attempted"
 printf 'exercise_requests_succeeded=%s\\n' "$exercise_requests_succeeded"
 printf 'recovery_wait_seconds=%s\\n' "$RECOVERY_WAIT_SECONDS"
 printf 'bounded_local_exercise_completed=true\\n'
@@ -727,6 +751,35 @@ def _parse_uint(raw: str, *, maximum: int = _MAX_KIB) -> int | None:
     return value
 
 
+def _parse_failure_progress(raw: bytes) -> tuple[int, int]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PhoneResourceSanityUnavailable("RESOURCE_OUTPUT_MALFORMED") from exc
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            raise PhoneResourceSanityUnavailable("RESOURCE_OUTPUT_MALFORMED")
+        key, value = line.split("=", 1)
+        if not key or key in values:
+            raise PhoneResourceSanityUnavailable("RESOURCE_OUTPUT_MALFORMED")
+        values[key] = value
+    if set(values) != {
+        "exercise_requests_attempted",
+        "exercise_requests_succeeded",
+    }:
+        raise PhoneResourceSanityUnavailable("RESOURCE_OUTPUT_MALFORMED")
+    attempted = _parse_uint(
+        values["exercise_requests_attempted"], maximum=_EXERCISE_REQUEST_COUNT
+    )
+    succeeded = _parse_uint(
+        values["exercise_requests_succeeded"], maximum=_EXERCISE_REQUEST_COUNT
+    )
+    if attempted is None or succeeded is None or succeeded > attempted:
+        raise PhoneResourceSanityUnavailable("RESOURCE_OUTPUT_MALFORMED")
+    return attempted, succeeded
+
+
 def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
     try:
         text = raw.decode("utf-8")
@@ -752,6 +805,7 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
         "sing_box_count",
         "sample_count",
         "exercise_request_count",
+        "exercise_requests_attempted",
         "exercise_requests_succeeded",
         "recovery_wait_seconds",
         "bounded_local_exercise_completed",
@@ -779,6 +833,9 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
     request_count = _parse_uint(
         values["exercise_request_count"], maximum=_EXERCISE_REQUEST_COUNT
     )
+    requests_attempted = _parse_uint(
+        values["exercise_requests_attempted"], maximum=_EXERCISE_REQUEST_COUNT
+    )
     requests_succeeded = _parse_uint(
         values["exercise_requests_succeeded"], maximum=_EXERCISE_REQUEST_COUNT
     )
@@ -790,6 +847,7 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
         queue_clear,
         sample_count,
         request_count,
+        requests_attempted,
         requests_succeeded,
         recovery_wait,
         exercise_completed,
@@ -804,6 +862,7 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
             or counts != (None, None, None, None)
             or sample_count != 0
             or request_count != _EXERCISE_REQUEST_COUNT
+            or requests_attempted != 0
             or requests_succeeded != 0
             or recovery_wait != _RECOVERY_WAIT_SECONDS
             or exercise_completed is not False
@@ -820,6 +879,7 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
             sing_box_count=None,
             sample_count=0,
             exercise_request_count=_EXERCISE_REQUEST_COUNT,
+            exercise_requests_attempted=0,
             exercise_requests_succeeded=0,
             recovery_wait_seconds=_RECOVERY_WAIT_SECONDS,
             bounded_local_exercise_completed=False,
@@ -832,6 +892,7 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
         or counts != (1, 1, 1, 1)
         or sample_count != 3
         or request_count != _EXERCISE_REQUEST_COUNT
+        or requests_attempted != _EXERCISE_REQUEST_COUNT
         or requests_succeeded != _EXERCISE_REQUEST_COUNT
         or recovery_wait != _RECOVERY_WAIT_SECONDS
         or exercise_completed is not True
@@ -898,6 +959,7 @@ def _parse_output(raw: bytes) -> PhoneResourceSanityObservation:
         sing_box_count=1,
         sample_count=3,
         exercise_request_count=_EXERCISE_REQUEST_COUNT,
+        exercise_requests_attempted=_EXERCISE_REQUEST_COUNT,
         exercise_requests_succeeded=_EXERCISE_REQUEST_COUNT,
         recovery_wait_seconds=_RECOVERY_WAIT_SECONDS,
         bounded_local_exercise_completed=True,
@@ -933,6 +995,13 @@ def observe_phone_resource_sanity(
     if result.returncode != 0:
         failure = _RETURN_CODE_FAILURE.get(result.returncode)
         if failure is not None:
+            if result.returncode in _PROGRESS_RETURN_CODES:
+                attempted, succeeded = _parse_failure_progress(result.stdout)
+                raise PhoneResourceSanityUnavailable(
+                    failure,
+                    exercise_requests_attempted=attempted,
+                    exercise_requests_succeeded=succeeded,
+                )
             raise PhoneResourceSanityUnavailable(failure)
         raise phone_target.PhoneTargetDiagnosticFailure(
             phone_target.PhoneFailurePhase.ROOT_SCRIPT_NONZERO,
